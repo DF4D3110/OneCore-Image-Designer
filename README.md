@@ -57,6 +57,19 @@
 - **包依赖关系分析器**
 - **组件存储完整性校验** — DCM 解压 + 哈希比对
 
+## 致谢与开源参考
+
+本项目在开发过程中参考并复用了以下开源项目的设计与组件，在此致谢：
+
+| 项目 | 用途 | 链接 |
+|------|------|------|
+| **DevImgGen** | 部分设计思路与镜像生成流程参考 | [mediaexplorer74/DevImgGen](https://github.com/mediaexplorer74/DevImgGen) |
+| **MobilePackageGen** | 部分包生成组件与封装逻辑复用 | [MobileTooling/MobilePackageGen](https://github.com/MobileTooling/MobilePackageGen) |
+| **wmpt**（未发布） | 设计与实现参考 | [lzw29107](https://github.com/lzw29107) |
+| **wcpex** | 设计与实现参考 | [smx-smx/wcpex](https://github.com/smx-smx/wcpex) |
+
+> 上述项目的代码与设计均遵循其各自开源许可证。如有遗漏或不当引用，请提交 Issue 告知。
+
 ## 构建和运行
 
 ```bash
