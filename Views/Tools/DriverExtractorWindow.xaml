@@ -1,0 +1,132 @@
+<Window x:Class="OneCore_Image_Designer.Views.Tools.DriverExtractorWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="驱动提取与整理" Height="650" Width="1000"
+        WindowStartupLocation="CenterOwner"
+        Background="#FFF5F5F5">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 标题 -->
+        <TextBlock Grid.Row="0" Text="🚗 驱动提取与整理" FontSize="16" FontWeight="Bold" Foreground="#FF2C5AA0" Margin="0,0,0,8"/>
+
+        <!-- 工具栏：路径输入 -->
+        <Border Grid.Row="1" Background="White" BorderBrush="#FFDDDDDD" BorderThickness="1" CornerRadius="4" Padding="8" Margin="0,0,0,8">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="镜像目录:" VerticalAlignment="Center" Margin="0,0,8,4" FontSize="12"/>
+                <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtImagePath" Height="28" VerticalContentAlignment="Center" Margin="0,0,8,4"
+                         Text="C:\Users\DELL\Desktop\MobilePackageGen_Output\component"/>
+                <Button Grid.Row="0" Grid.Column="2" Content="📂" Width="32" Height="28" Margin="0,0,0,4" Click="BrowseImage_Click"/>
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="输出目录:" VerticalAlignment="Center" Margin="0,0,8,0" FontSize="12"/>
+                <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtOutputPath" Height="28" VerticalContentAlignment="Center" Margin="0,0,8,0"
+                         Text="C:\Users\DELL\Desktop\Drivers_Extracted"/>
+                <Button Grid.Row="1" Grid.Column="2" Content="📂" Width="32" Height="28" Click="BrowseOutput_Click"/>
+            </Grid>
+        </Border>
+
+        <!-- 操作按钮 -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,8" HorizontalAlignment="Right">
+            <Button Content="🔍 扫描驱动" Height="28" Padding="16,0" Background="#FF2C5AA0" Foreground="White" BorderThickness="0"
+                    Click="Scan_Click"/>
+            <Button Content="📦 提取选中" Height="28" Padding="16,0" Margin="8,0,0,0" Background="#FF4CAF50" Foreground="White" BorderThickness="0"
+                    Click="ExtractSelected_Click" IsEnabled="{Binding HasSelectedDrivers}"/>
+            <Button Content="📦 提取全部" Height="28" Padding="16,0" Margin="8,0,0,0" Background="#FF4CAF50" Foreground="White" BorderThickness="0"
+                    Click="ExtractAll_Click" IsEnabled="{Binding HasDrivers}"/>
+            <CheckBox x:Name="ChkSelectAll" Content="全选" VerticalAlignment="Center" Margin="16,0,0,0" Checked="ChkSelectAll_Checked" Unchecked="ChkSelectAll_Unchecked"/>
+        </StackPanel>
+
+        <!-- 统计信息 -->
+        <Border Grid.Row="3" Background="#FFE8F5E9" BorderBrush="#FFA5D6A7" BorderThickness="1" CornerRadius="4"
+                Padding="8" Margin="0,0,0,8" Visibility="{Binding HasDrivers, Converter={StaticResource BooleanToVisibilityConverter}}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0">
+                    <TextBlock Text="驱动包" FontSize="10" Foreground="#FF666666"/>
+                    <TextBlock Text="{Binding TotalPackages}" FontSize="16" FontWeight="Bold" Foreground="#FF2C5AA0"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1">
+                    <TextBlock Text="硬件ID" FontSize="10" Foreground="#FF666666"/>
+                    <TextBlock Text="{Binding TotalHardwareIds}" FontSize="16" FontWeight="Bold" Foreground="#FF2C5AA0"/>
+                </StackPanel>
+                <StackPanel Grid.Column="2">
+                    <TextBlock Text="已选中" FontSize="10" Foreground="#FF666666"/>
+                    <TextBlock Text="{Binding SelectedCount}" FontSize="16" FontWeight="Bold" Foreground="#FFF57F17"/>
+                </StackPanel>
+                <StackPanel Grid.Column="3">
+                    <TextBlock Text="总大小" FontSize="10" Foreground="#FF666666"/>
+                    <TextBlock Text="{Binding TotalSizeDisplay}" FontSize="14" FontWeight="Bold" Foreground="#FF2C5AA0"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- 驱动列表 -->
+        <Border Grid.Row="4" Background="White" BorderBrush="#FFDDDDDD" BorderThickness="1" CornerRadius="4" Margin="0,0,0,8">
+            <DockPanel>
+                <TextBox DockPanel.Dock="Top" x:Name="TxtFilter" Height="26" Margin="8,8,8,4" VerticalContentAlignment="Center"
+                         TextChanged="TxtFilter_TextChanged" ToolTip="按驱动名/硬件ID/提供商过滤"/>
+                <ListView x:Name="LstDrivers" SelectionChanged="LstDrivers_SelectionChanged">
+                    <ListView.View>
+                        <GridView>
+                            <GridViewColumn Width="40">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}" Checked="DriverCheckBox_Checked" Unchecked="DriverCheckBox_Unchecked"/>
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                            <GridViewColumn Header="类名" Width="100" DisplayMemberBinding="{Binding Class}"/>
+                            <GridViewColumn Header="INF文件" Width="150" DisplayMemberBinding="{Binding InfFileName}"/>
+                            <GridViewColumn Header="描述" Width="200" DisplayMemberBinding="{Binding Description}"/>
+                            <GridViewColumn Header="提供商" Width="100" DisplayMemberBinding="{Binding Provider}"/>
+                            <GridViewColumn Header="版本" Width="100" DisplayMemberBinding="{Binding DriverVersion}"/>
+                            <GridViewColumn Header="硬件ID" Width="80">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding HardwareIdCount}" HorizontalAlignment="Center"/>
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                            <GridViewColumn Header="大小" Width="80">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding SizeDisplay}" HorizontalAlignment="Right"/>
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                        </GridView>
+                    </ListView.View>
+                </ListView>
+            </DockPanel>
+        </Border>
+
+        <!-- 状态栏 -->
+        <Border Grid.Row="5" Background="#FFE8E8E8" Padding="8,4" CornerRadius="2">
+            <DockPanel>
+                <TextBlock x:Name="TxtStatus" Text="就绪" FontSize="11" Foreground="#FF666666" VerticalAlignment="Center"/>
+            </DockPanel>
+        </Border>
+    </Grid>
+</Window>

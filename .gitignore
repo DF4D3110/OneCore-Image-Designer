@@ -1,0 +1,16 @@
+bin/
+obj/
+**/bin/
+**/obj/
+**/build/
+**/intermediate/
+**/RemakeAppxTestContent/Minimal/App.appx
+.vs/
+.idea/
+*.user
+*.suo
+*.log
+*.tmp
+TestResults/
+UupBridge/bin/
+UupBridge/obj/

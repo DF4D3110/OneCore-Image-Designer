@@ -1,0 +1,50 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net8.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+    </PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="System.IO.Hashing" Version="10.0.0" />
+		<PackageReference Include="Zafiro.DivineBytes" Version="41.2.10" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\DeflateBlockCompressor\DeflateBlockCompressor.csproj" />
+	</ItemGroup>
+    
+    <ItemGroup>
+      <None Update="RemakeAppxTestContent\i386\appxpackaging.dll">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </None>
+      <None Update="RemakeAppxTestContent\i386\makeappx.exe">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </None>
+      <None Update="RemakeAppxTestContent\i386\Microsoft.Diagnostics.Tracing.EventSource.dll">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </None>
+      <None Update="RemakeAppxTestContent\i386\Microsoft.Windows.Build.Appx.AppxPackaging.dll.manifest">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </None>
+      <None Update="RemakeAppxTestContent\i386\Microsoft.Windows.Build.Appx.OpcServices.dll.manifest">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </None>
+      <None Update="RemakeAppxTestContent\i386\opcservices.dll">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </None>
+      <None Update="RemakeAppxTestContent\Minimal\Contents\AppxManifest.xml">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </None>
+      <None Update="RemakeAppxTestContent\Minimal\Contents\Assets\Square150x150Logo.png">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </None>
+      <None Update="RemakeAppxTestContent\Minimal\Contents\Assets\Square44x44Logo.png">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </None>
+      <None Update="RemakeAppxTestContent\Minimal\Contents\Assets\StoreLogo.png">
+        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      </None>
+    </ItemGroup>
+</Project>

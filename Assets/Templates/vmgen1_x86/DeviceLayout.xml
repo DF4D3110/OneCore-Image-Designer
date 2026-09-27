@@ -1,0 +1,66 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<DeviceLayout xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns="http://schemas.microsoft.com/embedded/2004/10/ImageUpdate">
+  <Partitions>
+    <Partition>
+      <Name>EFIESP</Name>
+      <FileSystem>FAT</FileSystem>
+      <TotalSectors>65536</TotalSectors>
+      <Type>0xEF</Type>
+      <Bootable>true</Bootable>
+      <RequiredToFlash>true</RequiredToFlash>
+    </Partition>
+    <Partition>
+      <Name>DPP</Name>
+      <Type>0x2C</Type>
+      <TotalSectors>20480</TotalSectors>
+      <FileSystem>FAT</FileSystem>
+      <RequiredToFlash>true</RequiredToFlash>
+    </Partition>
+    <Partition>
+      <Name>BP</Name>
+      <TotalSectors>2048</TotalSectors>
+      <Type>0x4d</Type>
+      <Bootable>true</Bootable>
+      <RequiredToFlash>true</RequiredToFlash>
+      <SingleSectorAlignment>true</SingleSectorAlignment>
+    </Partition>
+    <Partition>
+      <Name>MainOS</Name>
+      <Type>0x28</Type>
+      <!-- ~1.5GB free -->
+      <MinFreeSectors>3145728</MinFreeSectors>
+      <FileSystem>NTFS</FileSystem>
+      <PrepareFveMetadata>true</PrepareFveMetadata>
+    </Partition>
+    <Partition>
+      <Name>BSP</Name>
+      <Type>0x2B</Type>
+      <MinFreeSectors>524288</MinFreeSectors>
+      <FileSystem>NTFS</FileSystem>
+      <PrepareFveMetadata>true</PrepareFveMetadata>
+    </Partition>
+    <Partition>
+      <Name>PreInstalled</Name>
+      <Type>0x2A</Type>
+      <TotalSectors>4194304</TotalSectors>
+      <FileSystem>NTFS</FileSystem>
+    </Partition>
+    <Partition>
+      <Name>OSData</Name>
+      <Type>0x29</Type>
+      <!-- ~10GB free -->
+      <MinFreeSectors>20971520</MinFreeSectors>
+      <FileSystem>NTFS</FileSystem>
+      <AttachDriveLetter>true</AttachDriveLetter>
+    </Partition>
+    <Partition>
+      <Name>Data</Name>
+      <Type>0x07</Type>
+      <UseAllSpace>true</UseAllSpace>
+      <FileSystem>NTFS</FileSystem>
+    </Partition>
+  </Partitions>
+  <DefaultPartitionByteAlignment>0x1000</DefaultPartitionByteAlignment>
+  <SectorSize>512</SectorSize>
+  <ChunkSize>128</ChunkSize>
+</DeviceLayout>

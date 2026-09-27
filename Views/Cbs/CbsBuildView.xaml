@@ -1,0 +1,103 @@
+<UserControl x:Class="OneCore_Image_Designer.Views.Cbs.CbsBuildView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:conv="clr-namespace:OneCore_Image_Designer.Converters"
+             Background="{StaticResource AppBackground}"
+             FontSize="13">
+    <UserControl.Resources>
+        <conv:BooleanToVisibilityConverter x:Key="B2V"/>
+        <conv:InverseBooleanToVisibilityConverter x:Key="InvB2V"/>
+        <Style x:Key="Lbl" TargetType="TextBlock">
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+            <Setter Property="Foreground" Value="{StaticResource ICDSubtle}"/>
+        </Style>
+        <Style x:Key="Tool" TargetType="Button">
+            <Setter Property="Padding" Value="10,4"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+        </Style>
+    </UserControl.Resources>
+
+    <Grid Margin="14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>   <!-- 说明 -->
+            <RowDefinition Height="*"/>      <!-- 主体两栏 -->
+            <RowDefinition Height="Auto"/>   <!-- 输出目录 + 构建 -->
+            <RowDefinition Height="Auto"/>   <!-- 状态 -->
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Margin="0,0,0,10" TextWrapping="Wrap" Foreground="{StaticResource ICDSubtle}"
+                   Text="CBS 构建：把一组包 CAB 按其 update.mum 声明的目标路径展开为目录树（含 Windows\WinSxS 存储、servicing\Packages、System32\catroot 等）。提供 DeviceLayout（XML 或布局 CAB）时按 diskX\PartitionN-分区名 组织多盘/多分区，否则平铺。"/>
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="460"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- 左：输入 -->
+            <DockPanel Grid.Column="0" Margin="0,0,10,0">
+                <GroupBox DockPanel.Dock="Top" Header="包来源" Padding="8">
+                    <StackPanel>
+                        <WrapPanel Margin="0,0,0,6">
+                            <Button Style="{StaticResource Tool}" Content="＋ 选择包 CAB…" Command="{Binding AddCabsCommand}"/>
+                            <Button Style="{StaticResource Tool}" Content="扫描文件夹…" Command="{Binding ScanFolderCommand}"/>
+                            <Button Style="{StaticResource Tool}" Content="从 FM 解析…" Command="{Binding LoadFromFmCommand}"/>
+                            <Button Style="{StaticResource Tool}" Content="清空" Command="{Binding ClearCabsCommand}"/>
+                        </WrapPanel>
+                        <ListBox ItemsSource="{Binding Cabs}" Height="220" FontFamily="Consolas" FontSize="12"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 ToolTip="右键或删除按钮可移除；每项一个待构建包">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <DockPanel>
+                                        <Button DockPanel.Dock="Right" Content="✕" Width="22" Padding="0" BorderThickness="0"
+                                                Background="Transparent" Cursor="Hand"
+                                                Command="{Binding DataContext.RemoveCabCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                                CommandParameter="{Binding}"/>
+                                        <TextBlock Text="{Binding}" TextTrimming="CharacterEllipsis" ToolTip="{Binding}" VerticalAlignment="Center"/>
+                                    </DockPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </StackPanel>
+                </GroupBox>
+
+                <GroupBox DockPanel.Dock="Top" Header="设备布局（可选：启用 disk/分区 分层）" Padding="8" Margin="0,8,0,0">
+                    <DockPanel>
+                        <Button DockPanel.Dock="Right" Content="清除" Command="{Binding ClearLayoutCommand}" Style="{StaticResource Tool}" Margin="0,0,0,0"/>
+                        <Button DockPanel.Dock="Right" Content="选择…" Command="{Binding PickLayoutCommand}" Style="{StaticResource Tool}" Margin="0,0,8,0"/>
+                        <TextBox Text="{Binding LayoutCabPath, UpdateSourceTrigger=PropertyChanged}" Height="26" VerticalContentAlignment="Center"
+                                 ToolTip="DeviceLayout.xml 或布局 .cab（可被『从 FM 解析』自动填入）"/>
+                    </DockPanel>
+                </GroupBox>
+            </DockPanel>
+
+            <!-- 右：结果树 -->
+            <GroupBox Grid.Column="1" Header="输出目录树（构建后）" Padding="6">
+                <Grid>
+                    <TextBlock Text="（尚未构建）" Foreground="{StaticResource ICDSubtle}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Visibility="{Binding HasResult, Converter={StaticResource InvB2V}}"/>
+                    <TextBox Text="{Binding TreeText, Mode=OneWay}" IsReadOnly="True"
+                             FontFamily="Consolas" FontSize="12" BorderThickness="0"
+                             VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                             Visibility="{Binding HasResult, Converter={StaticResource B2V}}"/>
+                </Grid>
+            </GroupBox>
+        </Grid>
+
+        <DockPanel Grid.Row="2" Margin="0,10,0,0">
+            <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+                <Button Content="开始构建" Command="{Binding BuildCommand}" Padding="18,6" FontWeight="Bold"
+                        Background="{StaticResource ICDBlue}" Foreground="White" BorderThickness="0" Margin="8,0,0,0"/>
+                <Button Content="浏览输出目录…" Command="{Binding BrowseOutputCommand}" Style="{StaticResource Tool}" VerticalAlignment="Center"/>
+            </StackPanel>
+            <TextBlock Text="输出目录" Style="{StaticResource Lbl}" Width="60"/>
+            <TextBox Text="{Binding OutputDir, UpdateSourceTrigger=PropertyChanged}" Height="26" VerticalContentAlignment="Center"/>
+        </DockPanel>
+
+        <TextBlock Grid.Row="3" Text="{Binding Status}" Margin="0,8,0,0" TextWrapping="Wrap"
+                   Foreground="{StaticResource ICDTitleForeground}"/>
+    </Grid>
+</UserControl>

@@ -1,0 +1,41 @@
+<Window x:Class="OneCore_Image_Designer.Views.OEMInput.FeatureConflictWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Feature 约束冲突" MinWidth="460" MaxWidth="640"
+        SizeToContent="Height" WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False">
+    <Grid Margin="16,14,16,14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="TitleText" Grid.Row="0" FontSize="14" FontWeight="Bold"
+                   Foreground="#FF1F6FB2" TextWrapping="Wrap" Margin="0,0,0,6"/>
+        <TextBlock x:Name="DetailText" Grid.Row="1" FontSize="12" Foreground="#FF555555"
+                   TextWrapping="Wrap" Margin="0,0,0,10"/>
+
+        <ScrollViewer Grid.Row="2" MaxHeight="320" VerticalScrollBarVisibility="Auto" Margin="0,0,0,12">
+            <ItemsControl x:Name="CandidateList">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <RadioButton GroupName="Keep" Margin="0,3" VerticalContentAlignment="Center">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding Id}" FontSize="12" FontWeight="Bold"/>
+                                <TextBlock Text="{Binding Category}" FontSize="10" Foreground="#FF888888" Margin="8,1,0,0"/>
+                            </StackPanel>
+                        </RadioButton>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </ScrollViewer>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button x:Name="UncheckAllButton" Content="全部取消勾选" Padding="12,6" Margin="0,0,8,0" Click="UncheckAll_Click"/>
+            <Button Content="保留所选" IsDefault="True" Padding="16,6" Margin="0,0,8,0" Click="Keep_Click"/>
+            <Button Content="放弃本次勾选" IsCancel="True" Padding="12,6" Click="Cancel_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

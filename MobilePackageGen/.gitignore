@@ -1,0 +1,22 @@
+﻿# Build results
+bin/
+obj/
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+
+# Build logs
+*.log
+*.tlog
+
+# NuGet
+packages/
+*.nupkg
+
+# System
+Thumbs.db
+Desktop.ini

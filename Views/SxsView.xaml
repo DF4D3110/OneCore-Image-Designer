@@ -1,0 +1,46 @@
+<UserControl x:Class="OneCore_Image_Designer.Views.SxsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Background="{StaticResource IcdStartBackground}" Margin="28">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <StackPanel>
+            <TextBlock Text="SxS / CBS 工具" FontSize="26" FontWeight="Light" Foreground="{StaticResource ICDTitleForeground}"/>
+            <TextBlock Text="独立管理 pureSxS 与 explodeSxS，不与 UUP 下载流程混用。" Margin="0,6,0,18" Foreground="{StaticResource ICDSubtle}"/>
+        </StackPanel>
+        <Grid Grid.Row="1" Margin="0,0,0,16">
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Text="随应用集成的 SxS 源码" Foreground="{StaticResource ICDSubtle}"/>
+                <TextBlock Text="{Binding BundledSourceDirectory}" Margin="0,4,12,0" TextTrimming="CharacterEllipsis" ToolTip="{Binding BundledSourceDirectory}"/>
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                <Button Content="打开源码目录" Command="{Binding OpenSourceDirectoryCommand}" Style="{StaticResource ICDToolbarButton}" Margin="0,0,8,0"/>
+                <Button Content="检查源码" Command="{Binding DiscoverToolsCommand}" Style="{StaticResource ICDToolbarPrimaryButton}" Margin="0,0,8,0"/>
+                <Button Content="使用说明" Command="{Binding ShowUsageCommand}" Style="{StaticResource ICDToolbarButton}"/>
+            </StackPanel>
+            <TextBlock Grid.Row="1" Grid.ColumnSpan="2" Margin="0,10,0,0" TextWrapping="Wrap"
+                       Text="上游 CBS 可执行文件未随仓库分发。prepare.cmd 会格式化 X:；本工具只检查并展示集成的源码，不会自动启动这些破坏性脚本。"
+                       Foreground="{StaticResource ICDSubtle}"/>
+        </Grid>
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <Border Style="{StaticResource ICDCard}" Margin="0,0,12,0">
+                <StackPanel><TextBlock Text="{Binding Status}" Foreground="{StaticResource ICDAccentDark}"/>
+                    <ItemsControl ItemsSource="{Binding Tools}" Margin="0,12,0,0">
+                        <ItemsControl.ItemTemplate><DataTemplate>
+                            <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="0,8">
+                                <StackPanel><TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
+                                    <TextBlock Text="{Binding Message}" Foreground="{StaticResource ICDSubtle}" TextWrapping="Wrap"/></StackPanel>
+                            </Border>
+                        </DataTemplate></ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+            <Border Grid.Column="1" Style="{StaticResource ICDCard}">
+                <StackPanel><TextBlock Text="SxS 操作日志" FontSize="16" Foreground="{StaticResource ICDTitleForeground}"/>
+                    <ListBox ItemsSource="{Binding LogLines}" Margin="0,8,0,0"/></StackPanel>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>

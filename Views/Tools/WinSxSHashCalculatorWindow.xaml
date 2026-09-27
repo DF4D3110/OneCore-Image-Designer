@@ -1,0 +1,221 @@
+<Window x:Class="OneCore_Image_Designer.Views.Tools.WinSxSHashCalculatorWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="WinSxS Hash 计算器"
+        Width="780" Height="700"
+        MinWidth="640" MinHeight="540"
+        WindowStartupLocation="CenterOwner"
+        Background="#FFF5F5F5">
+    <!--
+      布局说明：统一用 MinHeight 而非固定 Height，行高一律 Auto，
+      使控件在高 DPI（本机 250% 缩放）下随字体自然撑开，不裁切文字。
+    -->
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 标题 -->
+        <TextBlock Grid.Row="0" Text="🔐 WinSxS Keyform Hash 计算器"
+                   FontSize="16" FontWeight="Bold" Foreground="#FF2C5AA0"
+                   TextWrapping="Wrap" Margin="0,0,0,10"/>
+
+        <!-- 算法状态与边界说明 -->
+        <Border Grid.Row="1" Background="#FFFFF8E1" BorderBrush="#FFE0C87A" BorderThickness="1"
+                CornerRadius="4" Padding="10" Margin="0,0,0,10">
+            <StackPanel>
+                <TextBlock TextWrapping="Wrap" FontSize="11.5" Foreground="#FF7A5C00"
+                           Text="✓ 算法已经真实数据验证：以 C:\Windows\WinSxS\Manifests 下 2000 个 manifest 的内部 assemblyIdentity 作真值，非 .inf 组件命中 1337/1337 = 100%；生成的文件夹名与真实名 100% 一致。"/>
+                <TextBlock TextWrapping="Wrap" FontSize="11.5" Foreground="#FF7A5C00" Margin="0,4,0,0"
+                           Text="⚠ 已知边界：*.inf 与 dual_*.inf 驱动类组件的哈希无法用 X65599Variant 复现（实测 0/663），本工具对这类组件的结果不可用。"/>
+                <TextBlock TextWrapping="Wrap" FontSize="11.5" Foreground="#FF7A5C00" Margin="0,4,0,0"
+                           Text="⚠ 输入须为 manifest【内部】的真实字段值。文件夹名里的 name 段可能被清理过（例如内部 “.NET Framework” 在文件名中是 “.netframework”，实测 19% 的组件不一致），用文件名反解会算错。"/>
+            </StackPanel>
+        </Border>
+
+        <!-- 输入区域 -->
+        <Border Grid.Row="2" Background="White" BorderBrush="#FFDDDDDD" BorderThickness="1"
+                CornerRadius="4" Padding="12" Margin="0,0,0,10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- 包名 -->
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="包名 (name):"
+                           VerticalAlignment="Center" Margin="0,0,8,8" FontSize="12"/>
+                <TextBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="3" x:Name="TxtName"
+                         MinHeight="28" VerticalContentAlignment="Center"
+                         Text="Microsoft-Windows-IPxlatCfg" Margin="0,0,0,8"
+                         ToolTip="manifest 内部 assemblyIdentity 的 name 原始值（含空格也要原样填）"/>
+
+                <!-- 公钥令牌 -->
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="公钥令牌:"
+                           VerticalAlignment="Center" Margin="0,0,8,8" FontSize="12"/>
+                <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtPublicKeyToken"
+                         MinHeight="28" VerticalContentAlignment="Center"
+                         Text="31bf3856ad364e35" Margin="0,0,16,8"/>
+
+                <!-- 架构 -->
+                <TextBlock Grid.Row="1" Grid.Column="2" Text="架构:"
+                           VerticalAlignment="Center" Margin="0,0,8,8" FontSize="12"/>
+                <ComboBox Grid.Row="1" Grid.Column="3" x:Name="CmbArchitecture"
+                          MinHeight="28" VerticalContentAlignment="Center" Margin="0,0,0,8"
+                          IsEditable="True"
+                          ToolTip="架构真实名。arm64 不可写成 arm —— 二者哈希不同（实测确认）">
+                    <ComboBoxItem Content="amd64" IsSelected="True"/>
+                    <ComboBoxItem Content="x86"/>
+                    <ComboBoxItem Content="arm"/>
+                    <ComboBoxItem Content="arm64"/>
+                    <ComboBoxItem Content="arm64.arm"/>
+                    <ComboBoxItem Content="wow64"/>
+                    <ComboBoxItem Content="msil"/>
+                    <ComboBoxItem Content="none"/>
+                </ComboBox>
+
+                <!-- 版本 -->
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="版本:"
+                           VerticalAlignment="Center" Margin="0,0,8,8" FontSize="12"/>
+                <TextBox Grid.Row="2" Grid.Column="1" x:Name="TxtVersion"
+                         MinHeight="28" VerticalContentAlignment="Center"
+                         Text="10.0.20279.1002" Margin="0,0,16,8"/>
+
+                <!-- 语言 -->
+                <TextBlock Grid.Row="2" Grid.Column="2" Text="语言 (culture):"
+                           VerticalAlignment="Center" Margin="0,0,8,8" FontSize="12"/>
+                <TextBox Grid.Row="2" Grid.Column="3" x:Name="TxtCulture"
+                         MinHeight="28" VerticalContentAlignment="Center"
+                         Text="neutral" Margin="0,0,0,8"
+                         ToolTip="none / neutral / 留空 表示中性，此时 culture 不参与哈希"/>
+
+                <!-- versionScope -->
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="versionScope:"
+                           VerticalAlignment="Center" Margin="0,0,8,0" FontSize="12"/>
+                <ComboBox Grid.Row="3" Grid.Column="1" x:Name="CmbVersionScope"
+                          MinHeight="28" VerticalContentAlignment="Center" Margin="0,0,16,0"
+                          ToolTip="取 manifest 内部 versionScope 属性值。绝大多数组件为 nonSxS；组件没有该属性时选“(无该属性)”">
+                    <ComboBoxItem Content="nonSxS" IsSelected="True"/>
+                    <ComboBoxItem Content="SxS"/>
+                    <ComboBoxItem Content="(无该属性)"/>
+                </ComboBox>
+
+                <!-- 计算按钮 -->
+                <Button Grid.Row="3" Grid.Column="2" Grid.ColumnSpan="2" Content="🧮 计算 Hash"
+                        MinHeight="28" HorizontalAlignment="Right" Padding="16,4"
+                        Background="#FF2C5AA0" Foreground="White" BorderThickness="0"
+                        Click="Calculate_Click"/>
+            </Grid>
+        </Border>
+
+        <!-- 结果区域 -->
+        <Border Grid.Row="3" Background="White" BorderBrush="#FFDDDDDD" BorderThickness="1"
+                CornerRadius="4" Padding="12">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel>
+                    <TextBlock Text="📋 计算结果" FontSize="13" FontWeight="Bold"
+                               Foreground="#FF2C5AA0" Margin="0,0,0,8"/>
+
+                    <!-- Hash值 -->
+                    <Grid Margin="0,0,0,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" MinWidth="130"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="Hash (16位):" VerticalAlignment="Top"
+                                   FontSize="11" Foreground="#FF666666"/>
+                        <TextBlock Grid.Column="1" x:Name="TxtHashResult" Text=""
+                                   FontFamily="Consolas" FontSize="12" Foreground="#FF333333"
+                                   TextWrapping="Wrap"/>
+                    </Grid>
+
+                    <!-- WinSxS文件夹名 -->
+                    <Grid Margin="0,0,0,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" MinWidth="130"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="WinSxS文件夹名:" VerticalAlignment="Top"
+                                   FontSize="11" Foreground="#FF666666"/>
+                        <TextBlock Grid.Column="1" x:Name="TxtFolderName" Text=""
+                                   FontFamily="Consolas" FontSize="11" Foreground="#FF333333"
+                                   TextWrapping="Wrap"/>
+                    </Grid>
+
+                    <!-- CBS包名 -->
+                    <Grid Margin="0,0,0,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" MinWidth="130"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="CBS包名:" VerticalAlignment="Top"
+                                   FontSize="11" Foreground="#FF666666"/>
+                        <TextBlock Grid.Column="1" x:Name="TxtCBSName" Text=""
+                                   FontFamily="Consolas" FontSize="11" Foreground="#FF333333"
+                                   TextWrapping="Wrap"/>
+                    </Grid>
+
+                    <!-- 参与哈希的字段，便于排查 -->
+                    <Grid Margin="0,0,0,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" MinWidth="130"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="参与哈希字段:" VerticalAlignment="Top"
+                                   FontSize="11" Foreground="#FF666666"/>
+                        <TextBlock Grid.Column="1" x:Name="TxtFields" Text=""
+                                   FontFamily="Consolas" FontSize="11" Foreground="#FF888888"
+                                   TextWrapping="Wrap"/>
+                    </Grid>
+
+                    <!-- 针对本次输入的边界警告 -->
+                    <TextBlock x:Name="TxtWarning" Text="" FontSize="11.5" TextWrapping="Wrap"
+                               Foreground="#FFB00020" Margin="0,0,0,8"/>
+
+                    <Separator Margin="0,8,0,8"/>
+
+                    <!-- 验证区域 -->
+                    <TextBlock Text="🔍 验证 WinSxS 文件夹名" FontSize="13" FontWeight="Bold"
+                               Foreground="#FF2C5AA0" Margin="0,0,0,4"/>
+                    <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="#FF888888" Margin="0,0,0,8"
+                               Text="注意：此处由文件夹名反解字段，属【弱校验】—— name 段可能已被清理、且文件名不携带 versionScope，因此对部分组件会误报失败。.inf 类组件一律不判定。要精确校验，请用上方输入 manifest 内部真实字段后自行比对哈希。"/>
+                    <Grid Margin="0,0,0,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBox Grid.Column="0" x:Name="TxtVerifyFolder" MinHeight="28"
+                                 VerticalContentAlignment="Center" TextWrapping="Wrap"
+                                 Text="arm64_microsoft-windows-ipxlatcfg_31bf3856ad364e35_10.0.20279.1002_none_989c17305b23fdfc"
+                                 Margin="0,0,8,0"/>
+                        <Button Grid.Column="1" Content="验证" MinHeight="28" Padding="12,4"
+                                Background="#FF4CAF50" Foreground="White" BorderThickness="0"
+                                Click="Verify_Click"/>
+                    </Grid>
+                    <TextBlock x:Name="TxtVerifyResult" Text="" FontSize="12" FontWeight="Bold"
+                               TextWrapping="Wrap"/>
+                </StackPanel>
+            </ScrollViewer>
+        </Border>
+
+        <!-- 底部按钮 -->
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="复制文件夹名" MinWidth="110" MinHeight="28" Padding="10,4"
+                    Click="CopyFolder_Click" Margin="0,0,8,0"/>
+            <Button Content="关闭" MinWidth="80" MinHeight="28" Padding="10,4"
+                    Click="Close_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

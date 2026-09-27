@@ -1,0 +1,42 @@
+<UserControl x:Class="OneCore_Image_Designer.Views.SystemReconstruct.SystemReconstructView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             mc:Ignorable="d"
+             d:DesignHeight="600" d:DesignWidth="800">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- 标题栏 -->
+        <DockPanel Grid.Row="0" Margin="0,0,0,24">
+            <Button Content="← 返回" Style="{StaticResource ICDSecondaryButton}" DockPanel.Dock="Left" Padding="12,6"
+                    Command="{Binding GoBackCommand}"/>
+            <TextBlock Text="系统重构" FontSize="22" FontWeight="Bold" Foreground="{StaticResource ICDBlue}" Margin="16,0,0,0" VerticalAlignment="Center"/>
+        </DockPanel>
+
+        <!-- 二选一卡片 -->
+        <UniformGrid Grid.Row="1" Columns="2" Rows="1" HorizontalAlignment="Center" VerticalAlignment="Center" Width="700">
+            <!-- 完全构建 -->
+            <Border Style="{StaticResource ICDCard}" Margin="8" Cursor="Hand" MouseLeftButtonUp="FullReconstructCard_Click">
+                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                    <TextBlock Text="📦" FontSize="48" HorizontalAlignment="Center" Margin="0,0,0,16"/>
+                    <TextBlock Text="完全构建" FontSize="18" FontWeight="Bold" HorizontalAlignment="Center" Foreground="{StaticResource ICDBlue}" Margin="0,0,0,8"/>
+                    <TextBlock Text="选择镜像文件和输出文件夹，提取镜像中的全部内容（CBS/SPKG/Driver/FM）" FontSize="12" Foreground="{StaticResource ICDSubText}" TextWrapping="Wrap" HorizontalAlignment="Center" TextAlignment="Center"/>
+                </StackPanel>
+            </Border>
+
+            <!-- 选择构建 -->
+            <Border Style="{StaticResource ICDCard}" Margin="8" Cursor="Hand" MouseLeftButtonUp="SelectReconstructCard_Click">
+                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                    <TextBlock Text="🔍" FontSize="48" HorizontalAlignment="Center" Margin="0,0,0,16"/>
+                    <TextBlock Text="选择构建" FontSize="18" FontWeight="Bold" HorizontalAlignment="Center" Foreground="{StaticResource ICDBlue}" Margin="0,0,0,8"/>
+                    <TextBlock Text="浏览镜像中所有可提取的包和FM，选中后查看涉及文件的相对路径，按需提取" FontSize="12" Foreground="{StaticResource ICDSubText}" TextWrapping="Wrap" HorizontalAlignment="Center" TextAlignment="Center"/>
+                </StackPanel>
+            </Border>
+        </UniformGrid>
+    </Grid>
+</UserControl>

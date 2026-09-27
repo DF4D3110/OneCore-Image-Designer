@@ -1,0 +1,76 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<DeviceLayout xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns="http://schemas.microsoft.com/embedded/2004/10/ImageUpdate">
+  <!-- CPUTYPE:SV:SOC:DEVICE:RELEASETYPE:MAJOR:MINOR - must use C#-RegEx syntax in wild cards -->
+  <Scope>arm.*:qualcomm:(qc8916|qc8994):.+:.+:.+:.+</Scope>
+  <Partitions>
+    <!-- QC ARM PRODUCTION DEVICE LAYOUT -->
+
+    <!-- PROVISIONED DATA SECTION START - WARNING DO NOT ALTER BELOW OR FFU WILL REMOVE DEVICE SETTINGS -->
+
+    <!-- Device Provisioning Partition -->
+    <Partition>
+      <Name>DPP</Name>
+      <!-- PARTITION_BASIC_DATA_GUID -->
+      <Type>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</Type>
+      <TotalSectors>*ANY*</TotalSectors>
+      <RequiredToFlash>true</RequiredToFlash>
+      <FileSystem>*ANY*</FileSystem>
+      <Position>1</Position>
+    </Partition>
+
+    <!-- Secure BACKUP Parititions place holder and template -->
+    <Partition>
+       <Name>BACKUP_*</Name>
+       <TotalSectors>*PARENT*</TotalSectors>
+       <Type>{A3381699-350C-465E-BD5D-FA3AB901A39A}</Type>
+       <Bootable>*PARENT*</Bootable>
+       <RequiredToFlash>true</RequiredToFlash>
+    </Partition>
+
+    <!-- START MICROSOFT PARTITIONS -->
+
+    <!-- EFI System Partition --> 
+    <Partition>
+      <Name>EFIESP</Name>
+      <FileSystem>FAT</FileSystem>
+      <TotalSectors>*ANY*</TotalSectors>
+      <!-- PARTITION_SYSTEM_GUID
+      <Type>{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}</Type> -->
+      <Type>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</Type>
+      <ByteAlignment>*ANY*</ByteAlignment>
+      <RequiredToFlash>true</RequiredToFlash>
+      <Position>BACKUP_BOOKEND</Position>
+    </Partition>
+
+   <Partition>
+      <Name>MainOS</Name>
+      <!-- PARTITION_BASIC_DATA_GUID -->
+      <Type>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</Type>
+      <MinFreeSectors>*ANY*</MinFreeSectors>
+      <TotalSectors>*ANY*</TotalSectors>
+      <ByteAlignment>*ANY*</ByteAlignment>
+      <RequiresCompression>*ANY*</RequiresCompression>
+      <ClusterSize>0x1000</ClusterSize>
+      <FileSystem>NTFS</FileSystem>
+      <AttachDriveLetter>false</AttachDriveLetter>
+    </Partition>
+  
+    <Partition>
+      <Name>Data</Name>
+      <!-- PARTITION_BASIC_DATA_GUID -->
+      <Type>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</Type>
+      <UseAllSpace>true</UseAllSpace>
+      <ByteAlignment>*ANY*</ByteAlignment>
+      <TotalSectors>*ANY*</TotalSectors>
+      <ClusterSize>0x4000</ClusterSize>
+      <FileSystem>NTFS</FileSystem>
+      <Position>-1</Position>
+    </Partition>
+  </Partitions>
+
+  <!-- END MICROSOFT PARTITIONS -->
+
+  <SectorSize>512</SectorSize>
+  <ChunkSize>*ANY*</ChunkSize>
+  <DefaultPartitionByteAlignment>*ANY*</DefaultPartitionByteAlignment>
+</DeviceLayout>

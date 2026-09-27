@@ -1,0 +1,112 @@
+<UserControl x:Class="OneCore_Image_Designer.Views.OEMInput.Steps.MSPackageRootStep"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             mc:Ignorable="d"
+             d:DesignHeight="560" d:DesignWidth="760">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel>
+            <TextBlock Text="步骤 1: 自动识别包根" FontSize="20" FontWeight="Bold" Foreground="{StaticResource ICDBlue}" Margin="0,0,0,8"/>
+            <TextBlock FontSize="12" Foreground="{StaticResource ICDSubText}" Margin="0,0,0,16" TextWrapping="Wrap"
+                       Text="选择 OS 包根目录后，程序自动扫描：FMFiles 下散装 FM XML + MSPackages 下 *FM*.cab（解开读包内 XML），并按官方回退链识别 DeviceLayout。扫描结果在下方确认，可手动补充。"/>
+
+            <!-- 包根 -->
+            <Border Style="{StaticResource ICDCard}">
+                <StackPanel>
+                    <DockPanel>
+                        <Button Content="浏览…" Style="{StaticResource ICDButton}" DockPanel.Dock="Right" Padding="12,6"
+                                Command="{Binding Parent.BrowseMSPackageRootCommand}"/>
+                        <Button Content="重新扫描" Style="{StaticResource ICDSecondaryButton}" DockPanel.Dock="Right" Padding="12,6" Margin="0,0,8,0"
+                                Command="{Binding Parent.RescanPackageCommand}"/>
+                        <TextBlock Text="MSPackageRoot" FontSize="13" FontWeight="Bold" VerticalAlignment="Center"/>
+                    </DockPanel>
+                    <TextBox x:Name="RootBox" Text="{Binding Parent.MSPackageRoot, UpdateSourceTrigger=PropertyChanged}"
+                             Height="30" VerticalContentAlignment="Center" Margin="0,8,0,0"
+                             KeyDown="RootBox_KeyDown"/>
+                    <Border Background="#FFF0F8FF" Padding="10,8" CornerRadius="4" Margin="0,8,0,0">
+                        <TextBlock Text="{Binding Parent.ScanSummary}" FontSize="12"
+                                   Foreground="{StaticResource ICDDarkBlue}" TextWrapping="Wrap"/>
+                    </Border>
+                    <ProgressBar IsIndeterminate="True" Height="3" Margin="0,8,0,0"
+                                 Visibility="{Binding Parent.IsScanning, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                </StackPanel>
+            </Border>
+
+            <!-- FM 候选确认 -->
+            <Border Style="{StaticResource ICDCard}" Margin="0,14,0,0">
+                <StackPanel>
+                    <DockPanel Margin="0,0,0,8">
+                        <Button Content="手动添加 FM…" Style="{StaticResource ICDSecondaryButton}" DockPanel.Dock="Right" Padding="10,4" FontSize="11"
+                                Command="{Binding Parent.AddFMsCommand}"/>
+                        <TextBlock Text="发现的 Feature Manifest（勾选纳入工程）" FontSize="13" FontWeight="Bold" VerticalAlignment="Center"/>
+                    </DockPanel>
+                    <ItemsControl ItemsSource="{Binding Parent.DiscoveredFMs}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border BorderBrush="{StaticResource ICDBorder}" BorderThickness="0,0,0,1" Padding="2,6">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <CheckBox Grid.Column="0" IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                                  Checked="FmFlag_Changed" Unchecked="FmFlag_Changed" VerticalAlignment="Center"/>
+                                        <TextBlock Grid.Column="1" Text="{Binding DisplayName}" FontSize="12" FontWeight="SemiBold"
+                                                   VerticalAlignment="Center" Margin="8,0,0,0" TextTrimming="CharacterEllipsis"/>
+                                        <Border Grid.Column="2" CornerRadius="3" Padding="6,1" Margin="0,0,8,0" VerticalAlignment="Center">
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Setter Property="Background" Value="#FF6A8E3A"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding SourceKind}" Value="CAB">
+                                                            <Setter Property="Background" Value="#FFB26A00"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <TextBlock Text="{Binding SourceKind}" FontSize="9.5" Foreground="White" FontWeight="Bold"/>
+                                        </Border>
+                                        <TextBlock Grid.Column="3" Text="{Binding FeatureCountText}" FontSize="10.5"
+                                                   Foreground="{StaticResource ICDSubText}" VerticalAlignment="Center"/>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Text="同名 FM 以散装 XML 为准（官方样本 AdditionalFMs 风格）；跨 FM 重名 Feature 会逐个弹窗请你定夺。"
+                               FontSize="11" Foreground="{StaticResource ICDSubText}" Margin="0,8,0,0" TextWrapping="Wrap"/>
+                </StackPanel>
+            </Border>
+
+            <!-- DeviceLayout 识别结果 -->
+            <Border Style="{StaticResource ICDCard}" Margin="0,14,0,0">
+                <StackPanel>
+                    <DockPanel Margin="0,0,0,8">
+                        <Button Content="导入 CAB 预览（可选）" Style="{StaticResource ICDSecondaryButton}" DockPanel.Dock="Right" Padding="10,4" FontSize="11"
+                                Command="{Binding Parent.BrowseDeviceLayoutCabCommand}"/>
+                        <TextBlock Text="设备布局（从 FM 自动识别 · 生成时只写 SOC 短名）" FontSize="13" FontWeight="Bold" VerticalAlignment="Center"/>
+                    </DockPanel>
+                    <ComboBox ItemsSource="{Binding Parent.AvailableDeviceLayouts}"
+                              SelectedItem="{Binding Parent.SelectedDeviceLayout}"
+                              Height="30" VerticalContentAlignment="Center">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding Display}" FontSize="12"/>
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+                    <TextBlock Text="{Binding Parent.DeviceLayoutStatus}" FontSize="11.5"
+                               Foreground="{StaticResource ICDSubText}" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                    <Button Content="＋ 从模板创建设备布局…" Style="{StaticResource ICDSecondaryButton}" Padding="10,4" FontSize="11"
+                            HorizontalAlignment="Left" Margin="0,6,0,0"
+                            Command="{Binding Parent.CreateDeviceLayoutFromTemplateCommand}"
+                            Visibility="{Binding Parent.CanCreateFromTemplate, Converter={StaticResource BooleanToVisibilityConverter}}"
+                            ToolTip="打开「设备布局创建」编辑器标签页：基于官方模板或图形分区条设计布局，通过验证后打包 FM+CAB，再回此选择该 SOC"/>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

@@ -1,0 +1,139 @@
+<UserControl x:Class="OneCore_Image_Designer.Views.OEMInput.Steps.BasicInfoStep"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             mc:Ignorable="d"
+             d:DesignHeight="460" d:DesignWidth="700">
+    <!-- 布局遵循 DPI 自适应：用 MinHeight 不写死 Height，行高交给内容，避免 250% 缩放裁切 -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel>
+            <TextBlock Text="步骤 2: 基本信息" FontSize="20" FontWeight="Bold" Foreground="{StaticResource ICDBlue}" Margin="0,0,0,8"/>
+            <TextBlock Text="配置 OEMInput 的基本信息字段（SOC / SV / Device 已从设备布局自动填充）" FontSize="12" Foreground="{StaticResource ICDSubText}" Margin="0,0,0,16"/>
+
+            <!-- schema 版本选择（本次双版本改造的核心入口） -->
+            <Border Style="{StaticResource ICDCard}" Margin="0,0,0,12">
+                <StackPanel>
+                    <TextBlock Text="Schema 版本" FontSize="13" FontWeight="Bold" Foreground="{StaticResource ICDDarkBlue}" Margin="0,0,0,6"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                        <TextBlock Text="目标 imageapp 代际:" FontSize="12" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                        <ComboBox MinWidth="260" MinHeight="30" VerticalContentAlignment="Center"
+                                  SelectedIndex="{Binding Parent.SchemaVersionIndex, Mode=TwoWay}">
+                            <ComboBoxItem Content="V1 · 2004/10（Phone / Andromeda / FactoryOS，含 SOC + SupportedLanguages + BootUILanguage）"/>
+                            <ComboBoxItem Content="V2 · 2019/06（ModernPC / WCOS CDG，含 DeviceLayoutType + 扁平 Languages，无 BootUILanguage）"/>
+                        </ComboBox>
+                    </StackPanel>
+                    <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="#FF856404" Margin="0,2,0,0"
+                               Visibility="{Binding Parent.OEMInputData.IsSchemaV1, Converter={StaticResource BooleanToVisibilityConverter}}"
+                               Text="V1：SOC 元素 + SupportedLanguages(UI/键盘/语音三分组) + BootUILanguage/BootLocale。可输出 Resolutions。本机全部手写真实样本（15032/16202/17047）均为此形态。"/>
+                    <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="#FF0C5460" Margin="0,2,0,0"
+                               Visibility="{Binding Parent.OEMInputData.IsSchemaV2, Converter={StaticResource BooleanToVisibilityConverter}}"
+                               Text="V2：DeviceLayoutType 元素（值即 SOC，官方 V1→V2 直接赋值）+ 扁平 Languages(Default)，不写 BootUILanguage/BootLocale（官方为计算属性，写进去反而通不过 XSD）。对应 20274 起的 ModernPC 包。"/>
+                </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource ICDCard}">
+                <StackPanel>
+                    <!-- Description -->
+                    <DockPanel Margin="0,0,0,16">
+                        <Button Content="生成默认" Style="{StaticResource ICDSecondaryButton}" DockPanel.Dock="Right" Padding="12,6" Margin="8,0,0,0"
+                                Command="{Binding Parent.GenerateDefaultDescriptionCommand}" ToolTip="格式: Product 版本 架构 image"/>
+                        <StackPanel>
+                            <TextBlock Text="Description (描述)" FontSize="12" FontWeight="Bold" Margin="0,0,0,4"/>
+                            <TextBox Text="{Binding Parent.OEMInputData.Description, UpdateSourceTrigger=PropertyChanged}"
+                                     MinHeight="30" VerticalContentAlignment="Center"/>
+                        </StackPanel>
+                    </DockPanel>
+
+                    <!-- SOC / DeviceLayoutType（同一值，标签随版本变）· SV · Device -->
+                    <Grid Margin="0,0,0,16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="12"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="12"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Text="{Binding Parent.OEMInputData.DeviceLayoutLabel}" FontSize="12" FontWeight="Bold" Margin="0,0,0,4"
+                                       TextWrapping="Wrap" ToolTip="V1 写 &lt;SOC&gt;，V2 写 &lt;DeviceLayoutType&gt;，二者同值"/>
+                            <TextBox Text="{Binding Parent.OEMInputData.SOC, UpdateSourceTrigger=PropertyChanged}" MinHeight="30" VerticalContentAlignment="Center"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2">
+                            <TextBlock Text="SV (厂商，可空)" FontSize="12" FontWeight="Bold" Margin="0,0,0,4"/>
+                            <TextBox Text="{Binding Parent.OEMInputData.SV, UpdateSourceTrigger=PropertyChanged}" MinHeight="30" VerticalContentAlignment="Center"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="4">
+                            <TextBlock Text="Device (设备)" FontSize="12" FontWeight="Bold" Margin="0,0,0,4"/>
+                            <TextBox Text="{Binding Parent.OEMInputData.Device, UpdateSourceTrigger=PropertyChanged}" MinHeight="30" VerticalContentAlignment="Center"/>
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- ReleaseType / BuildType / Product -->
+                    <Grid Margin="0,0,0,16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="12"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="12"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Text="ReleaseType" FontSize="12" FontWeight="Bold" Margin="0,0,0,4"/>
+                            <ComboBox SelectedValue="{Binding Parent.OEMInputData.ReleaseType, UpdateSourceTrigger=PropertyChanged}"
+                                      SelectedValuePath="Content" MinHeight="30" VerticalContentAlignment="Center">
+                                <ComboBoxItem Content="Test"/>
+                                <ComboBoxItem Content="Production"/>
+                            </ComboBox>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2">
+                            <TextBlock Text="BuildType" FontSize="12" FontWeight="Bold" Margin="0,0,0,4"/>
+                            <!-- 修复：原为写死只读的 fre 文本框、未绑定模型；现按 XSD 枚举可编辑 -->
+                            <ComboBox SelectedValue="{Binding Parent.OEMInputData.BuildType, UpdateSourceTrigger=PropertyChanged}"
+                                      SelectedValuePath="Content" MinHeight="30" VerticalContentAlignment="Center"
+                                      ToolTip="XSD 枚举：fre / chk / %BUILDTYPE%">
+                                <ComboBoxItem Content="fre"/>
+                                <ComboBoxItem Content="chk"/>
+                                <ComboBoxItem Content="%BUILDTYPE%"/>
+                            </ComboBox>
+                        </StackPanel>
+                        <StackPanel Grid.Column="4">
+                            <TextBlock Text="Product (产品)" FontSize="12" FontWeight="Bold" Margin="0,0,0,4"/>
+                            <TextBox Text="{Binding Parent.OEMInputData.Product, UpdateSourceTrigger=PropertyChanged}" MinHeight="30" VerticalContentAlignment="Center"
+                                     ToolTip="留空则写默认值 WindowsCore"/>
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- TestContent（仅 ReleaseType=Test 时显示） -->
+                    <StackPanel Margin="0,0,0,16"
+                                Visibility="{Binding Parent.OEMInputData.IsTestRelease, Converter={StaticResource BooleanToVisibilityConverter}}">
+                        <TextBlock Text="TestContent (可选，仅 Test)" FontSize="12" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <TextBox Text="{Binding Parent.OEMInputData.TestContent, UpdateSourceTrigger=PropertyChanged}" MinHeight="30" VerticalContentAlignment="Center"/>
+                    </StackPanel>
+
+                    <!-- V2 专属：RecoveryPackagePath / ImageVersionString -->
+                    <Grid Visibility="{Binding Parent.OEMInputData.IsSchemaV2, Converter={StaticResource BooleanToVisibilityConverter}}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="12"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Margin="0,0,0,8">
+                            <TextBlock Text="RecoveryPackagePath (V2 可选)" FontSize="12" FontWeight="Bold" Margin="0,0,0,4"/>
+                            <TextBox Text="{Binding Parent.OEMInputData.RecoveryPackagePath, UpdateSourceTrigger=PropertyChanged}" MinHeight="30" VerticalContentAlignment="Center"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Margin="0,0,0,8">
+                            <TextBlock Text="ImageVersionString (V2 可选)" FontSize="12" FontWeight="Bold" Margin="0,0,0,4"/>
+                            <TextBox Text="{Binding Parent.OEMInputData.ImageVersionString, UpdateSourceTrigger=PropertyChanged}" MinHeight="30" VerticalContentAlignment="Center"/>
+                        </StackPanel>
+                    </Grid>
+
+                    <Border Background="#FFFFF3CD" Padding="10,8" CornerRadius="4" Margin="0,4,0,0">
+                        <TextBlock FontSize="11" Foreground="#FF856404" TextWrapping="Wrap"
+                                   Text="ReleaseType 仅极少数情况用 Production，测试构建请保持 Test。XSD 枚举严格区分大小写：Test/Production、fre/chk/%BUILDTYPE%。切到 V2 时不再写 BootUILanguage/BootLocale。"/>
+                    </Border>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

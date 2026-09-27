@@ -1,0 +1,108 @@
+<UserControl x:Class="OneCore_Image_Designer.Views.OEMInput.OEMInputDesignerView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:steps="clr-namespace:OneCore_Image_Designer.Views.OEMInput.Steps"
+             xmlns:vm="clr-namespace:OneCore_Image_Designer.ViewModels.OEMInput"
+             mc:Ignorable="d"
+             d:DesignHeight="600" d:DesignWidth="1000">
+    <UserControl.Resources>
+        <DataTemplate DataType="{x:Type vm:DetectStepViewModel}">
+            <steps:MSPackageRootStep/>
+        </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:BasicInfoStepViewModel}">
+            <steps:BasicInfoStep/>
+        </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:LanguagesStepViewModel}">
+            <steps:LanguagesStep/>
+        </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:FeaturesStepViewModel}">
+            <steps:FeaturesStep/>
+        </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:PreviewStepViewModel}">
+            <steps:PreviewStep/>
+        </DataTemplate>
+    </UserControl.Resources>
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="220"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- 左侧步骤导航 -->
+        <Border Grid.Column="0" Background="{StaticResource ICDSurfaceAlt}"
+                BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,1,0" Padding="0">
+            <StackPanel>
+                <!-- 标题 -->
+                <Border Background="{StaticResource ICDSurface}" Padding="18,16"
+                        BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1">
+                    <StackPanel>
+                        <TextBlock Text="OEMInput" FontSize="16" FontWeight="SemiBold"
+                                   Foreground="{StaticResource ICDTitleForeground}"/>
+                        <TextBlock Text="项目配置向导" FontSize="11" Foreground="{StaticResource ICDSubtle}"
+                                   Margin="0,3,0,0"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- 步骤列表 -->
+                <ItemsControl x:Name="StepsItemsControl" Margin="0,8,0,0">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border x:Name="StepBorder" Padding="16,12" Cursor="Hand" Tag="{Binding Index}" MouseLeftButtonUp="StepBorder_Click"
+                                    BorderBrush="Transparent" BorderThickness="3,0,0,0">
+                                <StackPanel Orientation="Horizontal">
+                                    <Grid Width="24" Height="24" VerticalAlignment="Center">
+                                        <Ellipse x:Name="StepCircle" Fill="#FFE0E7EF"/>
+                                        <TextBlock x:Name="StepNumber" Text="{Binding Index}" Foreground="{StaticResource ICDSubtle}"
+                                                   FontSize="11" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Grid>
+                                    <TextBlock x:Name="StepName" Text="{Binding Name}" Foreground="{StaticResource ICDSubtle}"
+                                               FontSize="12" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                </StackPanel>
+                            </Border>
+                            <DataTemplate.Triggers>
+                                <DataTrigger Binding="{Binding IsCurrent}" Value="True">
+                                    <Setter TargetName="StepBorder" Property="Background" Value="{StaticResource ICDLightBlue}"/>
+                                    <Setter TargetName="StepBorder" Property="BorderBrush" Value="{StaticResource ICDAccentBright}"/>
+                                    <Setter TargetName="StepCircle" Property="Fill" Value="{StaticResource ICDBlue}"/>
+                                    <Setter TargetName="StepNumber" Property="Foreground" Value="White"/>
+                                    <Setter TargetName="StepName" Property="Foreground" Value="{StaticResource ICDForeground}"/>
+                                    <Setter TargetName="StepName" Property="FontWeight" Value="SemiBold"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsCompleted}" Value="True">
+                                    <Setter TargetName="StepCircle" Property="Fill" Value="#FF5BAA75"/>
+                                    <Setter TargetName="StepNumber" Property="Foreground" Value="White"/>
+                                </DataTrigger>
+                            </DataTemplate.Triggers>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+            </StackPanel>
+        </Border>
+
+        <!-- 右侧内容区 -->
+        <Grid Grid.Column="1">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- 步骤内容 -->
+            <ContentControl Grid.Row="0" Content="{Binding CurrentStepViewModel}" Margin="30,24,30,20"/>
+
+            <!-- 底部导航按钮 -->
+            <Border Grid.Row="1" Background="{StaticResource ICDSurface}" Padding="16,10"
+                    BorderThickness="0,1,0,0" BorderBrush="{StaticResource BorderBrush}">
+                <DockPanel>
+                    <Button Content="上一步" Style="{StaticResource ICDSecondaryButton}" Command="{Binding GoBackCommand}" IsEnabled="{Binding CanGoBack}"/>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                        <Button x:Name="NextButton" Content="下一步" Style="{StaticResource ICDButton}" Command="{Binding GoNextCommand}" IsEnabled="{Binding CanGoNext}" Margin="8,0,0,0"/>
+                    </StackPanel>
+                    <TextBlock Text="{Binding CurrentStepName}" FontSize="12" Foreground="{StaticResource ICDSubText}" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                </DockPanel>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>

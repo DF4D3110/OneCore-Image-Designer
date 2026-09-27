@@ -1,0 +1,119 @@
+<UserControl x:Class="OneCore_Image_Designer.Views.OEMInput.Steps.FeaturesStep"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             mc:Ignorable="d"
+             d:DesignHeight="420" d:DesignWidth="760">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="步骤 4: 选择 Features" FontSize="20" FontWeight="Bold" Foreground="{StaticResource ICDBlue}" Margin="0,0,0,4"/>
+            <TextBlock FontSize="12" Foreground="{StaticResource ICDSubText}" Margin="0,0,0,10" TextWrapping="Wrap"
+                       Text="FM 中声明的 Feature 按 Microsoft / OEM 分列展示。勾选互斥组内的 Feature 时会自动提示，保留哪个由你决定。"/>
+        </StackPanel>
+
+        <!-- 工具栏 -->
+        <Border Grid.Row="1" Background="#FFE8E8E8" Padding="8,6" CornerRadius="4" Margin="0,0,0,8">
+            <DockPanel LastChildFill="True">
+                <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" VerticalAlignment="Center">
+                    <TextBlock Text="已选" FontSize="11" Foreground="{StaticResource ICDDarkBlue}" VerticalAlignment="Center"/>
+                    <TextBlock Text="{Binding Parent.SelectedFeatureCount}" FontSize="11" FontWeight="Bold"
+                               Foreground="{StaticResource ICDBlue}" VerticalAlignment="Center" Margin="4,0,0,0"/>
+                    <TextBlock Text="/" FontSize="11" Foreground="{StaticResource ICDSubText}" VerticalAlignment="Center" Margin="2,0"/>
+                    <TextBlock Text="{Binding Parent.AvailableFeatures.Count}" FontSize="11"
+                               Foreground="{StaticResource ICDSubText}" VerticalAlignment="Center"/>
+                </StackPanel>
+                <TextBlock Text="筛选:" FontSize="11" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                <TextBox x:Name="SearchBox" Height="24" MaxWidth="260" HorizontalAlignment="Left"
+                         VerticalContentAlignment="Center" Text="{Binding Parent.FeatureSearchText, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="按 Feature ID 子串筛选（不区分大小写）"/>
+            </DockPanel>
+        </Border>
+
+        <!-- 双列：Microsoft / OEM -->
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="10"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Microsoft 列 -->
+            <Border Grid.Column="0" Style="{StaticResource ICDCard}" Padding="0">
+                <DockPanel>
+                    <Border DockPanel.Dock="Top" Background="#FF1F6FB2" Padding="10,6">
+                        <DockPanel>
+                            <TextBlock Text="Microsoft" FontSize="12" FontWeight="Bold" Foreground="White"/>
+                            <TextBlock DockPanel.Dock="Right" Text="{Binding Parent.MicrosoftFeatureColumn.Count, StringFormat={}{0}}"
+                                       FontSize="11" Foreground="#FFDCEEFB" HorizontalAlignment="Right"/>
+                        </DockPanel>
+                    </Border>
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="8,6">
+                        <ItemsControl ItemsSource="{Binding Parent.MicrosoftFeatureColumn}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border BorderBrush="#FFEDEDED" BorderThickness="0,0,0,1" Padding="2,5">
+                                        <StackPanel Orientation="Horizontal">
+                                            <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                                      Checked="FeatureFlag_Changed" Unchecked="FeatureFlag_Changed"
+                                                      VerticalAlignment="Center"/>
+                                            <TextBlock Text="{Binding ID}" FontSize="12" Margin="8,0,0,0"
+                                                       VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </DockPanel>
+            </Border>
+
+            <!-- OEM 列 -->
+            <Border Grid.Column="2" Style="{StaticResource ICDCard}" Padding="0">
+                <DockPanel>
+                    <Border DockPanel.Dock="Top" Background="#FF6A8E3A" Padding="10,6">
+                        <DockPanel>
+                            <TextBlock Text="OEM" FontSize="12" FontWeight="Bold" Foreground="White"/>
+                            <TextBlock DockPanel.Dock="Right" Text="{Binding Parent.OemFeatureColumn.Count, StringFormat={}{0}}"
+                                       FontSize="11" Foreground="#FFE6F1D8" HorizontalAlignment="Right"/>
+                        </DockPanel>
+                    </Border>
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="8,6">
+                        <ItemsControl ItemsSource="{Binding Parent.OemFeatureColumn}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border BorderBrush="#FFEDEDED" BorderThickness="0,0,0,1" Padding="2,5">
+                                        <StackPanel Orientation="Horizontal">
+                                            <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                                      Checked="FeatureFlag_Changed" Unchecked="FeatureFlag_Changed"
+                                                      VerticalAlignment="Center"/>
+                                            <TextBlock Text="{Binding ID}" FontSize="12" Margin="8,0,0,0"
+                                                       VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </DockPanel>
+            </Border>
+        </Grid>
+
+        <!-- 底部提示 -->
+        <Border Grid.Row="3" Background="#FFF0F8FF" Padding="8,6" CornerRadius="4" Margin="0,8,0,0">
+            <DockPanel>
+                <TextBlock Text="&#xE946;" FontFamily="Segoe MDL2 Assets" FontSize="12"
+                           Foreground="{StaticResource ICDDarkBlue}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <TextBlock Text="两个 FM 都声明的同名 Feature 只会出现在对应分类列中一次；未匹配到筛选条件的 Feature 会暂时隐藏。"
+                           FontSize="11" Foreground="{StaticResource ICDSubText}" TextWrapping="Wrap" VerticalAlignment="Center"/>
+            </DockPanel>
+        </Border>
+    </Grid>
+</UserControl>

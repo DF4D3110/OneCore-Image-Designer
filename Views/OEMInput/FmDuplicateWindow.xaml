@@ -1,0 +1,28 @@
+<Window x:Class="OneCore_Image_Designer.Views.OEMInput.FmDuplicateWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="FM 重名冲突" MinWidth="500" MaxWidth="720"
+        SizeToContent="Height" WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False">
+    <Grid Margin="16,14,16,14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="TitleText" Grid.Row="0" FontSize="13.5" FontWeight="Bold"
+                   Foreground="#FF00539C" TextWrapping="Wrap" Margin="0,0,0,6"/>
+        <TextBlock x:Name="DetailText" Grid.Row="1" FontSize="12" Foreground="#FF555555"
+                   TextWrapping="Wrap" Margin="0,0,0,10"/>
+
+        <StackPanel Grid.Row="2">
+            <ItemsControl x:Name="CandidateList" Margin="0,0,0,2"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
+                <Button Content="保留全部（按官方合并）" IsDefault="True" Padding="14,6" Margin="0,0,8,0" Click="KeepAll_Click"/>
+                <Button Content="仅保留所选 FM" Padding="14,6" Margin="0,0,8,0" Click="KeepOne_Click"/>
+                <Button Content="跳过" IsCancel="True" Padding="12,6" Click="Skip_Click"/>
+            </StackPanel>
+        </StackPanel>
+    </Grid>
+</Window>

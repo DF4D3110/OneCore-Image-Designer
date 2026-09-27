@@ -1,0 +1,14 @@
+<Project>
+  <!--
+    Fix for project-references built outside a solution:
+    several csproj files use $(SolutionDir) in OutputPath/IntermediateOutputPath.
+    When this repo is referenced from another project (dotnet build on a csproj,
+    no solution context), SolutionDir is empty, so generated AssemblyAttributes
+    files land INSIDE each project directory and get picked up by the default
+    compile glob on the next build => CS0579 duplicate attributes.
+    Default SolutionDir to this repository root when not already set.
+  -->
+  <PropertyGroup Condition="'$(SolutionDir)' == '' OR '$(SolutionDir)' == '*Undefined*'">
+    <SolutionDir>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)'))</SolutionDir>
+  </PropertyGroup>
+</Project>

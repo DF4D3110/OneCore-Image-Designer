@@ -1,0 +1,68 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>OneCore_Image_Designer</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Platforms>x64;x86;ARM64</Platforms>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\app.ico" />
+    <Resource Include="Assets\banner.png" />
+    <!-- 设备布局内置模板 + 各 ADK 时代官方校验规则：随输出目录发布，运行时按路径加载 -->
+    <None Include="Assets\Templates\**\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Assets\ValidationRules\**\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="ThirdParty\SxS\**\*.*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageReference Include="RawDiskLib" Version="0.2.1" />
+    <PackageReference Include="LTRData.DiscUtils" Version="1.0.55" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="MobilePackageGen\MobilePackageGen.Common\MobilePackageGen.Common.csproj" />
+    <ProjectReference Include="UupBridge\UupBridge.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="MobilePackageGen\**\*.cs" />
+    <Compile Remove="UupBridge\**\*.cs" />
+    <Compile Remove="ThirdParty\**\*.cs" />
+    <Compile Remove="AssemblyInfo.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Tools\wcpex\wcpex.exe" />
+    <EmbeddedResource Include="Tools\wcpex\wcp.dll" />
+    <EmbeddedResource Include="Services\guids.csv" />
+    <!-- 官方 ADK tools_20348 featureapi.dll 内嵌的 OEMInput schema，用于真实校验 -->
+    <EmbeddedResource Include="Schemas\OEMInput.V1.xsd" />
+    <EmbeddedResource Include="Schemas\OEMInput.V2.xsd" />
+  </ItemGroup>
+
+  <Target Name="CopyUupBridgeToOutput" AfterTargets="Build">
+    <ItemGroup>
+      <UupBridgeOutput Include="$(MSBuildProjectDirectory)\UupBridge\bin\$(Configuration)\net8.0\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(UupBridgeOutput)"
+          DestinationFiles="@(UupBridgeOutput->'$(OutDir)UupBridge\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

@@ -1,0 +1,22 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Platforms>x86;x64;ARM64;ARM32</Platforms>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DotnetPackaging.Msix\DotnetPackaging.Msix.csproj" />
+    <ProjectReference Include="..\LibSxS\LibSxS.csproj" />
+    <ProjectReference Include="..\Microsoft.Deployment.Compression.Cab\Microsoft.Deployment.Compression.Cab.csproj" />
+    <ProjectReference Include="..\MobilePackageGen.Adapters\MobilePackageGen.Adapters.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="RemakeAppx\" />
+  </ItemGroup>
+
+</Project>

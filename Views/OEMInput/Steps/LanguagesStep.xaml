@@ -1,0 +1,89 @@
+﻿<UserControl x:Class="OneCore_Image_Designer.Views.OEMInput.Steps.LanguagesStep"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             mc:Ignorable="d"
+             d:DesignHeight="400" d:DesignWidth="700">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="步骤 3: 语言设置" FontSize="20" FontWeight="Bold" Foreground="{StaticResource ICDBlue}" Margin="0,0,0,8"/>
+            <TextBlock Text="配置系统语言，默认 en-us，可从 FM 中提取的可用语言列表添加附加语言" FontSize="12" Foreground="{StaticResource ICDSubText}" Margin="0,0,0,16"/>
+        </StackPanel>
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="16"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- 已选语言 -->
+            <Border Grid.Column="0" Style="{StaticResource ICDCard}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock Grid.Row="0" Text="已选语言" FontSize="13" FontWeight="Bold" Margin="0,0,0,8"/>
+                    <ListBox Grid.Row="1" ItemsSource="{Binding Parent.SelectedLanguages}"
+                             BorderBrush="{StaticResource ICDBorder}" BorderThickness="1">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <DockPanel Margin="4,2">
+                                    <Button Content="设为默认" Style="{StaticResource ICDSecondaryButton}" DockPanel.Dock="Right" Padding="6,2" FontSize="10" Margin="4,0,0,0"
+                                            Command="{Binding Parent.SetDefaultLanguageCommand}" CommandParameter="{Binding}"/>
+                                    <Button Content="✕" Style="{StaticResource ICDSecondaryButton}" DockPanel.Dock="Right" Padding="6,2" FontSize="10"
+                                            Command="{Binding Parent.RemoveLanguageCommand}" CommandParameter="{Binding}"/>
+                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding Code}" FontSize="12" FontWeight="Bold" VerticalAlignment="Center"/>
+                                        <TextBlock Text=" (默认)" FontSize="10" Foreground="#FF4CAF50" VerticalAlignment="Center" Margin="4,0,0,0">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsDefault}" Value="True">
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                    </StackPanel>
+                                </DockPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
+            </Border>
+
+            <!-- 可用语言 -->
+            <Border Grid.Column="2" Style="{StaticResource ICDCard}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock Grid.Row="0" Text="可用语言（从FM提取）" FontSize="13" FontWeight="Bold" Margin="0,0,0,8"/>
+                    <ListBox Grid.Row="1" ItemsSource="{Binding Parent.AvailableLanguages}"
+                             BorderBrush="{StaticResource ICDBorder}" BorderThickness="1" MouseDoubleClick="AvailableLanguage_DoubleClick">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <DockPanel Margin="4,2">
+                                    <Button Content="添加" Style="{StaticResource ICDButton}" DockPanel.Dock="Right" Padding="8,2" FontSize="10"
+                                            Command="{Binding Parent.AddLanguageCommand}" CommandParameter="{Binding}"/>
+                                    <TextBlock Text="{Binding}" FontSize="12" VerticalAlignment="Center"/>
+                                </DockPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>

@@ -1,0 +1,341 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<DeviceLayout xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns="http://schemas.microsoft.com/embedded/2004/10/ImageUpdate/v2">
+    <Stores>
+        <!-- LUN1 --> 
+        <Store>
+            <Id>{9af70eef-592d-4bca-9841-bdca52426d21}</Id>
+            <StoreType>XBL</StoreType>
+            <DevicePath>VenHw(8D90D477-39A3-4A38-AB9E-586FF69ED051)</DevicePath>
+            <SizeInSectors>1024</SizeInSectors>
+            <OnlyAllocateDefinedGptEntries>true</OnlyAllocateDefinedGptEntries>
+            <Partitions>
+                <Partition>
+                    <Name>XBL</Name>
+                    <TotalSectors>960</TotalSectors>
+                    <Type>{DEA0BA2C-CBDD-4805-B4F9-F428251C3E98}</Type>
+                    <Bootable>true</Bootable>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+            </Partitions>
+        </Store>
+
+        <!-- LUN2 --> 
+        <Store>
+            <Id>{0a958bc3-288e-496c-afde-1d5efd3160ab}</Id>
+            <StoreType>BACKUP_XBL</StoreType>
+            <DevicePath>VenHw(EDF85868-87EC-4F77-9CDA-5F10DF2FE601)</DevicePath>
+            <SizeInSectors>1024</SizeInSectors>
+            <OnlyAllocateDefinedGptEntries>true</OnlyAllocateDefinedGptEntries>
+            <Partitions>
+                <Partition>
+                    <Name>BACKUP_XBL</Name>
+                    <TotalSectors>960</TotalSectors>
+                    <Type>{DEA0BA2C-CBDD-4805-B4F9-F428251C3E98}</Type>
+                    <Bootable>true</Bootable>
+                    <RequiredToFlash>true</RequiredToFlash> 
+                </Partition> 
+            </Partitions>
+        </Store>
+
+        <!-- LUN3 --> 
+        <!-- Remove LUN3 from layout since we cannot align on 4KB boundary to match LA
+        <Store>
+            <Id>{572c2a7e-4277-47d9-93cc-e7d361fd60e0}</Id>
+            <StoreType>OTP</StoreType>
+            <DevicePath>VenHw(1AE69024-8AEB-4DF8-BC98-0032DBDF5024)</DevicePath>
+            <SizeInSectors>32768</SizeInSectors>
+            <Partitions>
+                <Partition> 
+                    <Name>CDT</Name>
+                    <TotalSectors>1</TotalSectors>
+                    <Type>{a19f205f-ccd8-4b6d-8f1e-2d9bc24cffb1}</Type>
+                    <RequiredToFlash>false</RequiredToFlash> 
+                </Partition> 
+                 <Partition> 
+                    <Name>DDR</Name>
+                    <TotalSectors>256</TotalSectors>
+                    <Type>{20a0c19c-286a-42fa-9ce7-f64c3226a794}</Type>
+                    <RequiredToFlash>false</RequiredToFlash> 
+                </Partition> 
+            </Partitions>
+        </Store--> 
+
+        <!-- LUN4 --> 
+        <Store>
+            <Id>{5a5ed9ac-fda0-4e8a-ac6e-b5d9cb20b5f0}</Id>
+            <StoreType>Protected_ReadOnly</StoreType>
+            <DevicePath>VenHw(D33F1985-F107-4A85-BE38-68DC7AD32CEA)</DevicePath>
+            <SizeInSectors>1048576</SizeInSectors>
+            <Partitions>
+               <!-- Device Provisioning Partition -->
+                <Partition>
+                    <Name>DPP</Name>
+                    <Type>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</Type>
+                    <TotalSectors>2048</TotalSectors>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+		
+                <!-- ACPI table storage -->
+                <Partition>
+                    <Name>PLAT</Name>
+                    <TotalSectors>2048</TotalSectors>
+                    <FileSystem>FAT</FileSystem>
+                    <Type>{543C031A-4CB6-4897-BFFE-4B485768A8AD}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+                
+                <!-- Adding bootmode partition for QWPCT Tool-->
+                <Partition>
+                    <Name>BOOTMODE</Name>
+                    <TotalSectors>4</TotalSectors>
+                    <Type>{0E91AB96-8339-4AE4-A310-ED94357FD7D0}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+                
+                <Partition>
+                    <Name>SEC</Name>
+                    <TotalSectors>32</TotalSectors>
+                    <Type>{303E6AC3-AF15-4C54-9E9B-D9A8FBECF401}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+
+                <Partition>
+                    <Name>APDP</Name>
+                    <TotalSectors>64</TotalSectors>
+                    <Type>{E6E98DA2-E22A-4D12-AB33-169E7DEAA507}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+                
+                <Partition>
+                    <Name>MSADP</Name>
+                    <TotalSectors>64</TotalSectors>
+                    <Type>{ED9E8101-05FA-46B7-82AA-8D58770D200B}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+
+                <Partition>
+                    <Name>LogFS</Name>
+                    <TotalSectors>4096</TotalSectors>
+                    <FileSystem>FAT</FileSystem>
+                    <Type>{BC0330EB-3410-4951-A617-03898DBE3372}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+
+                <!-- Secure Software Download -->
+                <Partition>
+                    <Name>SSD</Name>
+                    <TotalSectors>2</TotalSectors>
+                    <Type>{2C86E742-745E-4FDD-BFD8-B6A7AC638772}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+
+                <!-- UEFI Variable Services Partitions -->
+                <Partition>
+                    <Name>UEFI_BS_NV</Name>
+                    <TotalSectors>64</TotalSectors>
+                    <Type>{F0B4F48B-AEBA-4ECF-9142-5DC30CDC3E77}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+	
+                <Partition>
+                    <Name>PMIC</Name>
+                    <TotalSectors>128</TotalSectors>
+                    <Type>{C00EEF24-7709-43D6-9799-DD2B411E7A3C}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+
+                <!-- Firmware volume for UEFI test images -->
+                <Partition>
+                    <Name>TOOLSFV</Name>
+                    <TotalSectors>256</TotalSectors>
+                    <Type>{97745ABA-135A-44C3-9ADC-05616173C24C}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+
+                <Partition>
+                    <Name>RPM</Name>
+                    <TotalSectors>128</TotalSectors>
+                    <Type>{098DF793-D712-413D-9D4E-89D711772228}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+                <Partition>
+                    <Name>TZ</Name>
+                    <TotalSectors>512</TotalSectors>
+                    <Type>{A053AA7F-40B8-4B1C-BA08-2F68AC71A4F4}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+                <Partition>
+                    <Name>DEVCFG</Name>
+                    <TotalSectors>32</TotalSectors>
+                    <Type>{F65D4B16-343D-4E25-AAFC-BE99B6556A6D}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+                <Partition>
+                    <Name>HYP</Name>
+                    <TotalSectors>128</TotalSectors>
+                    <Type>{E1A6A689-0C8D-4CC6-B4E8-55A4320FBD8A}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+
+                <!-- TrustZone Applets -->
+                <Partition>
+                    <Name>TZAPPS</Name>
+                    <TotalSectors>4096</TotalSectors>
+                    <Type>{14D11C40-2A3D-4F97-882D-103A1EC09333}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                    <FileSystem>FAT</FileSystem>
+                </Partition>
+
+                <!-- Reserved Read only partition for future -->
+                <Partition>
+                    <Name>RESERVEDRO</Name>
+                    <TotalSectors>1280</TotalSectors>
+                    <Type>{17911177-C9E6-4372-933C-804B678E666F}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+
+                <!-- Bootloaders Backup Section (Sizes must match) -->
+                <Partition>
+                    <Name>BACKUP_PMIC</Name>
+                    <TotalSectors>128</TotalSectors>
+                    <Type>{A3381699-350C-465E-BD5D-FA3AB901A39A}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+                <Partition>
+                    <Name>BACKUP_RPM</Name>
+                    <TotalSectors>128</TotalSectors>
+                    <Type>{A3381699-350C-465E-BD5D-FA3AB901A39A}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+                <Partition>
+                    <Name>BACKUP_TZ</Name>
+                    <TotalSectors>512</TotalSectors>
+                    <Type>{A3381699-350C-465E-BD5D-FA3AB901A39A}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+                <Partition>
+                    <Name>BACKUP_DEVCFG</Name>
+                    <TotalSectors>32</TotalSectors>
+                    <Type>{A3381699-350C-465E-BD5D-FA3AB901A39A}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+                <Partition>
+                    <Name>BACKUP_HYP</Name>
+                    <TotalSectors>128</TotalSectors>
+                    <Type>{A3381699-350C-465E-BD5D-FA3AB901A39A}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+
+                <!-- TrustZone Applet Backup Sections (Sizes must match) -->
+                <Partition>
+                    <Name>BACKUP_TZAPPS</Name>
+                    <TotalSectors>4096</TotalSectors>
+                    <Type>{A3381699-350C-465E-BD5D-FA3AB901A39A}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+  
+                <!-- Reserved Read only partition for future -->
+                <Partition>
+                    <Name>BACKUP_RESERVEDRO</Name>
+                    <TotalSectors>1280</TotalSectors>
+                    <Type>{A3381699-350C-465E-BD5D-FA3AB901A39A}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+
+            </Partitions>
+        </Store>
+
+        <!-- LUN5 -->
+        <!-- Remove LUN5 from layout since we cannot align on 4KB boundary to match LA
+        <Store>
+            <Id>{ab45c982-4fbf-4f63-ac30-69de22c9613d}</Id>
+            <StoreType>Protected_Read_Write</StoreType>
+            <DevicePath>VenHw(4BA1D05F-088E-483F-A97E-B19B9CCF59B0)</DevicePath>
+            <SizeInSectors>393216</SizeInSectors>
+            <Partitions>
+                <Partition>
+                    <Name>modemst1</Name>
+                    <TotalSectors>512</TotalSectors>
+                    <Type>{EBBEADAF-22C9-E33B-8F5D-0E81686A68CB}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+                <Partition>
+                    <Name>modemst2</Name>
+                    <TotalSectors>512</TotalSectors>
+                    <Type>{0A288B1F-22C9-E33B-8F5D-0E81686A68CB}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+                <Partition>
+                    <Name>fsc</Name>
+                    <TotalSectors>1</TotalSectors>
+                    <Type>{57B90A16-22C9-E33B-8F5D-0E81686A68CB}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+                <Partition>
+                    <Name>fsg</Name>
+                    <TotalSectors>512</TotalSectors>
+                    <Type>{638FF8E2-22C9-E33B-8F5D-0E81686A68CB}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+                <Partition>
+                    <Name>RESERVEDRW</Name>
+                    <TotalSectors>1280</TotalSectors>
+                    <Type>{A5805F5F-AC38-4B03-BAD1-A6016D60EFF7}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+            </Partitions>
+        </Store-->
+
+        <!-- LUN0 --> 
+        <Store>
+            <Id>{AE420040-13DD-41F2-AE7F-0DC35854C8D7}</Id>
+            <StoreType>MainOSStore</StoreType>
+            <DevicePath>VenHw(860845C1-BE09-4355-8BC1-30D64FF8E63A)</DevicePath>
+            <Partitions>
+                <!-- EFI System Partition --> 
+                <Partition>
+                    <Name>EFIESP</Name>
+                    <FileSystem>FAT</FileSystem>
+                    <TotalSectors>8192</TotalSectors>
+                    <Type>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</Type>
+                    <RequiredToFlash>true</RequiredToFlash>
+                </Partition>
+
+                <Partition>
+                    <Name>SVRawDump</Name>
+                    <Type>{66C9B323-F7FC-48B6-BF96-6F32E335A428}</Type>
+                    <TotalSectors>1125000</TotalSectors>
+                </Partition>
+
+		<Partition>
+                    <Name>MMOS</Name>
+                    <FileSystem>FAT</FileSystem>
+                    <MinFreeSectors>8192</MinFreeSectors>
+                    <Type>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</Type>
+                </Partition>
+                
+                <Partition>
+                    <Name>MainOS</Name>
+                    <Type>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</Type>
+                    <MinFreeSectors>512000</MinFreeSectors>
+                    <ByteAlignment>0x800000</ByteAlignment>
+                    <ClusterSize>0x4000</ClusterSize>
+                    <FileSystem>NTFS</FileSystem>
+                    <AttachDriveLetter>false</AttachDriveLetter>
+                </Partition>
+
+                <Partition>
+                    <Name>Data</Name>
+                    <Type>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</Type>
+                    <UseAllSpace>true</UseAllSpace>
+                    <ByteAlignment>0x800000</ByteAlignment>
+                    <ClusterSize>0x4000</ClusterSize>
+                    <FileSystem>NTFS</FileSystem>
+                </Partition>
+            </Partitions>
+        </Store>
+    </Stores>
+    <SectorSize>4096</SectorSize>
+    <ChunkSize>128</ChunkSize>
+    <DefaultPartitionByteAlignment>0x20000</DefaultPartitionByteAlignment>
+</DeviceLayout>
