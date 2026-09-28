@@ -6,6 +6,7 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using Microsoft.Win32;
+using OneCore_Image_Designer.Services;
 
 namespace OneCore_Image_Designer.ViewModels.ImageBuild
 {
@@ -41,7 +42,7 @@ namespace OneCore_Image_Designer.ViewModels.ImageBuild
         public string OSPackageDir
         {
             get => _osPackageDir;
-            set { _osPackageDir = value; OnPropertyChanged(); OnPropertyChanged(nameof(RetailArchFrePath)); OnPropertyChanged(nameof(IsRetailPathValid)); }
+            set { _osPackageDir = value; OnPropertyChanged(); OnPropertyChanged(nameof(RetailArchFrePath)); OnPropertyChanged(nameof(IsRetailPathValid)); TryAutoDiscoverBuildTool(); }
         }
 
         public string RetailArchFrePath => Path.Combine(OSPackageDir, "Retail", SelectedArchitecture, "fre");
@@ -70,12 +71,32 @@ namespace OneCore_Image_Designer.ViewModels.ImageBuild
         public string SelectedBuildTool
         {
             get => _selectedBuildTool;
-            set { _selectedBuildTool = value; OnPropertyChanged(); OnPropertyChanged(nameof(IsImageApp)); OnPropertyChanged(nameof(IsImggenCmd)); OnPropertyChanged(nameof(BuildToolLabel)); }
+            set { _selectedBuildTool = value; OnPropertyChanged(); OnPropertyChanged(nameof(IsImageApp)); OnPropertyChanged(nameof(IsImggenCmd)); OnPropertyChanged(nameof(BuildToolLabel)); TryAutoDiscoverBuildTool(); }
         }
 
         public bool IsImageApp => SelectedBuildTool == "imageapp.exe";
         public bool IsImggenCmd => SelectedBuildTool == "imggen.cmd";
         public string BuildToolLabel => IsImageApp ? "imageapp.exe" : "imggen.cmd";
+
+        /// <summary>
+        /// 按 OS 包路径中出现的 build 号，自动在已内置安装的 ADK（addonkit\adk\&lt;build&gt;\）中定位工具；
+        /// 命中即填入路径（用户仍可手动浏览覆盖）。未命中则不动现有值。
+        /// </summary>
+        private void TryAutoDiscoverBuildTool()
+        {
+            if (string.IsNullOrWhiteSpace(OSPackageDir)) return;
+            foreach (var build in AdkToolService.GetInstalledBuilds())
+            {
+                if (OSPackageDir.IndexOf(build.ToString(), StringComparison.Ordinal) < 0) continue;
+                var found = AdkToolService.FindToolPath(build, BuildToolLabel);
+                if (found != null)
+                {
+                    BuildToolPath = found;
+                    BuildStatus = $"已自动发现 ADK {build} 的 {BuildToolLabel}";
+                    return;
+                }
+            }
+        }
 
         // === 架构选择 ===
         public ObservableCollection<string> Architectures { get; }

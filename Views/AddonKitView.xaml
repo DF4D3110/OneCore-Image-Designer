@@ -1,0 +1,147 @@
+<UserControl x:Class="OneCore_Image_Designer.Views.AddonKitView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             mc:Ignorable="d"
+             d:DesignHeight="620" d:DesignWidth="1000">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                  Background="{StaticResource IcdStartBackground}">
+        <Grid Background="{StaticResource IcdStartBackground}" Margin="28" MaxWidth="1600"
+              HorizontalAlignment="Center">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <StackPanel>
+                <TextBlock Text="addonkit 工作区（IoT Core 工具链）" FontSize="26" FontWeight="Light"
+                           Foreground="{StaticResource ICDTitleForeground}"/>
+                <TextBlock Text="内置微软 iot-adk-addonkit 17763-v7：建包、构建 FFU / Recovery 镜像。命令以提权 PowerShell 会话执行，输出实时回传到下方日志。"
+                           Margin="0,6,0,14" Foreground="{StaticResource ICDSubtle}" TextWrapping="Wrap"/>
+            </StackPanel>
+
+            <!-- 状态与模块检测 -->
+            <Border Grid.Row="1" Style="{StaticResource ICDCard}" Margin="0,0,0,12">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock Text="{Binding ModuleStatus}" FontWeight="Bold"
+                                       Foreground="{StaticResource ICDAccentDark}"/>
+                            <TextBlock Text="{Binding Status}" Foreground="{StaticResource ICDSubtle}"
+                                       TextWrapping="Wrap" Margin="0,4,0,0"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
+                            <Button Content="ADK 工具下载…" Command="{Binding OpenAdkDownloadCommand}"
+                                    Style="{StaticResource ICDToolbarButton}" Margin="0,0,8,0"/>
+                            <Button Content="打开交互 Shell" Command="{Binding LaunchShellCommand}"
+                                    Style="{StaticResource ICDToolbarPrimaryButton}"/>
+                        </StackPanel>
+                    </Grid>
+                    <DockPanel Margin="0,10,0,0">
+                        <TextBlock Text="工作区：" VerticalAlignment="Center" Foreground="{StaticResource ICDSubtle}"/>
+                        <Button DockPanel.Dock="Right" Content="浏览…" Command="{Binding BrowseWorkspaceCommand}"
+                                Style="{StaticResource ICDToolbarButton}" Margin="8,0,0,0"/>
+                        <CheckBox DockPanel.Dock="Right" Content="使用内置示例工作区"
+                                  IsChecked="{Binding UseSampleWorkspace}" Margin="0,0,12,0"
+                                  VerticalAlignment="Center"/>
+                        <TextBox Text="{Binding WorkspacePath, UpdateSourceTrigger=PropertyChanged}"
+                                 VerticalContentAlignment="Center" IsReadOnly="True"/>
+                    </DockPanel>
+
+                    <!-- 运行前检查 -->
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Text="ADK build：" VerticalAlignment="Center" Foreground="{StaticResource ICDSubtle}"/>
+                        <TextBox Text="{Binding BuildNumber, UpdateSourceTrigger=PropertyChanged}" Width="72"
+                                 VerticalContentAlignment="Center" Margin="4,0,12,0"/>
+                        <Button Content="运行前检查" Command="{Binding RunPreflightCommand}"
+                                Style="{StaticResource ICDToolbarButton}"/>
+                        <CheckBox Content="忽略检查仍然运行" IsChecked="{Binding AllowRunDespiteErrors}"
+                                  VerticalAlignment="Center" Margin="12,0,0,0"/>
+                    </StackPanel>
+                    <TextBlock Text="{Binding PreflightSummary}" TextWrapping="Wrap"
+                               FontFamily="Consolas" FontSize="11.5" Margin="0,6,0,0">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Foreground" Value="#FF2E7D32"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding PreflightHasErrors}" Value="True">
+                                        <Setter Property="Foreground" Value="#FFC62828"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </StackPanel>
+            </Border>
+
+            <!-- 产品 / BSP / 配置 -->
+            <Border Grid.Row="2" Style="{StaticResource ICDCard}" Margin="0,0,0,12">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="12"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="140"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="产品 (Products)" Foreground="{StaticResource ICDSubtle}"/>
+                        <ListBox ItemsSource="{Binding ProductNames}" SelectedItem="{Binding SelectedProduct}"
+                                 Height="96" Margin="0,4,0,0"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <TextBlock Text="板级支持包 (BSP)" Foreground="{StaticResource ICDSubtle}"/>
+                        <ListBox ItemsSource="{Binding BspNames}" Height="96" Margin="0,4,0,0"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="3">
+                        <TextBlock Text="配置" Foreground="{StaticResource ICDSubtle}"/>
+                        <ComboBox ItemsSource="{Binding ConfigurationChoices}" SelectedItem="{Binding Configuration}"
+                                  Margin="0,4,0,0"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="4" VerticalAlignment="Bottom" Margin="12,0,0,0">
+                        <Button Content="发现产品 / BSP" Command="{Binding DiscoverProductsCommand}"
+                                Style="{StaticResource ICDToolbarButton}" Margin="0,0,0,4"/>
+                        <Button Content="导入示例包" Command="{Binding ImportSamplePackagesCommand}"
+                                Style="{StaticResource ICDToolbarButton}" IsEnabled="{Binding IsNotBusy}"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- 构建操作 + 日志 -->
+            <Grid Grid.Row="3">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="200"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                <Border Style="{StaticResource ICDCard}">
+                    <StackPanel>
+                        <TextBlock Text="构建操作" FontSize="15" Foreground="{StaticResource ICDTitleForeground}" Margin="0,0,0,8"/>
+                        <Button Content="构建全部包" Command="{Binding BuildPackagesCommand}"
+                                Style="{StaticResource ICDToolbarButton}" Margin="0,0,0,6"
+                                IsEnabled="{Binding IsNotBusy}"/>
+                        <Button Content="构建 FFU 镜像" Command="{Binding BuildFfuCommand}"
+                                Style="{StaticResource ICDToolbarPrimaryButton}" Margin="0,0,0,6"
+                                IsEnabled="{Binding IsNotBusy}"/>
+                        <Button Content="构建 Recovery" Command="{Binding BuildRecoveryCommand}"
+                                Style="{StaticResource ICDToolbarButton}" Margin="0,0,0,6"
+                                IsEnabled="{Binding IsNotBusy}"/>
+                        <Button Content="取消" Command="{Binding CancelOperationCommand}"
+                                Style="{StaticResource ICDToolbarButton}" Margin="0,4,0,0"
+                                IsEnabled="{Binding IsBusy}"/>
+                        <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource ICDSubtle}" Margin="0,10,0,0"
+                                   Text="提示：构建需要已安装对应 build 的 ADK 工具与 IoT Core Kits；Retail 配置还需签名证书。"/>
+                    </StackPanel>
+                </Border>
+                <Border Grid.Column="2" Style="{StaticResource ICDCard}">
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Top" Text="执行日志" FontSize="15"
+                                   Foreground="{StaticResource ICDTitleForeground}" Margin="0,0,0,8"/>
+                        <ListBox ItemsSource="{Binding LogLines}" FontFamily="Consolas" FontSize="11.5"
+                                 ScrollViewer.VerticalScrollBarVisibility="Auto"/>
+                    </DockPanel>
+                </Border>
+            </Grid>
+        </Grid>
+    </ScrollViewer>
+</UserControl>

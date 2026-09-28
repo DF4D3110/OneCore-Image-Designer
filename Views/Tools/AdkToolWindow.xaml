@@ -1,0 +1,87 @@
+<Window x:Class="OneCore_Image_Designer.Views.Tools.AdkToolWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="ADK 工具下载 / addonkit"
+        Width="880" Height="660" MinWidth="720" MinHeight="540"
+        WindowStartupLocation="CenterOwner"
+        Background="#FFF5F5F5">
+    <!--
+      布局说明：统一用 MinHeight 而非固定 Height，行高一律 Auto，
+      使控件在高 DPI（250% 缩放）下随字体自然撑开，不裁切文字。
+    -->
+    <Grid Margin="14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 状态与说明 -->
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="🧰 ADK 工具下载与内置 addonkit"
+                       FontSize="16" FontWeight="Bold" Foreground="#FF2C5AA0" Margin="0,0,0,8"/>
+            <TextBlock x:Name="TxtModule" TextWrapping="Wrap" FontSize="11.5" Margin="0,0,0,4"/>
+            <Border Background="#FFFFF8E1" BorderBrush="#FFE0C87A" BorderThickness="1"
+                    CornerRadius="4" Padding="10" Margin="0,0,0,8">
+                <TextBlock TextWrapping="Wrap" FontSize="11.5" Foreground="#FF7A5C00"
+                           Text="工具包从 GitHub Release（tag: adktool）按 Windows build 号下载，解压到程序目录 addonkit\adk\&lt;build&gt;\，下载完成后用 GitHub 资产自带的 sha256 digest 校验，不一致即删除。镜像构建页会按 OS 包路径中的 build 号自动发现 imageapp.exe / imggen.cmd。"/>
+            </Border>
+        </StackPanel>
+
+        <!-- 工具栏 -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
+            <Button x:Name="BtnRefresh" Content="刷新列表" Padding="14,5" Margin="0,0,8,0" Click="Refresh_Click"/>
+            <Button Content="打开 addonkit Shell" Padding="14,5" Margin="0,0,8,0" Click="Shell_Click"/>
+            <Button Content="打开 ADK 目录" Padding="14,5" Margin="0,0,8,0" Click="OpenDir_Click"/>
+            <TextBlock Text="（shell 需本机已安装 IoT Core Kits / ADK，见 addonkit\Tools\README.md）"
+                       VerticalAlignment="Center" Foreground="#FF808080" FontSize="11"/>
+        </StackPanel>
+
+        <!-- 资产列表 -->
+        <Border Grid.Row="2" Background="White" BorderBrush="#FFDDDDDD" BorderThickness="1" CornerRadius="4">
+            <DataGrid x:Name="GridAssets" AutoGenerateColumns="False" IsReadOnly="True"
+                      HeadersVisibility="Column" CanUserAddRows="False" SelectionMode="Single"
+                      GridLinesVisibility="Horizontal" BorderThickness="0" Margin="2">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Build" Binding="{Binding Build}" Width="90"/>
+                    <DataGridTextColumn Header="文件" Binding="{Binding FileName}" Width="140"/>
+                    <DataGridTextColumn Header="大小" Binding="{Binding Size}" Width="100"/>
+                    <DataGridTextColumn Header="SHA256" Binding="{Binding DigestDisplay}" Width="2*"/>
+                    <DataGridTemplateColumn Header="操作" Width="120">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <Button Padding="10,3" Margin="2" Click="Download_Click" Tag="{Binding}">
+                                    <Button.Style>
+                                        <Style TargetType="Button">
+                                            <Setter Property="Content" Value="下载"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding Installed}" Value="True">
+                                                    <Setter Property="Content" Value="已安装"/>
+                                                    <Setter Property="IsEnabled" Value="False"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
+                                </Button>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                </DataGrid.Columns>
+            </DataGrid>
+        </Border>
+
+        <!-- 下载进度 -->
+        <ProgressBar Grid.Row="3" x:Name="ProgressDownload" Minimum="0" Maximum="100"
+                     Height="16" Margin="0,8,0,6"/>
+
+        <!-- 日志 -->
+        <Border Grid.Row="4" Background="White" BorderBrush="#FFDDDDDD" BorderThickness="1" CornerRadius="4"
+                MinHeight="120" MaxHeight="180">
+            <TextBox x:Name="TxtLog" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0"
+                     VerticalScrollBarVisibility="Auto" FontSize="11" Padding="6"
+                     Background="Transparent"/>
+        </Border>
+    </Grid>
+</Window>

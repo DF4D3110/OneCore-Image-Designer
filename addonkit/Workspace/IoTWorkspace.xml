@@ -1,0 +1,82 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<IoTWorkspace>
+    <!--Current active configuration-->
+    <CurrentEnv>arm</CurrentEnv>
+    <Config>
+        <OemName>Contoso</OemName>
+        <!--Default build output directory-->
+        <BuildDir>%IOTWKSPACE%\Build\%BSP_ARCH%</BuildDir>
+        <!--IoT Core kit package location, default is Windows10KitsRoot-->
+        <MSPkgRoot />
+        <eWDK_ISO />
+        <WindowsSDKVersion>10.0.16299.0</WindowsSDKVersion>
+        <!--Specify the ev signing certificate details, Format given below -->
+        <!--/s my /i "Issuer" /n "Subject" /fd SHA256-->
+        <EVSignToolParam />
+
+        <!--/s my /i "Issuer" /n "Subject" /ac "C:\CrossCertRoot.cer" /fd SHA256-->
+        <RetailSignToolParam> /s my /i "Contoso Production PCA 2020" /n "Contoso KMCI Codesigning" /fd SHA256</RetailSignToolParam>
+    </Config>
+    <Env Name="arm">
+        <BSPVersion>10.0.0.0</BSPVersion>
+        <BSPPkgDir>%PKGBLD_DIR%</BSPPkgDir>
+    </Env>
+    <Env Name="x64">
+        <BSPVersion>10.0.0.0</BSPVersion>
+        <BSPPkgDir>%PKGBLD_DIR%</BSPPkgDir>
+    </Env>
+    <Env Name="x86">
+        <BSPVersion>10.0.0.0</BSPVersion>
+        <BSPPkgDir>%PKGBLD_DIR%</BSPPkgDir>
+    </Env>
+    <Env Name="arm64">
+        <BSPVersion>10.0.0.0</BSPVersion>
+        <BSPPkgDir>%PKGBLD_DIR%</BSPPkgDir>
+    </Env>
+    <Security>
+        <SecureBoot>
+            <PlatformKey>
+                <Cert>Contoso-RootPK.cer</Cert>
+            </PlatformKey>
+            <KeyExchangeKey>
+                <Cert>Contoso-KEK.cer</Cert>
+            </KeyExchangeKey>
+            <Database>
+                <Test/>
+                <Retail/>
+            </Database>
+        </SecureBoot>
+        <BitLocker>
+            <DataRecoveryAgent>
+                <Cert>Contoso-DRA.cer</Cert>
+            </DataRecoveryAgent>
+        </BitLocker>
+        <SIPolicy>
+            <Root>
+                <Cert>OEM-Root.cer</Cert>
+                <Cert>Contoso-Root.cer</Cert>
+                <Cert>Contoso-RootPK.cer</Cert>
+            </Root>
+            <Update>
+                <!-- New Update Signer used as default-->
+                <Cert>Contoso-KEK.cer</Cert>
+                <!-- Old Update Signer used to create SIPolicy**-Old.p7b-->
+                <Cert>OEM-PAUTH.cer</Cert>
+            </Update>
+            <User>
+                <Test/>
+                <Retail>
+                    <Cert>OEM-UMCI.cer</Cert>
+                    <Cert>Contoso-UMCI.cer</Cert>
+                </Retail>
+            </User>
+            <Kernel>
+                <Test/>
+                <Retail>
+                    <Cert>MicrosoftCrossCert2019.cer</Cert>
+                    <Cert>Contoso-KMCI.cer</Cert>
+                </Retail>
+            </Kernel>
+        </SIPolicy>
+    </Security>
+</IoTWorkspace>

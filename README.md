@@ -12,6 +12,8 @@ The UI follows the compact, light ICD workspace style. This is an independent im
 - **UUP update query and download** — query Microsoft UUP by SKU, architecture, ring, branch, and release filter; choose a returned update, save/load snapshots, and download the selected update using the vendored UUPMediaCreator core.
 - **SxS source tools** — browse the included pureSxS and explodeSxS source and workflow scripts. This page checks the bundled script set; it does not currently execute the upstream workflows.
 - **Offline utilities** — registry, driver, firmware, WinSxS hash, dependency, and component-store tools.
+- **Bundled addonkit** — Microsoft's `iot-adk-addonkit` (17763-v7, PowerShell IoT Core imaging toolchain) ships in-repo under `addonkit/` and is copied to the output directory on build. Feature → "addonkit 工作区" opens a dedicated page: module/ADK status, sample workspace discovery of products/BSPs, a preflight check (bundled module, workspace XML, IoT Core Kits registry for 17763, MSPkgRoot/KITSROOT reachability, installed ADK build, Retail signing parameters) that gates commands unless explicitly overridden, and elevated one-click commands (build packages, build FFU, build recovery, import sample packages) with live transcript logging. Tools → "ADK 工具下载 / addonkit…" remains for downloading tool zips and launching the interactive shell.
+- **ADK tool download** — per-build ADK tool zips (imageapp.exe, imggen.cmd, etc.) are hosted on this repository's GitHub Release (tag `adktool`); the in-app manager lists them, downloads the selected build, verifies the SHA256 digest provided by the GitHub asset API, and extracts to `addonkit\adk\<build>\`. The Image Build page auto-discovers the tool matching the OS package build number from this directory.
 
 UUP media conversion is not yet wired into the application. SxS execution is also deliberately not automated: `prepare.cmd` formats `X:`, and the referenced CBS executables are not bundled while their redistribution terms remain unverified.
 
@@ -34,6 +36,8 @@ dotnet build ".\OneCore Image Designer.csproj" --configuration Release
 
 The main build also builds the repository-local `UupBridge` and copies its runtime files to the application output. No external UUPMediaCreator checkout or .NET 10 runtime is required. NuGet packages are restored by the SDK in the normal way.
 
+The build also copies the bundled `addonkit/` tree (Microsoft iot-adk-addonkit 17763-v7) into the output directory. The copy target is additive: files previously installed under `addonkit\adk\` by the in-app downloader are left in place. The addonkit shell additionally requires the Windows 10 IoT Core Kits (1809 / 10.0.17763.x) and the ADK to be installed on the machine, per the upstream README.
+
 Generated `bin`, `obj`, `build`, and `intermediate` trees, debug symbols, and generated Appx files are excluded from the repository; release packages should be attached to GitHub Releases instead. The checked-in `7z.dll` architecture variants, `makeappx.exe` fixture and its support DLLs, and `Tools/wcpex` binaries are retained runtime inputs used by the package-generation sources or embedded by the application, not build outputs.
 
 Run the generated application from:
@@ -55,6 +59,7 @@ MobilePackageGen/         Package-generation libraries
 UupBridge/               .NET 8 adapter over the vendored UUP core
 ThirdParty/UUPMediaCreator/  Vendored upstream UUP source closure
 ThirdParty/SxS/           Isolated GPL-3 pureSxS and explodeSxS sources
+addonkit/                 Bundled Microsoft iot-adk-addonkit 17763-v7 (PowerShell toolchain + sample workspace); downloaded ADK tool sets land under addonkit/adk/<build>/ at runtime
 ```
 
 ## Third-party code and licensing
@@ -64,6 +69,7 @@ The repository root `LICENSE` remains the project-level MIT license; it does not
 - UUPMediaCreator is MIT-licensed. Its original license and README are retained under `ThirdParty/UUPMediaCreator/`.
 - The vendored Cabinet LZX decoder is dual-licensed under LGPL-2.1 or MS-PL; its original header and license notice are retained.
 - pureSxS and explodeSxS are separate GPL-3.0 components, each retaining its own `LICENSE` and upstream README. Their source files are not represented as MIT-licensed project code.
+- `addonkit/` is an unmodified copy of Microsoft's open-source `iot-adk-addonkit` (release 17763-v7), MIT-licensed; its original `LICENSE` is retained at `addonkit/LICENSE`. The sample test certificates and `.pfx` files inside it are Microsoft's publicly published sample keys shipped with the official toolkit, not private credentials.
 - `CbsExploder` and `SxSFounder` binaries are excluded because their independent redistribution terms have not been established. Microsoft package samples from the input SxS directory are not included.
 
 See [`ThirdParty/THIRD-PARTY-NOTICES.md`](ThirdParty/THIRD-PARTY-NOTICES.md) for the component inventory and provenance details. Preserve the per-component notices when redistributing the repository. This inventory records source boundaries; it is not a legal opinion on distribution of a combined work.

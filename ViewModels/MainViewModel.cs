@@ -49,6 +49,7 @@ namespace OneCore_Image_Designer.ViewModels
         private Cbs.CbsBuildViewModel? _cbsBuildVM;
         private UupViewModel? _uupVM;
         private SxsViewModel? _sxsVM;
+        private AddonKitViewModel? _addonKitVM;
 
         public void NavigateToUup()
         {
@@ -70,6 +71,18 @@ namespace OneCore_Image_Designer.ViewModels
 
         [RelayCommand] public void OpenUup() => NavigateToUup();
         [RelayCommand] public void OpenSxs() => NavigateToSxs();
+
+        /// <summary>打开（或激活）内置 addonkit 工作区标签页。</summary>
+        public void NavigateToAddonKit()
+        {
+            OpenTab("addonkit", "addonkit 工作区", () =>
+            {
+                _addonKitVM ??= new AddonKitViewModel(this);
+                return ((object)_addonKitVM, null);
+            });
+        }
+
+        [RelayCommand] public void OpenAddonKit() => NavigateToAddonKit();
 
         /// <summary>打开（或激活）CBS 构建标签页。</summary>
         [RelayCommand] public void OpenCbsBuild() => NavigateToCbsBuild();
@@ -361,6 +374,7 @@ namespace OneCore_Image_Designer.ViewModels
         [RelayCommand] public void OpenToolHash() => ShowToolWindow(() => new WinSxSHashCalculatorWindow(), "WinSxS Hash 计算器");
         [RelayCommand] public void OpenToolDependency() => ShowToolWindow(() => new DependencyViewerWindow(), "包依赖关系分析器");
         [RelayCommand] public void OpenToolStoreVerify() => ShowToolWindow(() => new ComponentStoreVerifierWindow(), "组件存储完整性校验");
+        [RelayCommand] public void OpenAdkTool() => ShowToolWindow(() => new AdkToolWindow(), "ADK 工具下载");
 
         private void ShowToolWindow(Func<Window> create, string name)
         {

@@ -56,6 +56,17 @@
     <EmbeddedResource Include="Schemas\OEMInput.V2.xsd" />
   </ItemGroup>
 
+  <!-- 内置微软 iot-adk-addonkit 17763-v7：整目录拷入输出 addonkit\，
+       运行时下载的 ADK 工具落在 addonkit\adk\（本目标只增改不删，保留已装工具） -->
+  <Target Name="CopyAddonKitToOutput" AfterTargets="Build">
+    <ItemGroup>
+      <AddonKitSource Include="$(MSBuildProjectDirectory)\addonkit\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(AddonKitSource)"
+          DestinationFiles="@(AddonKitSource->'$(OutDir)addonkit\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
   <Target Name="CopyUupBridgeToOutput" AfterTargets="Build">
     <ItemGroup>
       <UupBridgeOutput Include="$(MSBuildProjectDirectory)\UupBridge\bin\$(Configuration)\net8.0\**\*.*" />

@@ -1,0 +1,37 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<WindowsCustomizations>
+  <PackageConfig xmlns="urn:schemas-Microsoft-com:Windows-ICD-Package-Config.v1.0">
+    <ID>1bd4d86d-c817-4b74-93d2-b5083d9f3c5b</ID>
+    <Name>SmartDisplayProv</Name>
+    <Version>3.2.0.0</Version>
+    <OwnerType>OEM</OwnerType>
+    <Rank>0</Rank>
+  </PackageConfig>
+  <Settings xmlns="urn:schemas-microsoft-com:windows-provisioning">
+    <Customizations>
+      <Common>
+        <!--Common settings here-->
+        <Policies>
+          <ApplicationManagement>
+            <AllowAllTrustedApps>Yes</AllowAllTrustedApps>
+          </ApplicationManagement>
+        </Policies>
+        <StartupApp>
+          <Default>IoTCoreDefaultAppUnderTest_xt56s901y70eg!App</Default>
+        </StartupApp>
+        <UniversalAppInstall>
+          <UserContextApp>
+            <Application PackageFamilyName="IoTCoreDefaultAppUnderTest_xt56s901y70eg" Name="SmartDisplay">
+              <ApplicationFile>SmartDisplay.appx</ApplicationFile>
+              <DependencyAppxFiles>
+                <Dependency Name="Microsoft.NET.Native.Framework.2.1">Microsoft.NET.Native.Framework.2.1.appx</Dependency>
+                <Dependency Name="Microsoft.NET.Native.Runtime.2.1">Microsoft.NET.Native.Runtime.2.1.appx</Dependency>
+                <Dependency Name="Microsoft.VCLibs.x86.14.00">Microsoft.VCLibs.x86.14.00.appx</Dependency>
+              </DependencyAppxFiles>
+            </Application>
+          </UserContextApp>
+        </UniversalAppInstall>
+      </Common>
+    </Customizations>
+  </Settings>
+</WindowsCustomizations>

@@ -14,3 +14,9 @@ obj/
 TestResults/
 UupBridge/bin/
 UupBridge/obj/
+
+# addonkit 为微软 iot-adk-addonkit 17763-v7 内置副本：其目录/文件必须随仓库发布，
+# 上面的通配规则（bin/、**/build/、*.tmp 等）不得命中这里。
+!addonkit/**
+!addonkit/**/Build/
+!addonkit/**/bin/

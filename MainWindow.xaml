@@ -70,6 +70,9 @@
         <DataTemplate DataType="{x:Type vm:SxsViewModel}">
             <views:SxsView/>
         </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:AddonKitViewModel}">
+            <views:AddonKitView/>
+        </DataTemplate>
     </Window.Resources>
     <Window.DataContext>
         <vm:MainViewModel/>
@@ -104,6 +107,7 @@
                 <Separator/>
                 <MenuItem Header="UUP 更新查询与下载" Command="{Binding OpenUupCommand}"/>
                 <MenuItem Header="SxS / CBS 工具" Command="{Binding OpenSxsCommand}"/>
+                <MenuItem Header="addonkit 工作区" Command="{Binding OpenAddonKitCommand}"/>
             </MenuItem>
             <MenuItem Header="工具(_T)">
                 <MenuItem Header="离线注册表编辑器" Command="{Binding OpenToolRegistryCommand}"/>
@@ -113,6 +117,8 @@
                 <MenuItem Header="WinSxS Hash 计算器" Command="{Binding OpenToolHashCommand}"/>
                 <MenuItem Header="包依赖关系分析器" Command="{Binding OpenToolDependencyCommand}"/>
                 <MenuItem Header="组件存储完整性校验" Command="{Binding OpenToolStoreVerifyCommand}"/>
+                <Separator/>
+                <MenuItem Header="ADK 工具下载 / addonkit…" Command="{Binding OpenAdkToolCommand}"/>
             </MenuItem>
             <MenuItem Header="帮助(_H)">
                 <MenuItem Header="关于 OneCore Image Designer" Click="About_Click"/>
