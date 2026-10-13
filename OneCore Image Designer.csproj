@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -33,6 +33,8 @@
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="RawDiskLib" Version="0.2.1" />
     <PackageReference Include="LTRData.DiscUtils" Version="1.0.55" />
+    <!-- CbsSafety 用它判定目标卷是否由 VHD/VHDX 支撑（强制门禁） -->
+    <PackageReference Include="System.Management" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>

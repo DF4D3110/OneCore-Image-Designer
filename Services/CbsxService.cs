@@ -205,6 +205,22 @@ namespace OneCore_Image_Designer.Services
             try { Fn<ReleaseFn>(pUnk, VT_Release)(pUnk); } catch { }
         }
 
+        /// <summary>
+        /// 释放 ICbsSession 的 RCW，确保 COM 引用计数归零（CBS 才会真正卸载离线 hive）。
+        /// 【干净收尾的关键】不释放的话，即使 FinalizeEx 成功，hive 也可能仍被持有。
+        /// </summary>
+        static void SafeReleaseSession(ICbsSession? session)
+        {
+            if (session == null) return;
+            try
+            {
+                if (Marshal.IsComObject(session)) Marshal.FinalReleaseComObject(session);
+            }
+            catch { }
+            // 给 CBS 一点时间完成 hive 卸载
+            try { System.Threading.Thread.Sleep(300); } catch { }
+        }
+
         static string TakeCoTaskMemString(IntPtr p)
         {
             if (p == IntPtr.Zero) return "";
@@ -423,6 +439,13 @@ namespace OneCore_Image_Designer.Services
             var res = new Result();
             try
             {
+                // ── 强制门禁：CBS 只能在挂载的 VHD/VHDX 上操作（保护宿主系统）──
+                var gate = CbsSafety.CheckTarget(winDir);
+                log?.Invoke("门禁: " + gate.Reason);
+                if (!gate.Allowed) { res.Error = gate.Reason; return res; }
+                if (CbsSafety.TryDetectForeignSession(winDir, out string foreign))
+                { res.Error = foreign; return res; }
+
                 var session = OpenSession(winDir, "OneCoreImageDesigner", log, out string? err);
                 if (session == null) { res.Error = err ?? "会话创建失败"; return res; }
 
@@ -451,6 +474,18 @@ namespace OneCore_Image_Designer.Services
                 }
                 finally { Release(pEnum); }
 
+                // 【干净收尾】只读操作也必须关会话：
+                // 不调用 FinalizeEx 会让 CBS 挂载的离线 hive（SOFTWARE/SYSTEM/.../ntuser.dat）
+                // 一直留在挂载状态，下一次操作就被"残留挂载"挡住。
+                try
+                {
+                    int hrf = session.FinalizeEx(0, out CbsRequiredAction act);
+                    if (hrf < 0) log?.Invoke($"  FinalizeEx 返回 0x{hrf:X8}（只读会话，通常可忽略）");
+                    else log?.Invoke($"  会话已收尾（RebootRequired={act == CbsRequiredAction.Reboot}）");
+                }
+                catch (Exception ex) { log?.Invoke("  FinalizeEx 异常: " + ex.Message); }
+                finally { SafeReleaseSession(session); }
+
                 log?.Invoke($"枚举到 {res.EnumeratedIdentities.Count} 个包");
                 res.Success = true;
                 return res;
@@ -470,6 +505,13 @@ namespace OneCore_Image_Designer.Services
             {
                 if (!plan.Success) { res.Error = "计划无效: " + plan.Error; return res; }
                 if (plan.Operations.Count == 0) { res.Error = "计划为空"; return res; }
+
+                // ── 强制门禁：CBS 只能在挂载的 VHD/VHDX 上操作（保护宿主系统）──
+                var gate = CbsSafety.CheckTarget(winDir);
+                log?.Invoke("门禁: " + gate.Reason);
+                if (!gate.Allowed) { res.Error = gate.Reason; return res; }
+                if (CbsSafety.TryDetectForeignSession(winDir, out string foreign))
+                { res.Error = foreign; return res; }
 
                 var session = OpenSession(winDir, "OneCoreImageDesigner", log, out string? err);
                 if (session == null) { res.Error = err ?? "会话创建失败"; return res; }
