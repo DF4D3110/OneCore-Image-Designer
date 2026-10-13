@@ -24,6 +24,10 @@
             <RowDefinition Height="*"/>      <!-- 主体两栏 -->
             <RowDefinition Height="Auto"/>   <!-- 输出目录 + 构建 -->
             <RowDefinition Height="Auto"/>   <!-- 状态 -->
+        <RowDefinition Height="Auto"/>   <!-- 服务中枢 -->
+        <RowDefinition Height="Auto"/>   <!-- 解包 -->
+        <RowDefinition Height="Auto"/>   <!-- 摘要 -->
+        <RowDefinition Height="Auto"/>   <!-- 报告 -->
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0" Margin="0,0,0,10" TextWrapping="Wrap" Foreground="{StaticResource ICDSubtle}"
@@ -99,5 +103,101 @@
 
         <TextBlock Grid.Row="3" Text="{Binding Status}" Margin="0,8,0,0" TextWrapping="Wrap"
                    Foreground="{StaticResource ICDTitleForeground}"/>
+
+        <!-- ═══════════ CBS 服务中枢（纯增量新增；全部由本程序完成，无外部 exe / 脚本）═══════════ -->
+        <Expander Grid.Row="4" Margin="0,14,0,0" IsExpanded="False"
+                  Header="CBS 服务中枢 —— 服务一个已有镜像（世代判定 → 依赖图 → 组装计划 → 执行）">
+            <StackPanel Margin="4,8,4,4">
+                <TextBlock TextWrapping="Wrap" Foreground="{StaticResource ICDSubtle}"
+                           Text="目标镜像必须是【挂载的 VHD/VHDX】上的目录（例 G:\Windows）。对物理盘或宿主系统盘操作会破坏系统，程序会直接拒绝。所有会写镜像的操作默认『试运行』。"/>
+
+                <TextBlock Text="目标镜像的 Windows 目录" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <DockPanel>
+                    <Button DockPanel.Dock="Right" Content="浏览…" Command="{Binding BrowseTargetWinDirCommand}" Style="{StaticResource ICDToolbarButton}" Margin="8,0,0,0"/>
+                    <TextBox Text="{Binding TargetWinDir, UpdateSourceTrigger=PropertyChanged}"/>
+                </DockPanel>
+
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <Button Content="判定世代与通道" Command="{Binding CheckChannelCommand}" Style="{StaticResource ICDToolbarPrimaryButton}" Margin="0,0,8,0"/>
+                    <CheckBox Content="试运行（不修改镜像）" IsChecked="{Binding ServicingDryRun}" VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <Border Margin="0,8,0,0" Padding="10,8" Background="{StaticResource ICDCard}" CornerRadius="4">
+                    <TextBlock Text="{Binding ChannelBanner}" TextWrapping="Wrap" Foreground="{StaticResource ICDAccentDark}"/>
+                </Border>
+
+                <TextBlock Text="SxS 内容目录（多个用分号分隔；用于依赖图与组装计划）" FontWeight="SemiBold" Margin="0,12,0,2"/>
+                <TextBox Text="{Binding AssemblySourceDirs, UpdateSourceTrigger=PropertyChanged}"/>
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <Button Content="查看依赖图" Command="{Binding ShowGraphCommand}" Style="{StaticResource ICDToolbarButton}" Margin="0,0,8,0"/>
+                    <Button Content="计算组装计划" Command="{Binding ShowAssemblyPlanCommand}" Style="{StaticResource ICDToolbarButton}" Margin="0,0,8,0"/>
+                </StackPanel>
+
+                <TextBlock Text="SKU 组装清单（可空 = 跳过 SKU 步骤）" FontWeight="SemiBold" Margin="0,12,0,2"/>
+                <DockPanel>
+                    <Button DockPanel.Dock="Right" Content="浏览…" Command="{Binding PickSkuFileCommand}" Style="{StaticResource ICDToolbarButton}" Margin="8,0,0,0"/>
+                    <TextBox Text="{Binding AssemblySkuFile, UpdateSourceTrigger=PropertyChanged}"/>
+                </DockPanel>
+
+                <Button Content="执行原生 staging（铺底 → 装 SKU → DISM → 收尾）" Command="{Binding RunNativeStagingCommand}"
+                        Style="{StaticResource ICDToolbarPrimaryButton}" HorizontalAlignment="Left" Margin="0,12,0,0"/>
+            </StackPanel>
+        </Expander>
+
+        <!-- ═══════════ 更新包 / Repair Content 解包（纯增量新增）═══════════ -->
+        <Expander Grid.Row="5" Margin="0,10,0,0" IsExpanded="False"
+                  Header="更新包与 Repair Content 解包（PSF + CAB）">
+            <StackPanel Margin="4,8,4,4">
+                <TextBlock TextWrapping="Wrap" Foreground="{StaticResource ICDSubtle}"
+                           Text="更新包 = 配对 CAB（描述）+ PSF（PA30 载荷）。Repair Content 有硬性解包顺序：文件名含 neutral-mergedcomponents 的必须先单独解包，解完删除其 PSF/CAB，再解其余 —— 否则部分组件会被替换成异常截断的版本。"/>
+
+                <TextBlock Text="更新包文件（.cab / .psm / .wim，多个用分号分隔）" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <DockPanel>
+                    <Button DockPanel.Dock="Right" Content="选择…" Command="{Binding PickUpdatePackageCommand}" Style="{StaticResource ICDToolbarButton}" Margin="8,0,0,0"/>
+                    <TextBox Text="{Binding UpdatePackagePaths, UpdateSourceTrigger=PropertyChanged}"/>
+                </DockPanel>
+                <TextBlock Text="更新包解包输出目录" FontWeight="SemiBold" Margin="0,8,0,2"/>
+                <DockPanel>
+                    <Button DockPanel.Dock="Right" Content="浏览…" Command="{Binding PickUpdateOutDirCommand}" Style="{StaticResource ICDToolbarButton}" Margin="8,0,0,0"/>
+                    <TextBox Text="{Binding UpdatePackageOutDir, UpdateSourceTrigger=PropertyChanged}"/>
+                </DockPanel>
+                <Button Content="解包更新包" Command="{Binding RunUpdatePackageCommand}" Style="{StaticResource ICDToolbarButton}" HorizontalAlignment="Left" Margin="0,8,0,0"/>
+
+                <Separator Margin="0,12,0,8"/>
+
+                <TextBlock Text="Repair Content 目录（含 cab/psf）" FontWeight="SemiBold" Margin="0,0,0,2"/>
+                <DockPanel>
+                    <Button DockPanel.Dock="Right" Content="选择…" Command="{Binding PickRepairContentDirCommand}" Style="{StaticResource ICDToolbarButton}" Margin="8,0,0,0"/>
+                    <TextBox Text="{Binding RepairContentDir, UpdateSourceTrigger=PropertyChanged}"/>
+                </DockPanel>
+                <TextBlock Text="Repair Content 解包输出目录" FontWeight="SemiBold" Margin="0,8,0,2"/>
+                <DockPanel>
+                    <Button DockPanel.Dock="Right" Content="浏览…" Command="{Binding PickRepairOutDirCommand}" Style="{StaticResource ICDToolbarButton}" Margin="8,0,0,0"/>
+                    <TextBox Text="{Binding RepairContentOutDir, UpdateSourceTrigger=PropertyChanged}"/>
+                </DockPanel>
+                <TextBlock Text="delta 源(base)目录（可空；PSF 的 PA30 载荷需要源文件才能还原）" FontWeight="SemiBold" Margin="0,8,0,2"/>
+                <DockPanel>
+                    <Button DockPanel.Dock="Right" Content="浏览…" Command="{Binding PickRepairBaseDirCommand}" Style="{StaticResource ICDToolbarButton}" Margin="8,0,0,0"/>
+                    <TextBox Text="{Binding RepairContentBaseDir, UpdateSourceTrigger=PropertyChanged}"/>
+                </DockPanel>
+
+                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                    <Button Content="查看解包顺序" Command="{Binding ShowRepairPlanCommand}" Style="{StaticResource ICDToolbarButton}" Margin="0,0,8,0"/>
+                    <Button Content="按顺序解包" Command="{Binding RunRepairContentCommand}" Style="{StaticResource ICDToolbarPrimaryButton}" Margin="0,0,8,0"/>
+                    <Button Content="检验已还原的存储" Command="{Binding InspectStoreCommand}" Style="{StaticResource ICDToolbarButton}"/>
+                </StackPanel>
+            </StackPanel>
+        </Expander>
+
+        <TextBlock Grid.Row="6" Text="{Binding ServicingSummary}" TextWrapping="Wrap" Margin="0,10,0,0"
+                   Foreground="{StaticResource ICDAccentDark}"/>
+
+        <Expander Grid.Row="7" Margin="0,8,0,0" IsExpanded="{Binding HasServicingReport}"
+                  Header="CBS 服务报告（依赖图 / 组装计划 / 执行结果）">
+            <TextBox Text="{Binding ServicingReport}" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
+                     FontFamily="Consolas" Height="220" VerticalScrollBarVisibility="Auto"
+                     HorizontalScrollBarVisibility="Auto" Margin="4,6,4,4"/>
+        </Expander>
+
     </Grid>
 </UserControl>

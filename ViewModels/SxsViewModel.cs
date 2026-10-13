@@ -37,7 +37,7 @@ namespace OneCore_Image_Designer.ViewModels
         [ObservableProperty] private string _pureOutputDir = string.Empty;
         [ObservableProperty] private bool _isPureExporting;
 
-        // ── explodeSxS 编排（C# 提权执行，默认不格式化）──
+        // ── 供原生流程复用的输入（架构 / 语言 / 语言包）；旧 explodeSxS 命令已移除，字段保留 ──
         [ObservableProperty] private string _explodeWorkDrive = "X:\\";
         [ObservableProperty] private string _explodeEdition = "Core";
         [ObservableProperty] private string _explodeArch = "amd64";
@@ -192,14 +192,14 @@ namespace OneCore_Image_Designer.ViewModels
                 IsPureExporting = false;
             }
         }
-        bool CanPureExport() => !IsPureExporting && !IsExploding;
+        bool CanPureExport() => !IsPureExporting;
 
-        [RelayCommand]
-        private void BrowseExplodeStack()
-        {
-            var dlg = new Microsoft.Win32.OpenFileDialog { Title = "选择 servicing stack 的 .mum", Filter = "包清单 (*.mum)|*.mum" };
-            if (dlg.ShowDialog() == true) ExplodeServicingStack = dlg.FileName;
-        }
+        // ─── 旧 explodeSxS 路线已整体移除 ───
+        // 原实现拼 PowerShell 序列、把 cbsx.exe / sxsfounder.exe 拷到工作盘再运行（外部 exe 调度）。
+        // 现已由 ExplodeSxSNativeService（全 C#）取代，见下方"原生流程"。
+        // · servicing stack 改为自动解析，不再需要手选 .mum（故移除 BrowseExplodeStack）
+        // · 语言包仍需指定，保留 BrowseExplodeLangPack
+        // · _explodeArch / _explodeLang / _explodeLanguagePack 被原生流程复用，字段保留
 
         [RelayCommand]
         private void BrowseExplodeLangPack()
@@ -207,66 +207,6 @@ namespace OneCore_Image_Designer.ViewModels
             var dlg = new Microsoft.Win32.OpenFileDialog { Title = "选择语言包 .mum", Filter = "包清单 (*.mum)|*.mum" };
             if (dlg.ShowDialog() == true) ExplodeLanguagePack = dlg.FileName;
         }
-
-        private Services.ExplodeSxSService.Config MakeExplodeConfig() => new()
-        {
-            WorkDrive = ExplodeWorkDrive,
-            Edition = ExplodeEdition,
-            Arch = ExplodeArch,
-            Lang = ExplodeLang,
-            ServicingStackMum = ExplodeServicingStack,
-            LanguagePackMum = ExplodeLanguagePack,
-            FormatWorkDrive = ExplodeFormatDrive,
-            CaptureWim = ExplodeCaptureWim,
-        };
-
-        [RelayCommand(CanExecute = nameof(CanExplode))]
-        private void RunExplodePreflight()
-        {
-            var pf = ExplodeSxSService.Preflight(MakeExplodeConfig());
-            var sb = new System.Text.StringBuilder();
-            foreach (var c in pf.Checks) sb.AppendLine("✓ " + c);
-            foreach (var b in pf.Blockers) sb.AppendLine("✗ " + b);
-            ExplodeSummary = sb.ToString().TrimEnd();
-            Status = pf.Ready ? "explodeSxS 预检通过，可执行（默认不格式化工作盘）" : "explodeSxS 预检存在阻断项";
-            Log(Status);
-        }
-
-        [RelayCommand(CanExecute = nameof(CanExplode))]
-        private async Task RunExplodeAsync()
-        {
-            var cfg = MakeExplodeConfig();
-            var pf = ExplodeSxSService.Preflight(cfg);
-            if (!pf.Ready)
-            {
-                MessageBox.Show("预检未通过：\n" + string.Join("\n", pf.Blockers), "explodeSxS",
-                    MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-            string warn = cfg.FormatWorkDrive
-                ? $"⚠ 将格式化 {cfg.WorkDrive} 盘！确认该盘无重要数据。\n\n" : "";
-            if (MessageBox.Show(warn + "将以管理员权限执行 explodeSxS 完整 staging 流程（DISM/cbsx/sxsfounder/reg），" +
-                    "工作盘内容会被覆盖。继续？", "explodeSxS 确认",
-                    MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
-
-            IsExploding = true;
-            var sink = EnsureTaskLog("explodeSxS staging");
-            try
-            {
-                var code = await ExplodeSxSService.RunAsync(cfg, m => sink.Write(m), CancellationToken.None);
-                sink.Write(code == 0 ? "✅ explodeSxS 完成" : $"explodeSxS 结束，退出码 {code?.ToString() ?? "超时/未知"}");
-                Status = code == 0 ? "explodeSxS 完成（日志见独立窗口）" : "explodeSxS 未成功，见日志";
-            }
-            finally
-            {
-                sink.MarkFinished();
-                IsExploding = false;
-                RunExplodePreflightCommand.NotifyCanExecuteChanged();
-                RunExplodeCommand.NotifyCanExecuteChanged();
-                RunPureExportCommand.NotifyCanExecuteChanged();
-            }
-        }
-        bool CanExplode() => !IsExploding && !IsPureExporting;
 
         // ─────────────── 原生流程（纯 C#，不使用 cbsx.exe / sxsfounder.exe）───────────────
         // 纯增量：不改动上面任何现有字段与命令，避免影响既有 UI 行为。

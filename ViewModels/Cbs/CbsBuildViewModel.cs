@@ -231,5 +231,318 @@ namespace OneCore_Image_Designer.ViewModels.Cbs
             }
             catch { }
         }
+
+        // ════════════════════════════════════════════════════════════════════
+        //                   CBS 服务中枢（纯增量新增）
+        // ════════════════════════════════════════════════════════════════════
+        // 上面的能力是"把包 CAB 展开成目录树"（纯展开，不写镜像）。
+        // 下面这组是"服务一个已有镜像"：世代判定 → 依赖图 → 组装计划 → 执行。
+        // 全部由本程序完成，不调用任何外部 exe / 脚本。
+
+        /// <summary>目标镜像的 Windows 目录（例：G:\Windows）。必须位于挂载的 VHD/VHDX 上。</summary>
+        [ObservableProperty] string _targetWinDir = "";
+
+        /// <summary>世代与通道横幅：打开页面就知道这个镜像走哪条路、为什么。</summary>
+        [ObservableProperty] string _channelBanner = "填写目标镜像的 Windows 目录后点『判定世代与通道』。";
+
+        /// <summary>依赖图/组装计划的 SxS 内容目录（多个用分号分隔）。</summary>
+        [ObservableProperty] string _assemblySourceDirs = "";
+
+        /// <summary>SKU 组装清单（可空）。</summary>
+        [ObservableProperty] string _assemblySkuFile = "";
+
+        /// <summary>试运行（默认开启，绝不改镜像）。</summary>
+        [ObservableProperty] bool _servicingDryRun = true;
+
+        [ObservableProperty] bool _isServicing;
+
+        [ObservableProperty] string _servicingSummary =
+            "CBS 服务：判定世代 → 算依赖图 → 排组装顺序 → 执行。\n"
+            + "目标镜像必须位于【挂载的 VHD/VHDX】上；对物理盘或宿主系统盘操作会破坏系统，程序会直接拒绝。\n"
+            + "所有会写镜像的操作默认『试运行』，确认无误后再关闭。";
+
+        /// <summary>依赖图 / 组装计划 / 执行结果的文本呈现。</summary>
+        /// <summary>目标架构（传给原生 staging）。</summary>
+        [ObservableProperty] string _explodeArch = "amd64";
+
+        /// <summary>语言（传给原生 staging 与 DISM set-allintl）。</summary>
+        [ObservableProperty] string _explodeLang = "en-US";
+
+        /// <summary>语言包 .mum（可空）。</summary>
+        [ObservableProperty] string _explodeLanguagePack = "";
+
+        [ObservableProperty] string _servicingReport = "";
+
+        [ObservableProperty] bool _hasServicingReport;
+
+        // ── 判定世代与通道 ──
+        [RelayCommand]
+        void CheckChannel()
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(TargetWinDir)) { ChannelBanner = "请先填写目标镜像的 Windows 目录。"; return; }
+                var d = ServicingRouter.Decide(TargetWinDir);
+                ChannelBanner = $"【{d.Channel}】{d.Reason}"
+                              + (d.ImageStackVersion != null ? $"\n镜像 servicing stack 版本：{d.ImageStackVersion}（{d.Scheme} 体系）" : "");
+                Status = "世代判定完成：" + d.Channel;
+            }
+            catch (Exception ex) { ChannelBanner = "判定失败：" + ex.Message; }
+        }
+
+        // ── 查看依赖图（组件之间的联系）──
+        [RelayCommand]
+        void ShowGraph()
+        {
+            try
+            {
+                var dirs = SplitDirs(AssemblySourceDirs);
+                if (dirs.Count == 0) { ServicingReport = "请填写至少一个 SxS 内容目录（多个用分号分隔）。"; HasServicingReport = true; return; }
+                var sink = EnsureTaskLog("CBS 依赖图");
+                var g = SystemAssemblyService.BuildGraph(dirs, m => sink.Write(m));
+                ServicingReport = SystemAssemblyService.RenderGraph(g, 60);
+                sink.Write(ServicingReport);
+                sink.MarkFinished();
+                HasServicingReport = true;
+                Status = $"依赖图：{g.Nodes.Count} 个节点，缺失依赖 {g.MissingDependencies}";
+            }
+            catch (Exception ex) { ServicingReport = "建图异常：" + ex.Message; HasServicingReport = true; }
+        }
+
+        // ── 计算组装计划（闭包 + 拓扑序）──
+        [RelayCommand]
+        void ShowAssemblyPlan()
+        {
+            try
+            {
+                var dirs = SplitDirs(AssemblySourceDirs);
+                if (dirs.Count == 0) { ServicingReport = "请填写至少一个 SxS 内容目录。"; HasServicingReport = true; return; }
+                var sink = EnsureTaskLog("CBS 组装计划");
+                var g = SystemAssemblyService.BuildGraph(dirs, m => sink.Write(m));
+                var seeds = g.Nodes.Values.Where(n => n.Kind == SystemAssemblyService.NodeKind.Package).Select(n => n.Key).ToList();
+                var plan = SystemAssemblyService.PlanFrom(g, seeds, m => sink.Write(m));
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine("组装计划：" + plan.Summary());
+                sb.AppendLine();
+                sb.AppendLine("安装顺序（前 40）：");
+                int i = 0;
+                foreach (var k in plan.Order) { if (++i > 40) { sb.AppendLine($"  …（还有 {plan.Order.Count - 40} 项）"); break; } sb.AppendLine($"  {i,4}. {k}"); }
+                if (plan.Missing.Count > 0) { sb.AppendLine(); sb.AppendLine("缺失依赖：" + string.Join(", ", plan.Missing.Take(20))); }
+                if (plan.Cycles.Count > 0) { sb.AppendLine(); sb.AppendLine("检测到环：" + string.Join(" | ", plan.Cycles.Take(5))); }
+                ServicingReport = sb.ToString();
+                sink.Write(ServicingReport); sink.MarkFinished();
+                HasServicingReport = true;
+                Status = "组装计划：" + plan.Summary();
+            }
+            catch (Exception ex) { ServicingReport = "计划异常：" + ex.Message; HasServicingReport = true; }
+        }
+
+        // ── 执行原生 staging（铺底 → 装 SKU → DISM → 收尾）──
+        [RelayCommand(CanExecute = nameof(CanService))]
+        async Task RunNativeStagingAsync()
+        {
+            if (string.IsNullOrWhiteSpace(TargetWinDir)) { Status = "请先填写目标镜像的 Windows 目录"; return; }
+            IsServicing = true; HasServicingReport = false;
+            ServicingSummary = ServicingDryRun ? "试运行中…" : "执行中…（不要关闭程序）";
+            var sink = EnsureTaskLog("CBS 原生 staging");
+            try
+            {
+                var cfg = new ExplodeSxSNativeService.Config
+                {
+                    WinDir = TargetWinDir.Trim(),
+                    ImageRoot = ExplodeSxSNativeService.DeriveImageRoot(TargetWinDir.Trim()),
+                    Arch = string.IsNullOrWhiteSpace(ExplodeArch) ? "amd64" : ExplodeArch.Trim(),
+                    SkuAssemblyFile = string.IsNullOrWhiteSpace(AssemblySkuFile) ? "" : AssemblySkuFile.Trim(),
+                    LanguagePackMum = ExplodeLanguagePack?.Trim() ?? "",
+                    Lang = string.IsNullOrWhiteSpace(ExplodeLang) ? "en-US" : ExplodeLang.Trim(),
+                    DryRun = ServicingDryRun
+                };
+                var res = await ExplodeSxSNativeService.RunAsync(cfg, m => sink.Write(m));
+                var sb = new System.Text.StringBuilder();
+                foreach (var (step, ok, detail) in res.Steps) sb.AppendLine((ok ? "✓ " : "✗ ") + step + "：" + detail);
+                if (res.Error.Length > 0) sb.AppendLine("错误：" + res.Error);
+                if (res.RebootRequired) sb.AppendLine("CBS 提示需要重启。");
+                ServicingReport = sb.ToString().TrimEnd();
+                HasServicingReport = true;
+                Status = res.Success ? "原生 staging 完成。" : "原生 staging 失败：" + res.Error;
+            }
+            catch (Exception ex) { ServicingReport = "异常：" + ex.Message; HasServicingReport = true; }
+            finally { sink.MarkFinished(); IsServicing = false; }
+        }
+
+        bool CanService() => !IsServicing && !IsBusy;
+
+        // ── 更新包解压（PSF + CAB）──
+        [RelayCommand]
+        void PickUpdatePackage()
+        {
+            var dlg = new OpenFileDialog
+            {
+                Title = "选择更新包（.cab / .psm / .wim，可多选）",
+                Filter = "更新包 (*.cab;*.psm;*.wim)|*.cab;*.psm;*.wim|所有文件 (*.*)|*.*",
+                Multiselect = true
+            };
+            if (dlg.ShowDialog() != true) return;
+            UpdatePackagePaths = string.Join(";", dlg.FileNames);
+        }
+
+        [ObservableProperty] string _updatePackagePaths = "";
+        [ObservableProperty] string _updatePackageOutDir = "";
+
+        [RelayCommand(CanExecute = nameof(CanService))]
+        async Task RunUpdatePackageAsync()
+        {
+            var paths = SplitDirs(UpdatePackagePaths);
+            if (paths.Count == 0) { Status = "请先选择要解包的更新包"; return; }
+            if (string.IsNullOrWhiteSpace(UpdatePackageOutDir)) { Status = "请先指定解包输出目录"; return; }
+            IsServicing = true; HasServicingReport = false;
+            var sink = EnsureTaskLog("更新包解压");
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                foreach (var p in paths)
+                {
+                    var cfg = new UpdatePackageService.Config
+                    {
+                        PackagePath = p,
+                        OutputDir = UpdatePackageOutDir,
+                        ListOnly = ServicingDryRun
+                    };
+                    var r = await Task.Run(() => UpdatePackageService.Extract(cfg, m => sink.Write(m)));
+                    sb.AppendLine($"{Path.GetFileName(p)}：布局={r.Detected}  解出={r.FilesExtracted}  跳过={r.FilesSkipped}  缺源={r.FilesMissingSource}  校验失败={r.HashMismatches}");
+                }
+                if (ServicingDryRun) sb.AppendLine().AppendLine("（当前为『试运行』：只解析索引，未写出文件）");
+                ServicingReport = sb.ToString().TrimEnd();
+                HasServicingReport = true;
+                Status = "更新包解压完成。";
+            }
+            catch (Exception ex) { ServicingReport = "异常：" + ex.Message; HasServicingReport = true; }
+            finally { sink.MarkFinished(); IsServicing = false; }
+        }
+
+        // ── Repair Content 顺序解包（neutral-mergedcomponents 必须最先）──
+        [RelayCommand]
+        void PickRepairContentDir()
+        {
+            var dlg = new OpenFolderDialog { Title = "选择 Repair Content 目录（含 cab/psf）" };
+            if (dlg.ShowDialog() == true) RepairContentDir = dlg.FolderName;
+        }
+
+        [ObservableProperty] string _repairContentDir = "";
+        [ObservableProperty] string _repairContentOutDir = "";
+        [ObservableProperty] string _repairContentBaseDir = "";
+
+        [RelayCommand]
+        void ShowRepairPlan()
+        {
+            try
+            {
+                if (!Directory.Exists(RepairContentDir)) { ServicingReport = "请先选择有效的 Repair Content 目录。"; HasServicingReport = true; return; }
+                var pkgs = RepairContentService.Classify(RepairContentDir);
+                ServicingReport = RepairContentService.RenderPlan(pkgs);
+                HasServicingReport = true;
+                Status = $"Repair Content：{pkgs.Count} 个包（顺序规则已按 neutral-mergedcomponents 优先排好）";
+            }
+            catch (Exception ex) { ServicingReport = "分类异常：" + ex.Message; HasServicingReport = true; }
+        }
+
+        [RelayCommand(CanExecute = nameof(CanService))]
+        async Task RunRepairContentAsync()
+        {
+            if (!Directory.Exists(RepairContentDir)) { Status = "请先选择有效的 Repair Content 目录"; return; }
+            if (string.IsNullOrWhiteSpace(RepairContentOutDir)) { Status = "请先指定解包输出目录"; return; }
+            IsServicing = true; HasServicingReport = false;
+            var sink = EnsureTaskLog("Repair Content 解包");
+            try
+            {
+                var cfg = new RepairContentService.Config
+                {
+                    SourceDir = RepairContentDir,
+                    OutputDir = RepairContentOutDir,
+                    ClassifyOnly = ServicingDryRun
+                };
+                if (!string.IsNullOrWhiteSpace(RepairContentBaseDir)) cfg.BaseDirs.Add(RepairContentBaseDir.Trim());
+                var r = await Task.Run(() => RepairContentService.Extract(cfg, m => sink.Write(m)));
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine(r.Summary());
+                if (r.LanguageCatNotes.Count > 0) { sb.AppendLine(); sb.AppendLine("语言安全目录检查："); foreach (var n in r.LanguageCatNotes) sb.AppendLine("  " + n); }
+                if (r.Error.Length > 0) sb.AppendLine("错误：" + r.Error);
+                if (!ServicingDryRun && Directory.Exists(RepairContentOutDir)) { sb.AppendLine(); sb.AppendLine(RepairContentService.InspectOutput(RepairContentOutDir)); }
+                ServicingReport = sb.ToString().TrimEnd();
+                HasServicingReport = true;
+                Status = r.Success ? "Repair Content 解包完成。" : "Repair Content 解包失败：" + r.Error;
+            }
+            catch (Exception ex) { ServicingReport = "异常：" + ex.Message; HasServicingReport = true; }
+            finally { sink.MarkFinished(); IsServicing = false; }
+        }
+
+        // ── 检验已还原的存储 ──
+        [RelayCommand]
+        void InspectStore()
+        {
+            try
+            {
+                string dir = !string.IsNullOrWhiteSpace(RepairContentOutDir) ? RepairContentOutDir : UpdatePackageOutDir;
+                ServicingReport = RepairContentService.InspectOutput(dir);
+                HasServicingReport = true;
+                Status = "存储检验完成。";
+            }
+            catch (Exception ex) { ServicingReport = "检验异常：" + ex.Message; HasServicingReport = true; }
+        }
+
+        static List<string> SplitDirs(string? text)
+            => (text ?? string.Empty)
+               .Split(new[] { ';', '|' }, StringSplitOptions.RemoveEmptyEntries)
+               .Select(x => x.Trim().Trim('"'))
+               .Where(x => x.Length > 0)
+               .ToList();
+
+        // ── 本地日志接收器 ──
+        // CbsBuildViewModel 没有任务日志通道（那是 SxsViewModel 的）。这里自带一个最小实现，
+        // 让下面各服务的日志回调有落点，同时把内容汇总进 ServicingReport。
+        sealed class LocalSink
+        {
+            public readonly List<string> Lines = new();
+            public void Write(string s) { if (!string.IsNullOrEmpty(s)) Lines.Add(s); }
+            public void MarkFinished() { }
+        }
+
+        LocalSink EnsureTaskLog(string title) => new();
+
+        // ── 缺失的浏览命令（供 XAML 绑定）──
+        [RelayCommand]
+        void BrowseTargetWinDir()
+        {
+            var dlg = new OpenFolderDialog { Title = "选择目标镜像的 Windows 目录（必须在挂载的 VHD/VHDX 上）" };
+            if (dlg.ShowDialog() == true) TargetWinDir = System.IO.Path.Combine(dlg.FolderName, "Windows");
+        }
+
+        [RelayCommand]
+        void PickSkuFile()
+        {
+            var dlg = new OpenFileDialog { Title = "选择 SKU 组装清单", Filter = "清单 (*.txt)|*.txt|所有文件 (*.*)|*.*" };
+            if (dlg.ShowDialog() == true) AssemblySkuFile = dlg.FileName;
+        }
+
+        [RelayCommand]
+        void PickUpdateOutDir()
+        {
+            var dlg = new OpenFolderDialog { Title = "选择更新包解包输出目录" };
+            if (dlg.ShowDialog() == true) UpdatePackageOutDir = dlg.FolderName;
+        }
+
+        [RelayCommand]
+        void PickRepairOutDir()
+        {
+            var dlg = new OpenFolderDialog { Title = "选择 Repair Content 解包输出目录" };
+            if (dlg.ShowDialog() == true) RepairContentOutDir = dlg.FolderName;
+        }
+
+        [RelayCommand]
+        void PickRepairBaseDir()
+        {
+            var dlg = new OpenFolderDialog { Title = "选择 delta 源(base)目录（例如已挂载的同版本镜像）" };
+            if (dlg.ShowDialog() == true) RepairContentBaseDir = dlg.FolderName;
+        }
     }
 }

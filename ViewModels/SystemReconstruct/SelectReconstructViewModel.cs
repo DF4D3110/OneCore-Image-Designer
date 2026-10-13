@@ -1285,5 +1285,91 @@ namespace OneCore_Image_Designer.ViewModels.SystemReconstruct
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
         }
+
+        // ════════════════════════════════════════════════════════════════════
+        //        三选一模型（选择重构）—— 纯增量新增
+        // ════════════════════════════════════════════════════════════════════
+        // 页面上原本散落着许多开关。真正需要用户决定的其实只有三件事：
+        //   ① 输入形态  ② 目标动作  ③ 执行方式
+        // 其余选项要么能由这三项推导出来，要么属于"高级参数"。
+        // 本组属性只做**显式化与说明**，不删除任何既有能力。
+        //
+        // 注意：这里用字符串而不是枚举，是为了让 ComboBox 直接绑定、避免
+        // enum 与 ItemSource 的类型转换问题。取值同时用于 CapabilitySummary 的推导。
+
+        public ObservableCollection<string> SourceShapes { get; } = new()
+        { "包 CAB 集", "更新包（PSF+CAB）", "Repair Content", "完整镜像" };
+
+        public ObservableCollection<string> TargetActions { get; } = new()
+        { "仅展开（不写镜像）", "组装（写入镜像）", "服务既有镜像" };
+
+        public ObservableCollection<string> ExecutionModes { get; } = new()
+        { "试运行（不改动任何东西）", "真实执行" };
+
+        private string _sourceShape = "包 CAB 集";
+        /// <summary>① 输入形态：决定用哪个解包/展开入口。</summary>
+        public string SourceShape
+        {
+            get => _sourceShape;
+            set { _sourceShape = value; OnPropertyChanged(); OnPropertyChanged(nameof(CapabilitySummary)); }
+        }
+
+        private string _targetAction = "仅展开（不写镜像）";
+        /// <summary>② 目标动作：决定要不要写镜像。</summary>
+        public string TargetAction
+        {
+            get => _targetAction;
+            set { _targetAction = value; OnPropertyChanged(); OnPropertyChanged(nameof(CapabilitySummary)); }
+        }
+
+        private string _executionMode = "试运行（不改动任何东西）";
+        /// <summary>③ 执行方式：真实执行需二次确认。</summary>
+        public string ExecutionMode
+        {
+            get => _executionMode;
+            set { _executionMode = value; OnPropertyChanged(); OnPropertyChanged(nameof(CapabilitySummary)); }
+        }
+
+        /// <summary>
+        /// 由三个选择推导出的"将要执行什么" —— 让用户在下手前就知道会跑哪些服务。
+        /// </summary>
+        public string CapabilitySummary
+        {
+            get
+            {
+                string input = SourceShape switch
+                {
+                    "包 CAB 集" => "CbsBuildService（按 update.mum 展开为目录树）",
+                    "更新包（PSF+CAB）" => "UpdatePackageService（解出 cix.xml 索引，按 PA30 delta 还原；需要 base 源目录）",
+                    "Repair Content" => "RepairContentService（硬性顺序：neutral-mergedcomponents 最先，解完删除其 PSF/CAB，再解其余）",
+                    "完整镜像" => "直接对镜像操作，无需解包",
+                    _ => "(未知输入形态)"
+                };
+                string action = TargetAction switch
+                {
+                    "仅展开（不写镜像）" => "只产出目录树，不接触任何镜像 —— 最安全",
+                    "组装（写入镜像）" => "SystemAssemblyService：算依赖图 → 排拓扑序 → 交给 CBS 通道执行",
+                    "服务既有镜像" => "ServicingRouter 判世代 → 6.x 走原生 CBS（CbsxService），10.0+ 自动走 DISM",
+                    _ => "(未知目标动作)"
+                };
+                string exec = ExecutionMode.StartsWith("试运行")
+                    ? "试运行：只做预检与计划（PlanOnly / DryRun 默认开启），不改动任何东西"
+                    : "真实执行：会写入目标镜像 —— 目标必须位于挂载的 VHD/VHDX 上，否则程序直接拒绝";
+
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine("① 输入形态 → " + input);
+                sb.AppendLine("② 目标动作 → " + action);
+                sb.AppendLine("③ 执行方式 → " + exec);
+                if (TargetAction != "仅展开（不写镜像）" && ExecutionMode.StartsWith("真实执行"))
+                    sb.AppendLine();
+                if (TargetAction != "仅展开（不写镜像）" && ExecutionMode.StartsWith("真实执行"))
+                    sb.AppendLine("⚠ 当前组合会真正写入镜像。建议先把执行方式切回『试运行』确认一遍。");
+                return sb.ToString().TrimEnd();
+            }
+        }
+
+        /// <summary>存在真实写入风险时置位，供界面显示警示。</summary>
+        public bool WillWriteImage =>
+            TargetAction != "仅展开（不写镜像）" && ExecutionMode.StartsWith("真实执行");
     }
 }

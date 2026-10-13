@@ -9,9 +9,10 @@ namespace OneCore_Image_Designer.Services
     /// <summary>
     /// explodeSxS 的**纯 C# 编排**（不依赖 cbsx.exe / sxsfounder.exe）。
     ///
-    /// 与 <see cref="ExplodeSxSService"/> 的关系：
-    ///   ExplodeSxSService   —— 旧路线：拼 PowerShell 序列，调外部 exe（受 GPL 二进制与来源问题牵制）
-    ///   本服务              —— 新路线：全部走已实现的 C# 服务，无外部 exe
+    /// 【与旧路线的关系】
+    ///   旧路线（已删除）：`ExplodeSxSService` 拼 PowerShell 序列，把 cbsx.exe / sxsfounder.exe
+    ///   拷到工作盘再运行 —— 受 GPL 二进制与来源问题牵制，且依赖工作盘（会格式化 X:）。
+    ///   本服务：全部走已实现的 C# 服务，无外部 exe，也不需要工作盘。
     ///
     /// 对照 cbss.cmd 的步骤与替代实现：
     ///   prepare.cmd      format X: + 建目录 + 拷 exe + xcopy servicing stack
