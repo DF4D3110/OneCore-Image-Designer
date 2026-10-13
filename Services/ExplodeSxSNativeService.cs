@@ -80,6 +80,12 @@ namespace OneCore_Image_Designer.Services
             /// CBS 在其上起不来，必须先把服务栈与同版本 mum 放进去。
             /// </summary>
             public List<string> StackSourceDirs = new();
+
+            /// <summary>
+            /// 最小系统文件集的来源 Windows 目录（例 C:\rc_base\Windows）。
+            /// 非空时会在装完服务栈后补入 CBS 启动所需的几个系统 DLL。
+            /// </summary>
+            public string CoreFileSourceWinDir = "";
         }
 
         public sealed class Result
@@ -221,6 +227,14 @@ namespace OneCore_Image_Designer.Services
                     var sr = FounderStackInstaller.Install(scfg, log);
                     Step("安装 servicing stack", sr.Success, sr.Success ? sr.Summary() : sr.Error);
                     if (!sr.Success) { res.Error = "服务栈安装失败：" + sr.Error; return res; }
+
+                    // 再补 CBS 启动所需的最小系统文件集（实测缺它 CBS 起不来：
+                    // "Failed to open ...kernelbase.dll" / "Failed to detect bitness"）
+                    if (cfg.CoreFileSourceWinDir.Length > 0)
+                    {
+                        var (n, miss) = FounderStackInstaller.InstallCoreFiles(root, cfg.CoreFileSourceWinDir, log);
+                        Step("补最小系统文件集", n > 0, $"放入 {n} 个" + (miss.Count > 0 ? $"，缺失 {miss.Count}" : ""));
+                    }
                 }
 
                 // ── 步骤 2：SKU assembly（替代 cbsx.exe /b:） ──

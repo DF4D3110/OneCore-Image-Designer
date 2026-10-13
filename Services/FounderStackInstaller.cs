@@ -147,6 +147,11 @@ namespace OneCore_Image_Designer.Services
                 string win = Path.Combine(root, "Windows");
                 if (!Directory.Exists(win)) { res.Error = $"骨架里没有 Windows 目录：{win}（请先铺底）"; return res; }
 
+                // ★ 必须启用特权：WCP 铺底出来的骨架带**限制性 ACL**（目录归属系统/TrustedInstaller），
+                //   普通提权进程也会被拒（实测 UnauthorizedAccessException）。
+                //   SeRestorePrivilege 正是用来绕过 ACL 写文件的，但它默认是**关闭**的。
+                PrivilegeHelper.EnableServicingPrivileges(log);
+
                 // ① 找服务栈
                 var (stackDir, version) = FindStack(cfg.StackSourceDirs, cfg.Arch, res.Candidates);
                 if (stackDir == null)
@@ -190,6 +195,9 @@ namespace OneCore_Image_Designer.Services
                 // ④ 落盘
                 Directory.CreateDirectory(sxs);
                 Directory.CreateDirectory(pkgDir);
+                // 骨架 ACL 限制：先把目标目录弄可写，否则文件复制会被拒
+                EnsureWritable(sxs, log);
+                if (Directory.Exists(destStack)) EnsureWritable(destStack, log);
                 CopyTree(stackDir, destStack, ref res);
                 res.StacksCopied = 1;
 
@@ -223,6 +231,114 @@ namespace OneCore_Image_Designer.Services
                 return res;
             }
             catch (Exception ex) { res.Error = ex.GetType().Name + ": " + ex.Message; return res; }
+        }
+
+        /// <summary>
+        /// 让目标目录可写。
+        ///
+        /// 【为什么必需】WCP 铺底出来的骨架带**限制性 ACL**（归属系统/TrustedInstaller），
+        /// 即使以管理员运行、即使已启用 SeRestorePrivilege，.NET 的 File.Copy 仍会被拒
+        /// （实测：目录能创建，但往里写 appxreg.dll 被拒）。SeRestorePrivilege 只对
+        /// 某些 CreateFile 调用模式生效，不足以让普通文件复制绕过目标目录的拒绝 ACL。
+        ///
+        /// 所以这里用 Windows 自带工具做正规处理：
+        ///   ① takeown  /F &lt;dir&gt; /R /D Y        取得所有权
+        ///   ② icacls   &lt;dir&gt; /grant *S-1-5-32-544:(OI)(CI)F /T /C /Q
+        ///      （S-1-5-32-544 = Administrators，用 SID 而不是名称，避免本地化名称差异）
+        /// </summary>
+
+        /// <summary>
+        /// CBS 在空骨架上启动所需的**最小系统文件集**。
+        ///
+        /// 【怎么来的】实测出来的：铺底 + 装服务栈后，CBS 仍然失败在
+        ///   `Failed to open file: ...\Windows\system32\kernelbase.dll [ERROR_FILE_NOT_FOUND]`
+        ///   `Failed to load ntoskrnl.exe to detect bitness from offline image`
+        ///   `Failed to populate information about offline store`
+        /// CBS 需要读几个系统 DLL 来**探测镜像位数**并**填充离线存储信息**。
+        /// 补齐下面这组后，会话立刻成功：
+        ///   CSI Store initialized / Session initialized / Session finalized (clean)。
+        ///
+        /// 【为什么不整份复制】整份 system32 会带来大量无关文件与许可/体积问题；
+        /// 实测这最小一组就够 CBS 起来了。缺哪个再补哪个即可（日志会明确指出）。
+        /// </summary>
+        public static readonly string[] CoreFilesForCbs =
+        {
+            @"system32\kernelbase.dll",        // ★ 日志明确点的就是它
+            @"system32\ntdll.dll",
+            @"system32\kernel32.dll",
+            @"system32\advapi32.dll",
+            @"system32\msvcrt.dll",
+            @"system32\rpcrt4.dll",
+            @"system32\bcrypt.dll",
+            @"system32\bcryptprimitives.dll",
+            @"system32\sechost.dll",
+            @"system32\ci.dll",
+            @"system32\ntoskrnl.exe",          // 用于探测位数
+        };
+
+        /// <summary>
+        /// 把最小系统文件集放进骨架。返回实际放入的数量与缺失清单。
+        /// </summary>
+        public static (int copied, List<string> missing) InstallCoreFiles(
+            string imageRoot, string sourceWindowsDir, Action<string>? log = null)
+        {
+            var missing = new List<string>();
+            int copied = 0;
+            try
+            {
+                string destWin = Path.Combine(Path.GetFullPath(imageRoot), "Windows");
+                if (!Directory.Exists(destWin)) { log?.Invoke("  (骨架里没有 Windows 目录)"); return (0, missing); }
+                if (!Directory.Exists(sourceWindowsDir)) { log?.Invoke($"  (来源不可用: {sourceWindowsDir})"); return (0, missing); }
+
+                // 目标目录可能带限制性 ACL（骨架来自 WCP 铺底），先弄可写
+                string destSys32 = Path.Combine(destWin, "system32");
+                Directory.CreateDirectory(destSys32);
+                EnsureWritable(destWin, log);
+
+                foreach (var rel in CoreFilesForCbs)
+                {
+                    string src = Path.Combine(sourceWindowsDir, rel);
+                    string dst = Path.Combine(destWin, rel);
+                    if (!File.Exists(src)) { missing.Add(rel); continue; }
+                    try
+                    {
+                        Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
+                        File.Copy(src, dst, true);
+                        copied++;
+                    }
+                    catch (Exception ex) { missing.Add($"{rel}（复制失败: {ex.Message}）"); }
+                }
+                log?.Invoke($"  最小系统文件集: 放入 {copied} 个" + (missing.Count > 0 ? $"，缺失 {missing.Count} 个" : ""));
+                foreach (var m in missing.Take(6)) log?.Invoke("    缺: " + m);
+            }
+            catch (Exception ex) { log?.Invoke("  InstallCoreFiles 异常: " + ex.Message); }
+            return (copied, missing);
+        }
+
+        static void EnsureWritable(string dir, Action<string>? log)
+        {
+            if (!Directory.Exists(dir)) return;
+            RunTool("takeown.exe", $"/F \"{dir}\" /R /D Y", log);
+            RunTool("icacls.exe", $"\"{dir}\" /grant *S-1-5-32-544:(OI)(CI)F /T /C /Q", log);
+        }
+
+        static void RunTool(string exe, string args, Action<string>? log)
+        {
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo(exe, args)
+                {
+                    UseShellExecute = false, CreateNoWindow = true,
+                    RedirectStandardOutput = true, RedirectStandardError = true
+                };
+                using var p = System.Diagnostics.Process.Start(psi);
+                if (p == null) { log?.Invoke($"  ({exe} 启动失败)"); return; }
+                p.StandardOutput.ReadToEnd();
+                p.StandardError.ReadToEnd();
+                p.WaitForExit(10 * 60 * 1000);
+                log?.Invoke($"  {exe} 退出码 {p.ExitCode}");
+            }
+            catch (Exception ex) { log?.Invoke($"  ({exe} 异常: {ex.Message})"); }
         }
 
         static void CopyTree(string src, string dst, ref Result res)
