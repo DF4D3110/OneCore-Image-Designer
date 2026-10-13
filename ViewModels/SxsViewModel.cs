@@ -98,18 +98,24 @@ namespace OneCore_Image_Designer.ViewModels
         private void ShowUsage()
         {
             MessageBox.Show(
-                "SxS 功能独立于 UUP。\n\n" +
-                "pureSxS：处理组件来源和纯 SxS 目录。\n" +
-                "explodeSxS：通过 prepare/captureimg/cbss/finishimg 流程处理镜像中的 CBS/SxS。\n\n" +
-                "源码随应用集成；运行 pureSxS 需要 Python。explodeSxS 还依赖 DISM 和已获许可的 CBS 工具。\n\n" +
-                "注意：prepare.cmd 会快速格式化 X:。当前应用不会自动运行这些上游脚本；执行前请审阅脚本、确认目标磁盘与备份。",
-                                "原生流程（新增）：全部由 C# 完成，不需要 cbsx.exe / sxsfounder.exe。\n" +
-                "  1) WCP 铺底（等价 sxsfounder）；2) CBS 装 SKU（等价 cbsx /b:）；\n" +
-                "  3) DISM 加语言包 / apply-unattend / set-allintl / 清理；4) 收尾写 State.ini 与 imagestate。\n" +
-                "  目标必须是【挂载的 VHD/VHDX】上的镜像 —— 这是强制约束，用于保护宿主系统。\n" +
-                "  建议先用「原生流程预检」与「试运行」确认，再执行真实操作。\n" +
-                "  命令行等价物：CbsxCli.exe（cbsx 替代）与 SxSFounderCli.exe（sxsfounder 替代）。\n\n" +
-                "SxS 工具说明", MessageBoxButton.OK, MessageBoxImage.Information);
+                "SxS / CBS 功能独立于 UUP。\n\n" +
+                "【pureSxS】处理组件来源与纯 SxS 目录；已用 C# 重写，不需要 Python。\n" +
+                "【explodeSxS】把镜像的 CBS/SxS 存储展开或组装；已用 C# 重写，不需要外部脚本。\n\n" +
+                "── 现在全部由本程序自己完成，不再依赖任何外部工具 ──\n" +
+                "  1) 铺底          ：WCP 铺底（等价原 sxsfounder.exe）\n" +
+                "  2) 装 SKU/组件   ：CBS 组件安装（等价原 cbsx.exe /b:）\n" +
+                "     镜像属 6.x 体系 → 走原生 CBS 通道；10.0 及以后 → 自动改走 DISM\n" +
+                "  3) 语言包/无人值守/语言配置/组件清理：DISM\n" +
+                "  4) 收尾          ：写 State.ini 与 imagestate\n\n" +
+                "── 强制约束 ──\n" +
+                "  目标镜像必须位于【挂载的 VHD/VHDX】上。CBS 会挂载并改写目标镜像的注册表 hive，\n" +
+                "  对物理盘或宿主系统盘执行会破坏系统，因此程序会直接拒绝。\n" +
+                "  建议先用『原生流程预检』与『试运行』确认，再执行真实操作。\n\n" +
+                "── 系统组装（新增）──\n" +
+                "  从 SxS 内容出发，先算清组件之间的依赖关系，排出安装顺序，再交给 CBS 通道执行。\n\n" +
+                "── 命令行等价物 ──\n" +
+                "  CbsxCli.exe（原 cbsx 替代）· SxSFounderCli.exe（原 sxsfounder 替代）",
+                "SxS / CBS 工具说明", MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
         [RelayCommand]
