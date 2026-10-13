@@ -26,6 +26,12 @@ namespace OneCore_Image_Designer.Services
             /// </summary>
             public string? VersionScope { get; set; } = WinSxSHashCalculator.DefaultVersionScope;
 
+        /// <summary>
+        /// manifest 内部 type 属性值（仅 .inf 驱动类组件有，典型值 dualModeDriver）。
+        /// 它插在 culture 与 version 之间参与哈希；漏传会让驱动组件的期望文件夹名算错。
+        /// </summary>
+        public string? Type { get; set; }
+
             public string ExpectedFolderName { get; set; } = "";
             public string? ActualFolderPath { get; set; }
             public bool Exists { get; set; }
@@ -107,9 +113,10 @@ namespace OneCore_Image_Designer.Services
                         var item = ParseManifestComponent(manifestFile, out string? failure);
                         if (item != null && !string.IsNullOrEmpty(item.Name))
                         {
-                            // .inf 驱动类组件的哈希无法用 X65599Variant 复现
-                            // （实测 663/663 全部未命中），单独归类，不参与缺失判定。
-                            item.IsInfSkipped = WinSxSHashCalculator.IsInfComponent(item.Name);
+                            // 【2026-10-13 更正】.inf 驱动类组件的哈希【可以】复现：
+                            // 只要把 identity 的 type 属性一起传进去（实测 663/663 命中）。
+                            // 因此不再跳过它们，正常参与缺失判定。
+                            item.IsInfSkipped = false;
 
                             // 计算期望的WinSxS文件夹名（须传 manifest 内部真实 versionScope）
                             item.ExpectedFolderName = WinSxSHashCalculator.GenerateWinSxFolderName(
@@ -118,7 +125,8 @@ namespace OneCore_Image_Designer.Services
                                 item.Architecture,
                                 item.Version,
                                 item.Language,
-                                item.VersionScope);
+                                item.VersionScope,
+                                item.Type);
 
                             components.Add(item);
                         }
@@ -253,6 +261,9 @@ namespace OneCore_Image_Designer.Services
                 // versionScope 必须取内部真实值：绝大多数组件为 "nonSxS"，
                 // 但少数组件（实测 3000 样本中 67 条）没有该属性，此时哈希不含此字段。
                 string? versionScope = identityNode.Attributes?["versionScope"]?.Value;
+                // type 参与哈希（插在 culture 与 version 之间）；少数组件用 typeName
+                string? typeAttr = identityNode.Attributes?["type"]?.Value
+                                   ?? identityNode.Attributes?["typeName"]?.Value;
 
                 return new VerifyItem
                 {
@@ -261,7 +272,8 @@ namespace OneCore_Image_Designer.Services
                     Architecture = identityNode.Attributes?["processorArchitecture"]?.Value ?? "none",
                     PublicKeyToken = identityNode.Attributes?["publicKeyToken"]?.Value ?? "",
                     Language = identityNode.Attributes?["language"]?.Value ?? "neutral",
-                    VersionScope = string.IsNullOrWhiteSpace(versionScope) ? null : versionScope.Trim()
+                    VersionScope = string.IsNullOrWhiteSpace(versionScope) ? null : versionScope.Trim(),
+                    Type = string.IsNullOrWhiteSpace(typeAttr) ? null : typeAttr.Trim()
                 };
             }
             catch (Exception ex) when (ex is XmlException or ArgumentException)

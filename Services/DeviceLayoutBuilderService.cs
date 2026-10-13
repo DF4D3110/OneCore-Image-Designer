@@ -287,6 +287,8 @@ namespace OneCore_Image_Designer.Services
         internal static string ComponentTail(string innerName, string token, string version, string arch)
         {
             string cleaned = WinSxSHashCalculator.NormalizeNameForFolder(innerName);
+            // 注意：若 innerName 是 .inf 驱动类组件，还需传 type（此处是布局生成路径，
+            // 只处理非驱动组件，故 type 保持 null）。见 WinSxSHashCalculator.CalculateWinSxSHash。
             string hash = WinSxSHashCalculator.CalculateWinSxSHash(innerName, token, arch, version, culture: "neutral", versionScope: "nonSxS");
             return $"{cleaned}_{token}_{version.ToLowerInvariant()}_none_{hash}";
         }
