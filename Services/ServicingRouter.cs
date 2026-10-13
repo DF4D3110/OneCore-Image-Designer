@@ -132,11 +132,15 @@ namespace OneCore_Image_Designer.Services
                 if (v != null)
                 {
                     d.Scheme = $"{v.Major}.{v.Minor}";
+                    // 分界是「6.x 家族」vs「10.0 之后」：
+                    //   CBS 可加载栈自称 6.2.<build>，与同为 6.x 的镜像声明能比得上；
+                    //   10.0 及以后体系的镜像声明为 10.0.<build>，比较时 6.2 < 10.0 必被拒。
+                    // 因此 6.0/6.1/6.2/6.3 都走原生通道（实测 6.2.8220 与 6.3.9600 均可）。
                     if (v.Major == 6)
                     {
                         d.Channel = Channel.NativeCbs;
-                        d.Reason = $"镜像属 {v.Major}.{v.Minor} 体系 → 用原生 CBS 通道"
-                                 + "（可控、可 dry-run、可逐包断言；已验证可用于 6.2 体系）";
+                        d.Reason = $"镜像属 {v.Major}.{v.Minor} 体系（6.x 家族）→ 用原生 CBS 通道"
+                                 + "（可控、可 dry-run、可逐包断言；已验证可用于 6.x 体系）";
                         return d;
                     }
                     d.Channel = Channel.Dism;
