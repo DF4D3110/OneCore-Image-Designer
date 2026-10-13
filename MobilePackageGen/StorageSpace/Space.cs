@@ -12,17 +12,24 @@ namespace StorageSpace
 
         private long blockSize => IsAncientFormat ? 0x10000000 : 0x100000;
 
-        private readonly Dictionary<long, long> blockTable;
+        private readonly Dictionary<long, (long block, long diskNumber)> blockTable;
+        private readonly Dictionary<long, Stream> physicalDiskStreams;
         private readonly List<SlabAllocation> slabAllocations = [];
         private readonly long TotalBlocks;
 
         private long currentPosition = 0;
 
         internal Space(Stream Stream, long storeIndex, Pool storageSpace, long OriginalSeekPosition, bool IsAncientFormat)
+            : this(Stream, storeIndex, storageSpace, OriginalSeekPosition, IsAncientFormat, [])
+        {
+        }
+
+        internal Space(Stream Stream, long storeIndex, Pool storageSpace, long OriginalSeekPosition, bool IsAncientFormat, Dictionary<long, Stream> physicalDiskStreams)
         {
             this.IsAncientFormat = IsAncientFormat;
             this.OriginalSeekPosition = OriginalSeekPosition;
             this.Stream = Stream;
+            this.physicalDiskStreams = physicalDiskStreams;
 
             foreach (Volume volume in storageSpace.SDBBVolumes)
             {
@@ -55,9 +62,9 @@ namespace StorageSpace
 
         public override long Length => length;
 
-        private (long, Dictionary<long, long>) BuildBlockTable()
+        private (long, Dictionary<long, (long block, long diskNumber)>) BuildBlockTable()
         {
-            Dictionary<long, long> blockTable = [];
+            Dictionary<long, (long block, long diskNumber)> blockTable = [];
 
             long blockSize = IsAncientFormat ? this.blockSize : 1;
 
@@ -65,21 +72,32 @@ namespace StorageSpace
             {
                 long virtualDiskBlockNumber = slabAllocation.VolumeBlockNumber;
                 long physicalDiskBlockNumber = slabAllocation.PhysicalDiskBlockNumber;
+                long physicalDiskId = slabAllocation.PhysicalDiskID;
 
-                blockTable.Add(virtualDiskBlockNumber, physicalDiskBlockNumber);
+                blockTable.Add(virtualDiskBlockNumber, (physicalDiskBlockNumber, physicalDiskId));
             }
 
             return (TotalBlocks * blockSize, blockTable);
         }
 
-        private long GetBlockDataIndex(long realBlockOffset)
+        private (long block, long diskNumber) GetBlockDataIndex(long realBlockOffset)
         {
-            if (blockTable.TryGetValue(realBlockOffset, out long value))
+            if (blockTable.TryGetValue(realBlockOffset, out (long block, long diskNumber) value))
             {
                 return value;
             }
 
-            return -1;
+            return (-1, -1);
+        }
+
+        private Stream GetDiskStream(long diskNumber)
+        {
+            if (physicalDiskStreams.TryGetValue(diskNumber, out Stream? stream))
+            {
+                return stream;
+            }
+
+            return Stream;
         }
 
         public override long Position
@@ -161,19 +179,21 @@ namespace StorageSpace
                     bytesToRead -= extraEndBytes;
                 }
 
-                long virtualBlockIndex = GetBlockDataIndex(currentBlock);
+                (long block, long diskNumber) virtualBlockIndex = GetBlockDataIndex(currentBlock);
 
-                if (virtualBlockIndex != -1)
+                if (virtualBlockIndex.block != -1)
                 {
-                    long physicalDiskLocation = ImageGetStoreDataBlockOffset(virtualBlockIndex);
+                    long physicalDiskLocation = ImageGetStoreDataBlockOffset(virtualBlockIndex.block);
 
                     if (isFirstBlock)
                     {
                         physicalDiskLocation += overflowBlockStartByteCount;
                     }
 
-                    Stream.Seek(OriginalSeekPosition + physicalDiskLocation, SeekOrigin.Begin);
-                    Stream.Read(buffer, offset + (int)bufferDestination, (int)bytesToRead);
+                    Stream target = GetDiskStream(virtualBlockIndex.diskNumber);
+
+                    target.Seek(OriginalSeekPosition + physicalDiskLocation, SeekOrigin.Begin);
+                    target.Read(buffer, offset + (int)bufferDestination, (int)bytesToRead);
                 }
                 else
                 {
@@ -209,14 +229,16 @@ namespace StorageSpace
                 long virtualPosition = virtualDiskBlockNumber * blockSize;
                 long physicalPosition = ImageGetStoreDataBlockOffset(physicalDiskBlockNumber);
 
-                Stream.Seek(OriginalSeekPosition + physicalPosition, SeekOrigin.Begin);
+                Stream target = GetDiskStream(slabAllocation.PhysicalDiskID);
+
+                target.Seek(OriginalSeekPosition + physicalPosition, SeekOrigin.Begin);
                 DestinationStream.Seek(OriginalDestinationStreamPosition + virtualPosition, SeekOrigin.Begin);
                 ulong chunkSize = (ulong)blockSize;
                 for (ulong j = 0; j < (ulong)blockSize; j += chunkSize)
                 {
                     byte[] buffer = new byte[chunkSize];
 
-                    Stream.Read(buffer);
+                    target.Read(buffer);
                     currentWrittenBytes += chunkSize;
                     ProgressCallBack?.Invoke(currentWrittenBytes, totalBytes);
 

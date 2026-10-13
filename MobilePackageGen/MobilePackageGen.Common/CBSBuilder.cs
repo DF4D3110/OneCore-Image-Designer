@@ -6,16 +6,23 @@ namespace MobilePackageGen
 {
     public class CBSBuilder
     {
-        private static bool USE_UNCOMPRESSED_MANIFEST_FILES = false;
+        /// <summary>
+        /// Manifest compression switch for cabinet output.
+        /// false (default): keep the DCM\x01 compressed manifests exactly as found on the source
+        ///                  image - matches the original Microsoft packages that imageapp expects.
+        /// true:            decompress manifests to plain XML before packaging (diagnostic fallback).
+        /// </summary>
+        public static bool UseUncompressedManifests { get; set; } = false;
 
         private static string GetCBSComponentName(XmlMum.Assembly cbs)
         {
             return $"{cbs.AssemblyIdentity.Name}~{cbs.AssemblyIdentity.PublicKeyToken}~{cbs.AssemblyIdentity.ProcessorArchitecture}~{(cbs.AssemblyIdentity.Language == "neutral" ? "" : cbs.AssemblyIdentity.Language)}~{cbs.AssemblyIdentity.Version}";
         }
 
-        private static List<CabinetFileInfo> GetCabinetFileInfoForCbsPackage(XmlMum.Assembly cbs, IPartition partition, IEnumerable<IDisk> disks)
+        private static List<CabinetFileInfo> GetCabinetFileInfoForCbsPackage(XmlMum.Assembly cbs, IPartition partition, IEnumerable<IDisk> disks, out List<string> missingFiles)
         {
             List<CabinetFileInfo> fileMappings = [];
+            missingFiles = [];
 
             IFileSystem fileSystem = partition.FileSystem!;
 
@@ -263,13 +270,78 @@ namespace MobilePackageGen
                                     break;
                                 }
                             }
+
+                            // Generic cross-partition fallback: when the primary
+                            // partition does not contain the file, strip known
+                            // partition-link prefixes (data\, efiesp\, osdata\, ...)
+                            // and search every partition's file system. This handles
+                            // superfloppy VHDs whose partition name is "Partition1"
+                            // instead of the link name (e.g. the 17705 Talkman disk
+                            // set), where manifest paths such as
+                            // "data\test\bin\frtool.exe" would otherwise never match.
+                            if (cabinetFileInfo == null)
+                            {
+                                foreach (IDisk fallbackDisk in disks)
+                                {
+                                    bool doneFallback = false;
+
+                                    foreach (IPartition fallbackPartition in fallbackDisk.Partitions)
+                                    {
+                                        IFileSystem? fallbackFileSystem = fallbackPartition.FileSystem;
+
+                                        if (fallbackFileSystem == null)
+                                        {
+                                            continue;
+                                        }
+
+                                        string candidate = normalized;
+
+                                        foreach (string partitionNameWithLink in partitionNamesWithLinks)
+                                        {
+                                            if (candidate.StartsWith($"{partitionNameWithLink}\\", StringComparison.InvariantCultureIgnoreCase))
+                                            {
+                                                candidate = candidate[(partitionNameWithLink.Length + 1)..];
+                                                break;
+                                            }
+                                        }
+
+                                        try
+                                        {
+                                            if (!fallbackFileSystem.FileExists(candidate))
+                                            {
+                                                continue;
+                                            }
+
+                                            cabinetFileInfo = new CabinetFileInfo()
+                                            {
+                                                FileName = packageFile.Cabpath,
+                                                FileStream = fallbackFileSystem.OpenFile(candidate, FileMode.Open, FileAccess.Read),
+                                                Attributes = fallbackFileSystem.GetAttributes(candidate) & ~FileAttributes.ReparsePoint,
+                                                DateTime = fallbackFileSystem.GetLastWriteTime(candidate)
+                                            };
+
+                                            doneFallback = true;
+                                            break;
+                                        }
+                                        catch
+                                        {
+                                            // Try the next partition.
+                                        }
+                                    }
+
+                                    if (doneFallback)
+                                    {
+                                        break;
+                                    }
+                                }
+                            }
                         }
                         else
                         {
                             try
                             {
                                 Stream fileStream = fileSystem.OpenFile(normalized, FileMode.Open, FileAccess.Read);
-                                if (isManifest && USE_UNCOMPRESSED_MANIFEST_FILES)
+                                if (isManifest && UseUncompressedManifests)
                                 {
                                     if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                                     {
@@ -306,11 +378,112 @@ namespace MobilePackageGen
                     else
                     {
                         Logging.Log($"\rWarning: File not found (skipped): {normalized}\n", LoggingLevel.Warning);
+                        missingFiles.Add(normalized);
                     }
                 }
             }
 
             return fileMappings;
+        }
+
+        /// <summary>
+        /// If the package manifest references a catalog (.cat) that was not found among the mapped
+        /// files, build one inline: dump the mapped files to a temp dir, hash them via the WPMT CDF
+        /// builder, produce the catalog with makecat and sign it with the TestCatSigner certificate.
+        /// The hashes are computed over the exact bytes that go into the cabinet, so imageapp hash
+        /// validation matches by construction.
+        /// </summary>
+        private static IEnumerable<CabinetFileInfo> EnsureCatalog(XmlMum.Assembly cbs, IEnumerable<CabinetFileInfo> fileMappings)
+        {
+            // 1. Does the manifest reference a catalog?
+            string? catalogCabpath = null;
+
+            if (cbs.Package.CustomInformation?.File != null)
+            {
+                foreach (XmlMum.File packageFile in cbs.Package.CustomInformation.File)
+                {
+                    if (packageFile.Name.EndsWith(".cat", StringComparison.InvariantCultureIgnoreCase))
+                    {
+                        catalogCabpath = string.IsNullOrEmpty(packageFile.Cabpath) ? packageFile.Name : packageFile.Cabpath;
+                        break;
+                    }
+                }
+            }
+
+            if (catalogCabpath == null)
+            {
+                return fileMappings;
+            }
+
+            // 2. Already mapped (source had a catalog)?
+            if (fileMappings.Any(x => x.FileName.Equals(catalogCabpath, StringComparison.InvariantCultureIgnoreCase)))
+            {
+                return fileMappings;
+            }
+
+            // 3. Build inline.
+            Logging.Log($"Catalog not found on source - building inline: {catalogCabpath}");
+
+            string tempRoot = Path.Combine(Path.GetTempPath(), "MobilePackageGen_Cat", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempRoot);
+
+            try
+            {
+                List<CatalogFileEntry> entries = [];
+
+                foreach (CabinetFileInfo mapping in fileMappings)
+                {
+                    string relPath = mapping.FileName.Replace('\\', Path.DirectorySeparatorChar);
+                    string destPath = Path.Combine(tempRoot, relPath);
+                    Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
+
+                    using (FileStream outFile = File.Create(destPath))
+                    {
+                        mapping.FileStream.Seek(0, SeekOrigin.Begin);
+                        mapping.FileStream.CopyTo(outFile);
+                    }
+
+                    entries.Add(new CatalogFileEntry(mapping.FileName, destPath));
+                }
+
+                string catalogName = Path.GetFileName(catalogCabpath);
+                string cdfPath = Path.Combine(tempRoot, "package.cdf");
+
+                CatBuilder.BuildCatalog(cdfPath, catalogName, tempRoot, entries);
+
+                string catPath = Path.Combine(tempRoot, catalogName);
+
+                if (!File.Exists(catPath))
+                {
+                    Logging.Log($"  Inline catalog build failed: {catPath} not produced", LoggingLevel.Warning);
+                    return fileMappings;
+                }
+
+                // Copy the catalog into memory so the temp dir can be removed immediately.
+                MemoryStream catStream = new();
+                using (FileStream fs = File.OpenRead(catPath))
+                {
+                    fs.CopyTo(catStream);
+                }
+                catStream.Seek(0, SeekOrigin.Begin);
+
+                List<CabinetFileInfo> newMappings = [.. fileMappings];
+                newMappings.Add(new CabinetFileInfo
+                {
+                    FileName = catalogCabpath,
+                    FileStream = catStream,
+                    Attributes = FileAttributes.Normal,
+                    DateTime = DateTime.Now
+                });
+
+                Logging.Log($"  Inline catalog added: {catalogCabpath} ({catStream.Length} bytes)");
+
+                return newMappings;
+            }
+            finally
+            {
+                try { Directory.Delete(tempRoot, true); } catch { }
+            }
         }
 
         public static void BuildCBS(IEnumerable<IDisk> disks, string destination_path, UpdateHistory.UpdateHistory? updateHistory)
@@ -453,7 +626,25 @@ namespace MobilePackageGen
 
                         if (!File.Exists(cabFile))
                         {
-                            IEnumerable<CabinetFileInfo> fileMappings = GetCabinetFileInfoForCbsPackage(cbs, partition, disks);
+                            List<string> missingFiles;
+                            IEnumerable<CabinetFileInfo> fileMappings = GetCabinetFileInfoForCbsPackage(cbs, partition, disks, out missingFiles);
+
+                            // Per-package validation log: every package is reported, missing files are listed.
+                            Logging.Log($"Validation: {Path.GetFileName(cabFileName)} - declared {cbs.Package.CustomInformation?.File.Count ?? 0} file(s), mapped {fileMappings.Count()} file(s), missing {missingFiles.Count} file(s)");
+
+                            foreach (string missingFile in missingFiles)
+                            {
+                                Logging.Log($"  Missing: {missingFile}", LoggingLevel.Warning);
+                            }
+
+                            // Inline catalog generation: if the package manifest references a catalog
+                            // but no catalog file was found on the source, build one from the mapped
+                            // files (hash -> CDF -> makecat -> signtool). Hashes come from the exact
+                            // bytes that go into the cabinet, so imageapp hash validation cannot drift.
+                            if (missingFiles.Count == 0)
+                            {
+                                fileMappings = EnsureCatalog(cbs, fileMappings);
+                            }
 
                             // Cab Creation is only supported on Windows
                             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))

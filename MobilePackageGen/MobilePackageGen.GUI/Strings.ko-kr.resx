@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:import namespace="http://www.w3.org/XML/1998/namespace" />
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType><xsd:choice maxOccurs="unbounded">
+        <xsd:element name="metadata"><xsd:complexType><xsd:sequence><xsd:element name="value" type="xsd:string" minOccurs="0" /></xsd:sequence><xsd:attribute name="name" use="required" type="xsd:string" /><xsd:attribute name="type" type="xsd:string" /><xsd:attribute name="mimetype" type="xsd:string" /><xsd:attribute ref="xml:space" /></xsd:complexType></xsd:element>
+        <xsd:element name="assembly"><xsd:complexType><xsd:attribute name="alias" type="xsd:string" /><xsd:attribute name="name" type="xsd:string" /></xsd:complexType></xsd:element>
+        <xsd:element name="data"><xsd:complexType><xsd:sequence><xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" /><xsd:element name="comment" type="xsd:string" minOccurs="0" msdata:Ordinal="2" /></xsd:sequence><xsd:attribute name="name" type="xsd:string" use="required" msdata:Ordinal="1" /><xsd:attribute name="type" type="xsd:string" msdata:Ordinal="3" /><xsd:attribute name="mimetype" type="xsd:string" msdata:Ordinal="4" /><xsd:attribute ref="xml:space" /></xsd:complexType></xsd:element>
+        <xsd:element name="resheader"><xsd:complexType><xsd:sequence><xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" /></xsd:sequence><xsd:attribute name="name" type="xsd:string" use="required" /></xsd:complexType></xsd:element>
+      </xsd:choice></xsd:complexType></xsd:element>
+  </xsd:schema>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <data name="FormTitle" xml:space="preserve"><value>MobilePackageGen GUI - Package Extractor</value></data>
+  <data name="BtnOpen" xml:space="preserve"><value>Open Image...</value></data>
+  <data name="BtnSelectAll" xml:space="preserve"><value>Select All</value></data>
+  <data name="BtnDeselectAll" xml:space="preserve"><value>Deselect All</value></data>
+  <data name="FilterAll" xml:space="preserve"><value>All</value></data>
+  <data name="SearchPlaceholder" xml:space="preserve"><value>Search packages...</value></data>
+  <data name="LblOutput" xml:space="preserve"><value>Output Folder:</value></data>
+  <data name="BtnBrowse" xml:space="preserve"><value>Browse...</value></data>
+  <data name="BtnBuild" xml:space="preserve"><value>Build Selected</value></data>
+  <data name="StatusReady" xml:space="preserve"><value>Ready. Open an image file to enumerate packages.</value></data>
+  <data name="DetailsDefault" xml:space="preserve"><value>Select a package to view details.</value></data>
+  <data name="LoadingImage" xml:space="preserve"><value>Loading disk image...</value></data>
+  <data name="EnumeratingPackages" xml:space="preserve"><value>Enumerating packages...</value></data>
+  <data name="LoadFailed" xml:space="preserve"><value>Failed to load image. No disks found.</value></data>
+  <data name="ErrorLoading" xml:space="preserve"><value>Error loading image:</value></data>
+  <data name="OpenImageTitle" xml:space="preserve"><value>Select Disk Image</value></data>
+  <data name="ImageFilter" xml:space="preserve"><value>Disk Images|*.ffu;*.vhdx;*.vhd;*.wim;*.img;*.bin|All Files|*.*</value></data>
+  <data name="OutputFolderTitle" xml:space="preserve"><value>Select Output Folder</value></data>
+  <data name="NoImageLoaded" xml:space="preserve"><value>Please load a disk image first.</value></data>
+  <data name="NoPackagesSelected" xml:space="preserve"><value>No packages selected.</value></data>
+  <data name="ConfirmBuildTitle" xml:space="preserve"><value>Confirm Build</value></data>
+  <data name="ConfirmBuildMsg" xml:space="preserve"><value>Build {0} selected packages?\n\nCBS: {1}\nSPKG: {2}\nDrivers: {3}\n\nOutput: {4}</value></data>
+  <data name="BuildingCBS" xml:space="preserve"><value>Building CBS packages...</value></data>
+  <data name="BuildingSPKG" xml:space="preserve"><value>Building SPKG packages...</value></data>
+  <data name="BuildingDrivers" xml:space="preserve"><value>Building driver packages...</value></data>
+  <data name="BuildCompleteTitle" xml:space="preserve"><value>Success</value></data>
+  <data name="BuildCompleteMsg" xml:space="preserve"><value>Build complete!\n\n{0} packages built.\nOutput: {1}</value></data>
+  <data name="BuildErrorTitle" xml:space="preserve"><value>Error</value></data>
+  <data name="PackagesFound" xml:space="preserve"><value>Loaded {0} - {1} packages found ({2} CBS, {3} SPKG, {4} Drivers)</value></data>
+  <data name="PackagesSelected" xml:space="preserve"><value>{0} packages, {1} selected</value></data>
+  <data name="MenuLanguage" xml:space="preserve"><value>Language</value></data>
+  <data name="MenuHelp" xml:space="preserve"><value>Help</value></data>
+  <data name="MenuUsage" xml:space="preserve"><value>Usage</value></data>
+  <data name="MenuAbout" xml:space="preserve"><value>About</value></data>
+  <data name="HelpTitle" xml:space="preserve"><value>Usage</value></data>
+  <data name="HelpContent" xml:space="preserve"><value>MobilePackageGen GUI - Package Extractor
+
+Steps:
+1. Click "Open Image..." to select a disk image (FFU/VHDX/WIM/IMG/BIN)
+2. Wait for the program to enumerate all extractable packages
+3. Check the packages you want to extract in the tree (grouped by type and partition)
+4. Use the filter to filter by type, or search in the search box
+5. Click "Select All"/"Deselect All" for quick selection
+6. Set the output folder at the bottom
+7. Click "Build Selected" to start extraction
+
+Package Types:
+- CBS: Windows Component Packages (.mum manifests)
+- SPKG: Mobile Component Packages (.xml manifests)
+- Driver: Driver Packages (.inf drivers)
+
+Notes:
+- A console window opens at startup showing build logs and progress
+- Packages with errors are skipped automatically and summarized at the end
+- Output folder contains subfolders named by partition</value></data>
+  <data name="AboutTitle" xml:space="preserve"><value>About</value></data>
+  <data name="AboutContent" xml:space="preserve"><value>MobilePackageGen GUI
+Version: 1.0.0
+
+Based on MobileTooling/MobilePackageGen
+Extracts CBS/SPKG/Driver packages from Windows disk images
+
+Organization: WinStory 2026
+Website: https://wiki.win-story.cn
+Compiler: DF4D3110</value></data>
+  <data name="Type" xml:space="preserve"><value>Type</value></data>
+  <data name="Partition" xml:space="preserve"><value>Partition</value></data>
+  <data name="Architecture" xml:space="preserve"><value>Architecture</value></data>
+  <data name="Version" xml:space="preserve"><value>Version</value></data>
+  <data name="PublicKeyToken" xml:space="preserve"><value>Public Key Token</value></data>
+  <data name="Language" xml:space="preserve"><value>Language</value></data>
+  <data name="OutputPath" xml:space="preserve"><value>Output Path</value></data>
+  <data name="Source" xml:space="preserve"><value>Source</value></data>
+  <data name="Description" xml:space="preserve"><value>Description</value></data>
+  <data name="Package" xml:space="preserve"><value>Package</value></data>
+  <data name="WarningTitle" xml:space="preserve"><value>Warning</value></data>
+</root>

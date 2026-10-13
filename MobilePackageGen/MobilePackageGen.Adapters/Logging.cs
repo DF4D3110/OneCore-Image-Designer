@@ -29,7 +29,27 @@ namespace MobilePackageGen
 
         private static readonly bool _hasConsole;
 
+        private static string? _logFile;
+
         public static bool HasConsole => _hasConsole;
+
+        /// <summary>Route a copy of all log output to a file (e.g. the build output directory).</summary>
+        public static void SetLogFile(string? path)
+        {
+            lock (lockObj)
+            {
+                _logFile = path;
+                if (!string.IsNullOrEmpty(path))
+                {
+                    var dir = Path.GetDirectoryName(Path.GetFullPath(path));
+                    if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                    File.WriteAllText(path, $"Log started: {DateTime.Now:yyyy-MM-dd HH:mm:ss}\n");
+                }
+            }
+        }
+
+        /// <summary>Full path of the current log file, or null when none is set.</summary>
+        public static string? LogFilePath => _logFile;
 
         static Logging()
         {
@@ -196,6 +216,19 @@ namespace MobilePackageGen
                 if (_hasConsole)
                 {
                     Console.ForegroundColor = originalConsoleColor;
+                }
+
+                if (!string.IsNullOrEmpty(_logFile))
+                {
+                    try
+                    {
+                        string line = $"{dateTime:'['HH':'mm':'ss']'}[{msg}] {message}\n";
+                        File.AppendAllText(_logFile, line);
+                    }
+                    catch
+                    {
+                        // Logging must never break the build pipeline.
+                    }
                 }
             }
         }

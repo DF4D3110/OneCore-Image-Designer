@@ -1,4 +1,4 @@
-﻿using DiscUtils;
+using DiscUtils;
 using DiscUtils.Streams;
 using DiscUtils.Wim;
 using StorageSpace;
@@ -106,11 +106,9 @@ namespace MobilePackageGen.Adapters
 
             IEnumerable<GPT.GPT.Partition> partitionTable = GetGPTPartitions(virtualDisk.Content, (uint)sectorSize);
 
-            // 如果GPT解析失败，尝试MBR解析
             if (partitionTable == null)
             {
-                Logging.Log("GPT parsing failed, trying MBR...");
-                partitionTable = MobilePackageGen.MBR.MBRParser.GetMBRPartitions(virtualDisk.Content, (uint)sectorSize);
+                partitionTable = GetMBRPartitions(virtualDisk.Content, (uint)sectorSize);
             }
 
             if (partitionTable != null)
@@ -120,57 +118,13 @@ namespace MobilePackageGen.Adapters
                     Stream partitionStream = Open(partitionInfo, (uint)sectorSize, virtualDisk.Content);
 
                     partitions.Add((partitionInfo, partitionStream));
-
-                    if (partitionInfo.PartitionTypeGuid == new Guid("E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D"))
-                    {
-                        Logging.Log();
-
-                        Logging.Log($"{partitionInfo.Name} {partitionInfo.PartitionGuid} {partitionInfo.PartitionTypeGuid} {partitionInfo.SizeInSectors * (uint)sectorSize} StoragePool");
-
-                        Pool pool = new(partitionStream);
-
-                        Dictionary<long, string> disks = pool.GetDisks();
-
-                        foreach (KeyValuePair<long, string> disk in disks.OrderBy(x => x.Key))
-                        {
-                            using Space space = pool.OpenDisk(disk.Key);
-
-                            Logging.Log($"- {disk.Key}: {disk.Value} ({space.Length}B / {space.Length / 1024 / 1024}MB / {space.Length / 1024 / 1024 / 1024}GB) StorageSpace");
-                        }
-
-                        Logging.Log();
-
-                        foreach (KeyValuePair<long, string> disk in disks)
-                        {
-                            Space space = pool.OpenDisk(disk.Key);
-
-                            int spaceSectorSize = TryDetectSectorSize(space);
-
-                            IEnumerable<GPT.GPT.Partition> msPartitionTable = GetGPTPartitions(space, (uint)spaceSectorSize);
-
-                            // 如果GPT解析失败，尝试MBR（支持ARM/ARM64的MBR虚拟磁盘）
-                            if (msPartitionTable == null)
-                            {
-                                Logging.Log("Storage Space GPT parsing failed, trying MBR...");
-                                msPartitionTable = MobilePackageGen.MBR.MBRParser.GetMBRPartitions(space, (uint)spaceSectorSize);
-                            }
-
-                            if (msPartitionTable != null)
-                            {
-                                foreach (GPT.GPT.Partition storageSpacePartition in msPartitionTable)
-                                {
-                                    partitions.Add((storageSpacePartition, Open(storageSpacePartition, (uint)spaceSectorSize, space)));
-                                }
-                            }
-                        }
-                    }
                 }
             }
 
             return partitions;
         }
 
-        private static SparseStream Open(GPT.GPT.Partition entry, uint SectorSize, Stream _diskData)
+        internal static SparseStream Open(GPT.GPT.Partition entry, uint SectorSize, Stream _diskData)
         {
             ulong start = entry.FirstSector * SectorSize;
             ulong end = (entry.LastSector + 1) * SectorSize;
@@ -183,7 +137,7 @@ namespace MobilePackageGen.Adapters
             return new SubStream(_diskData, (long)start, (long)(end - start));
         }
 
-        private static IEnumerable<GPT.GPT.Partition> GetGPTPartitions(Stream diskStream, uint sectorSize)
+        internal static IEnumerable<GPT.GPT.Partition> GetGPTPartitions(Stream diskStream, uint sectorSize)
         {
             diskStream.Seek(0, SeekOrigin.Begin);
 
@@ -205,14 +159,117 @@ namespace MobilePackageGen.Adapters
             }
             catch (Exception ex)
             {
-                Console.WriteLine("EXCEPTION!");
-                Console.WriteLine(ex);
+                Console.WriteLine($"[Warning] GPT signature not found on disk ({ex.Message}), falling back to MBR");
                 diskStream.Seek(0, SeekOrigin.Begin);
                 return null;
             }
         }
 
-        private static int TryDetectSectorSize(Stream diskStream)
+        /// <summary>
+        /// MBR 分区表解析入口。
+        /// 优先使用 <see cref="MobilePackageGen.MBR.MBRParser"/>（完整实现：15 种分区类型映射 +
+        /// 扩展分区 EBR / 逻辑分区解析），失败或返回空时回退到本类内的简易实现（仅 4 个主分区）。
+        /// </summary>
+        private static IEnumerable<GPT.GPT.Partition> GetMBRPartitions(Stream diskStream, uint sectorSize)
+        {
+            try
+            {
+                List<GPT.GPT.Partition> viaParser = MobilePackageGen.MBR.MBRParser.GetMBRPartitions(diskStream, sectorSize);
+                if (viaParser != null && viaParser.Count > 0)
+                {
+                    return viaParser;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logging.Log($"MBR: full parser failed ({ex.Message}); falling back to simple parser", LoggingLevel.Warning);
+            }
+
+            return GetMBRPartitionsSimple(diskStream, sectorSize);
+        }
+
+        /// <summary>简易 MBR 回退实现：仅解析 4 个主分区（跳过扩展分区），无 EBR 支持。</summary>
+        private static IEnumerable<GPT.GPT.Partition> GetMBRPartitionsSimple(Stream diskStream, uint sectorSize)
+        {
+            diskStream.Seek(0, SeekOrigin.Begin);
+
+            byte[] mbr = new byte[Math.Min(sectorSize, 512)];
+            diskStream.Read(mbr, 0, mbr.Length);
+            diskStream.Seek(0, SeekOrigin.Begin);
+
+            if (mbr.Length < 512 || mbr[510] != 0x55 || mbr[511] != 0xAA)
+            {
+                return null;
+            }
+
+            List<GPT.GPT.Partition> partitions = [];
+
+            ulong totalSectors = (ulong)(diskStream.Length / sectorSize);
+            Console.WriteLine($"[MBR-DEBUG] sectorSize={sectorSize} diskLen={diskStream.Length} totalSectors={totalSectors}");
+
+            for (int i = 0; i < 4; i++)
+            {
+                int offset = 446 + (i * 16);
+                byte type = mbr[offset + 4];
+
+                // Skip empty entries and extended partition tables
+                if (type == 0x00 || type == 0x05 || type == 0x0F)
+                {
+                    continue;
+                }
+
+                uint startLBA = BitConverter.ToUInt32(mbr, offset + 8);
+                uint sectorCount = BitConverter.ToUInt32(mbr, offset + 12);
+                Console.WriteLine($"[MBR-DEBUG] P{i + 1}: type=0x{type:X2} lba={startLBA}(0x{startLBA:X}) cnt={sectorCount} end={(ulong)startLBA + sectorCount}");
+
+                // Skip entries that are empty or extend beyond the disk
+                if (sectorCount == 0 || (ulong)startLBA + sectorCount > totalSectors)
+                {
+                    continue;
+                }
+
+                GPT.GPT.Partition partition = new()
+                {
+                    Name = "Partition" + (i + 1),
+                    PartitionTypeGuid = MbrTypeToGuid(type),
+                    PartitionGuid = new Guid($"{type:X2}000000-0000-0000-0000-{startLBA:X12}")
+                };
+
+                partition.FirstSector = startLBA;
+                partition.LastSector = (ulong)startLBA + sectorCount - 1;
+
+                partitions.Add(partition);
+            }
+
+            // No valid MBR partition entries found - treat the whole disk as a single
+            // "superfloppy" style volume (entire disk formatted as one file system).
+            if (partitions.Count == 0)
+            {
+                GPT.GPT.Partition wholeDisk = new()
+                {
+                    Name = "Partition1",
+                    PartitionTypeGuid = new Guid("EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"),
+                    PartitionGuid = new Guid("00000000-0000-0000-0000-000000000001")
+                };
+                wholeDisk.FirstSector = 0;
+                wholeDisk.LastSector = totalSectors - 1;
+                partitions.Add(wholeDisk);
+            }
+
+            return partitions;
+        }
+
+        private static Guid MbrTypeToGuid(byte type)
+        {
+            return type switch
+            {
+                0xEF => new Guid("C12A7328-F81F-11D2-BA4B-00A0C93EC93B"), // EFI System partition
+                0x27 => new Guid("DE94BBA4-06D1-4D40-A16A-BFD50179D6AC"), // Microsoft Recovery
+                _ => new Guid("EBD0A0A2-B9E5-4433-87C0-68B6B72699C7")     // Microsoft Basic Data
+            };
+        }
+
+        internal static int TryDetectSectorSize(Stream diskStream)
         {
             // Default is 4096
             int sectorSize = 4096;

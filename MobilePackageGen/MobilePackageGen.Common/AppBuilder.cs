@@ -150,11 +150,6 @@ namespace MobilePackageGen
             {
                 foreach (IPartition partition in disk.Partitions)
                 {
-                    if (partition.Name != "PreInstalled")
-                    {
-                        continue;
-                    }
-
                     IFileSystem? fileSystem = partition.FileSystem;
 
                     if (fileSystem != null)
@@ -163,6 +158,8 @@ namespace MobilePackageGen
                         {
                             // PreInstalled Partition
                             // Extracted APPX, Licenses
+                            // Match by content instead of relying on the GPT partition name,
+                            // because MBR disks (e.g. WCOS VHDs) have no PreInstalled name.
                             if (fileSystem.DirectoryExists("AppData") && fileSystem.DirectoryExists("WindowsApps"))
                             {
                                 fileSystemsWithServicing.Add(partition);
@@ -237,7 +234,7 @@ namespace MobilePackageGen
             return PFM;
         }
 
-        public static void ExtractAppLicenses(IFileSystem fileSystem, string destination_path, List<AppxPackage> appList)
+        public static void ExtractAppLicenses(IFileSystem fileSystem, string destination_path, List<AppxPackage> appList, HashSet<string>? filter = null)
         {
             string[] LicenseFiles = [.. fileSystem.GetFiles("AppData", "*.xml", SearchOption.TopDirectoryOnly)];
 
@@ -250,6 +247,13 @@ namespace MobilePackageGen
                 // Actual
                 using Stream PreInstalledLicenseFileStream = fileSystem.OpenFile(LicenseFile, FileMode.Open, FileAccess.Read);
                 string PFM = GetPFNFromAppLicense(PreInstalledLicenseFileStream);
+
+                // Optional per-package filtering (used by GUI for selected packages only)
+                if (filter != null && !filter.Contains(PFM, StringComparer.InvariantCultureIgnoreCase))
+                {
+                    continue;
+                }
+
                 AppxPackage? matchingAppListItem = appList.FirstOrDefault(x =>
                     x.ID.Equals(PFM, StringComparison.InvariantCultureIgnoreCase));
                 if (matchingAppListItem != null)
@@ -284,12 +288,25 @@ namespace MobilePackageGen
             }
         }
 
-        public static void ExtractAppPackages(IFileSystem fileSystem, string destination_path, int packagesCount, ref int i, List<AppxPackage> appList)
+        public static void ExtractAppPackages(IFileSystem fileSystem, string destination_path, int packagesCount, ref int i, List<AppxPackage> appList, HashSet<string>? filter = null)
         {
             string[] AppFolders = [.. fileSystem.GetDirectories("WindowsApps", "*", SearchOption.TopDirectoryOnly)];
             foreach (string AppFolder in AppFolders)
             {
                 if (Path.GetFileName(AppFolder).Equals("deleted", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    continue;
+                }
+
+                // Ex: "Microsoft.Dynamics365.Guides_1.0.100.0_arm__8wekyb3d8bbwe"
+                // PFM: <PFM>microsoft.dynamics365.guides_8wekyb3d8bbwe</PFM>
+                // Arch: ARM
+                string appPackageName = Path.GetFileName(AppFolder);
+                string appArchitecture = appPackageName.Split("_")[^3];
+                string appPFM = $"{appPackageName.Split("_")[0]}_{appPackageName.Split("_")[^1]}";
+
+                // Optional per-package filtering (used by GUI for selected packages only)
+                if (filter != null && !filter.Contains(appPFM, StringComparer.InvariantCultureIgnoreCase))
                 {
                     continue;
                 }
@@ -309,13 +326,6 @@ namespace MobilePackageGen
                 string fileStatus = "";
 
                 // --------------------------
-
-                // Ex: "Microsoft.Dynamics365.Guides_1.0.100.0_arm__8wekyb3d8bbwe"
-                // PFM: <PFM>microsoft.dynamics365.guides_8wekyb3d8bbwe</PFM>
-                // Arch: ARM
-                string appPackageName = Path.GetFileName(AppFolder);
-                string appArchitecture = appPackageName.Split("_")[^3];
-                string appPFM = $"{appPackageName.Split("_")[0]}_{appPackageName.Split("_")[^1]}";
 
                 // Fallback
                 string rootDestination = Path.Combine(destination_path, "PreInstalled", "Apps");

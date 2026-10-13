@@ -5,31 +5,35 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "MobilePackageGen.CLI", "MobilePackageGen.CLI", "{F5B17283-1A90-BB27-80ED-CD85235CDCEA}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MobilePackageGen", "MobilePackageGen.CLI\MobilePackageGen.csproj", "{9649595F-B516-4F7B-ABDC-14F64EAACD62}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MobilePackageGen", "src\MobilePackageGen.CLI\MobilePackageGen.csproj", "{9649595F-B516-4F7B-ABDC-14F64EAACD62}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MobilePackageGen.GUI", "MobilePackageGen.GUI\MobilePackageGen.GUI.csproj", "{947F4454-2CE9-4535-B37E-C106E8136069}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MobilePackageGen.GUI", "src\MobilePackageGen.GUI\MobilePackageGen.GUI.csproj", "{947F4454-2CE9-4535-B37E-C106E8136069}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MobilePackageGen.Common", "MobilePackageGen.Common\MobilePackageGen.Common.csproj", "{F560848B-D3AF-4030-9C47-DC4BE9D1AD51}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MobilePackageGen.Common", "src\MobilePackageGen.Common\MobilePackageGen.Common.csproj", "{F560848B-D3AF-4030-9C47-DC4BE9D1AD51}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MobilePackageGen.Adapters", "MobilePackageGen.Adapters\MobilePackageGen.Adapters.csproj", "{34A34DA8-5A70-4523-92E9-58A933D51097}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MobilePackageGen.Adapters", "src\MobilePackageGen.Adapters\MobilePackageGen.Adapters.csproj", "{34A34DA8-5A70-4523-92E9-58A933D51097}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DotnetPackaging.Msix", "DotnetPackaging.Msix\DotnetPackaging.Msix.csproj", "{7DDD5D3D-A6DA-4CCE-8458-FB3844049849}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DotnetPackaging.Msix", "thirdparty\DotnetPackaging.Msix\DotnetPackaging.Msix.csproj", "{7DDD5D3D-A6DA-4CCE-8458-FB3844049849}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LibSxS", "LibSxS\LibSxS.csproj", "{607C7306-3AC5-4C23-9D53-14E66BF58011}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LibSxS", "src\LibSxS\LibSxS.csproj", "{607C7306-3AC5-4C23-9D53-14E66BF58011}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Microsoft.Deployment.Compression", "Microsoft.Deployment.Compression\Microsoft.Deployment.Compression.csproj", "{97FD713E-4A00-4E1E-B299-6F54DE560D5F}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Microsoft.Deployment.Compression", "src\Microsoft.Deployment.Compression\Microsoft.Deployment.Compression.csproj", "{97FD713E-4A00-4E1E-B299-6F54DE560D5F}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Microsoft.Deployment.Compression.Cab", "Microsoft.Deployment.Compression.Cab\Microsoft.Deployment.Compression.Cab.csproj", "{74204794-4BAE-4CA5-9762-C78814D43E5A}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Microsoft.Deployment.Compression.Cab", "src\Microsoft.Deployment.Compression.Cab\Microsoft.Deployment.Compression.Cab.csproj", "{74204794-4BAE-4CA5-9762-C78814D43E5A}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Archives.DiscUtils", "Archives.DiscUtils\Archives.DiscUtils.csproj", "{B4C35838-640E-4E25-801A-0AD31E4C704B}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Archives.DiscUtils", "src\Archives.DiscUtils\Archives.DiscUtils.csproj", "{B4C35838-640E-4E25-801A-0AD31E4C704B}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Img2Ffu.Library", "Img2Ffu.Library\Img2Ffu.Library.csproj", "{9E5ACC44-352A-48A8-B16C-B661923D855A}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Img2Ffu.Library", "src\Img2Ffu.Library\Img2Ffu.Library.csproj", "{9E5ACC44-352A-48A8-B16C-B661923D855A}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Img2Ffu.Library.Compression.Windows", "Img2Ffu.Library.Compression.Windows\Img2Ffu.Library.Compression.Windows.csproj", "{D7EAC1F2-4629-4EDC-A7EF-FA5FA871515E}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Img2Ffu.Library.Compression.Windows", "src\Img2Ffu.Library.Compression.Windows\Img2Ffu.Library.Compression.Windows.csproj", "{D7EAC1F2-4629-4EDC-A7EF-FA5FA871515E}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StorageSpace", "StorageSpace\StorageSpace.csproj", "{D9305DE5-2326-433A-90BF-93F52B00C9B8}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StorageSpace", "src\StorageSpace\StorageSpace.csproj", "{D9305DE5-2326-433A-90BF-93F52B00C9B8}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DeflateBlockCompressor", "DeflateBlockCompressor\DeflateBlockCompressor.csproj", "{F8540A35-C61E-4198-9187-49201FA69257}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DeflateBlockCompressor", "thirdparty\DeflateBlockCompressor\DeflateBlockCompressor.csproj", "{F8540A35-C61E-4198-9187-49201FA69257}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{827E0CD3-B72D-47B6-A68D-7590B98EB39B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WPMT.Core", "src\WPMT.Core\WPMT.Core.csproj", "{4A12763B-1F28-42AD-831C-C919629D9350}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -197,11 +201,24 @@ Global
 		{F8540A35-C61E-4198-9187-49201FA69257}.Release|x64.Build.0 = Release|Any CPU
 		{F8540A35-C61E-4198-9187-49201FA69257}.Release|x86.ActiveCfg = Release|Any CPU
 		{F8540A35-C61E-4198-9187-49201FA69257}.Release|x86.Build.0 = Release|Any CPU
+		{4A12763B-1F28-42AD-831C-C919629D9350}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4A12763B-1F28-42AD-831C-C919629D9350}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4A12763B-1F28-42AD-831C-C919629D9350}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{4A12763B-1F28-42AD-831C-C919629D9350}.Debug|x64.Build.0 = Debug|Any CPU
+		{4A12763B-1F28-42AD-831C-C919629D9350}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{4A12763B-1F28-42AD-831C-C919629D9350}.Debug|x86.Build.0 = Debug|Any CPU
+		{4A12763B-1F28-42AD-831C-C919629D9350}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4A12763B-1F28-42AD-831C-C919629D9350}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4A12763B-1F28-42AD-831C-C919629D9350}.Release|x64.ActiveCfg = Release|Any CPU
+		{4A12763B-1F28-42AD-831C-C919629D9350}.Release|x64.Build.0 = Release|Any CPU
+		{4A12763B-1F28-42AD-831C-C919629D9350}.Release|x86.ActiveCfg = Release|Any CPU
+		{4A12763B-1F28-42AD-831C-C919629D9350}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{9649595F-B516-4F7B-ABDC-14F64EAACD62} = {F5B17283-1A90-BB27-80ED-CD85235CDCEA}
+		{4A12763B-1F28-42AD-831C-C919629D9350} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal

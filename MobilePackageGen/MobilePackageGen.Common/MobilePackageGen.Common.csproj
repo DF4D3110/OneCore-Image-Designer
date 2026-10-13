@@ -13,6 +13,7 @@
     <ProjectReference Include="..\LibSxS\LibSxS.csproj" />
     <ProjectReference Include="..\Microsoft.Deployment.Compression.Cab\Microsoft.Deployment.Compression.Cab.csproj" />
     <ProjectReference Include="..\MobilePackageGen.Adapters\MobilePackageGen.Adapters.csproj" />
+    <ProjectReference Include="..\WPMT.Core\WPMT.Core.csproj" />
   </ItemGroup>
 
   <ItemGroup>

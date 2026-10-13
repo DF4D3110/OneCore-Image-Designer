@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:import namespace="http://www.w3.org/XML/1998/namespace" />
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="metadata">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" />
+              </xsd:sequence>
+              <xsd:attribute name="name" use="required" type="xsd:string" />
+              <xsd:attribute name="type" type="xsd:string" />
+              <xsd:attribute name="mimetype" type="xsd:string" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="assembly">
+            <xsd:complexType>
+              <xsd:attribute name="alias" type="xsd:string" />
+              <xsd:attribute name="name" type="xsd:string" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+                <xsd:element name="comment" type="xsd:string" minOccurs="0" msdata:Ordinal="2" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" msdata:Ordinal="1" />
+              <xsd:attribute name="type" type="xsd:string" msdata:Ordinal="3" />
+              <xsd:attribute name="mimetype" type="xsd:string" msdata:Ordinal="4" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="resheader">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <data name="FormTitle" xml:space="preserve"><value>MobilePackageGen GUI - 包提取工具</value></data>
+  <data name="BtnOpen" xml:space="preserve"><value>打开镜像...</value></data>
+  <data name="BtnSelectAll" xml:space="preserve"><value>全选</value></data>
+  <data name="BtnDeselectAll" xml:space="preserve"><value>全不选</value></data>
+  <data name="FilterAll" xml:space="preserve"><value>全部</value></data>
+  <data name="SearchPlaceholder" xml:space="preserve"><value>搜索包...</value></data>
+  <data name="LblOutput" xml:space="preserve"><value>输出文件夹:</value></data>
+  <data name="BtnBrowse" xml:space="preserve"><value>浏览...</value></data>
+  <data name="BtnBuild" xml:space="preserve"><value>构建选中</value></data>
+  <data name="StatusReady" xml:space="preserve"><value>就绪。打开镜像文件以枚举包。</value></data>
+  <data name="DetailsDefault" xml:space="preserve"><value>选择一个包以查看详情。</value></data>
+  <data name="LoadingImage" xml:space="preserve"><value>正在加载磁盘镜像...</value></data>
+  <data name="EnumeratingPackages" xml:space="preserve"><value>正在枚举包...</value></data>
+  <data name="LoadFailed" xml:space="preserve"><value>加载镜像失败。未找到磁盘。</value></data>
+  <data name="ErrorLoading" xml:space="preserve"><value>加载镜像时出错:</value></data>
+  <data name="OpenImageTitle" xml:space="preserve"><value>选择磁盘镜像</value></data>
+  <data name="ImageFilter" xml:space="preserve"><value>磁盘镜像|*.ffu;*.vhdx;*.vhd;*.wim;*.img;*.bin|所有文件|*.*</value></data>
+  <data name="OutputFolderTitle" xml:space="preserve"><value>选择输出文件夹</value></data>
+  <data name="NoImageLoaded" xml:space="preserve"><value>请先加载磁盘镜像。</value></data>
+  <data name="NoPackagesSelected" xml:space="preserve"><value>未选择任何包。</value></data>
+  <data name="ConfirmBuildTitle" xml:space="preserve"><value>确认构建</value></data>
+  <data name="ConfirmBuildMsg" xml:space="preserve"><value>构建 {0} 个选中的包？\n\nCBS: {1}\nSPKG: {2}\n驱动: {3}\n\n输出: {4}</value></data>
+  <data name="BuildingCBS" xml:space="preserve"><value>正在构建 CBS 包...</value></data>
+  <data name="BuildingSPKG" xml:space="preserve"><value>正在构建 SPKG 包...</value></data>
+  <data name="BuildingDrivers" xml:space="preserve"><value>正在构建驱动包...</value></data>
+  <data name="BuildCompleteTitle" xml:space="preserve"><value>成功</value></data>
+  <data name="BuildCompleteMsg" xml:space="preserve"><value>构建完成！\n\n{0} 个包已构建。\n输出: {1}</value></data>
+  <data name="BuildErrorTitle" xml:space="preserve"><value>错误</value></data>
+  <data name="PackagesFound" xml:space="preserve"><value>已加载 {0} - 找到 {1} 个包 ({2} CBS, {3} SPKG, {4} 驱动)</value></data>
+  <data name="PackagesSelected" xml:space="preserve"><value>{0} 个包，{1} 个已选中</value></data>
+  <data name="MenuLanguage" xml:space="preserve"><value>语言</value></data>
+  <data name="MenuHelp" xml:space="preserve"><value>帮助</value></data>
+  <data name="MenuUsage" xml:space="preserve"><value>使用说明</value></data>
+  <data name="MenuAbout" xml:space="preserve"><value>关于</value></data>
+  <data name="HelpTitle" xml:space="preserve"><value>使用说明</value></data>
+  <data name="HelpContent" xml:space="preserve"><value>MobilePackageGen GUI - 包提取工具
+
+使用步骤：
+1. 点击"打开镜像..."选择磁盘镜像文件（支持 FFU/VHDX/WIM/IMG/BIN）
+2. 等待程序枚举镜像中的所有可提取包
+3. 在左侧树形列表中勾选需要提取的包（按类型和分区分组）
+4. 使用顶部筛选器按类型筛选，或在搜索框中搜索
+5. 点击"全选"/"全不选"快速选择
+6. 在底部设置输出文件夹
+7. 点击"构建选中"开始提取
+
+包类型说明：
+- CBS: Windows 组件包（.mum 清单）
+- SPKG: 移动版组件包（.xml 清单）
+- Driver: 驱动程序包（.inf 驱动）
+
+注意：
+- 启动时会打开一个控制台窗口，显示构建日志和进度
+- 构建过程中出错的包会自动跳过并在结束后汇总
+- 输出文件夹中会按分区名创建子文件夹</value></data>
+  <data name="AboutTitle" xml:space="preserve"><value>关于</value></data>
+  <data name="AboutContent" xml:space="preserve"><value>MobilePackageGen GUI
+版本: 1.0.0
+
+基于 MobileTooling/MobilePackageGen 开发
+用于从 Windows 磁盘镜像中提取 CBS/SPKG/驱动包
+
+组织: WinStory 2026
+网站: https://wiki.win-story.cn
+编译者: DF4D3110</value></data>
+  <data name="Type" xml:space="preserve"><value>类型</value></data>
+  <data name="Partition" xml:space="preserve"><value>分区</value></data>
+  <data name="Architecture" xml:space="preserve"><value>架构</value></data>
+  <data name="Version" xml:space="preserve"><value>版本</value></data>
+  <data name="PublicKeyToken" xml:space="preserve"><value>公钥令牌</value></data>
+  <data name="Language" xml:space="preserve"><value>语言</value></data>
+  <data name="OutputPath" xml:space="preserve"><value>输出路径</value></data>
+  <data name="Source" xml:space="preserve"><value>来源</value></data>
+  <data name="Description" xml:space="preserve"><value>描述</value></data>
+  <data name="Package" xml:space="preserve"><value>包</value></data>
+  <data name="WarningTitle" xml:space="preserve"><value>警告</value></data>
+</root>

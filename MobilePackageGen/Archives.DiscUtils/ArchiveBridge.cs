@@ -166,6 +166,40 @@ namespace Archives.DiscUtils
             throw new NotImplementedException();
         }
 
+        public IEnumerable<string> GetFileSystemEntries(string path, string searchPattern, SearchOption searchOption)
+        {
+            Func<string, bool>? re = null;
+
+            if (!string.IsNullOrEmpty(searchPattern))
+            {
+                re = Utilities.ConvertWildcardsToRegEx(searchPattern, true);
+            }
+
+            using ArchiveFile archiveFile = new(stream, sevenZipFormat);
+            IEnumerable<string> prereq = archiveFile.Entries
+                .Where(x => x.FileName.StartsWith(path, StringComparison.InvariantCultureIgnoreCase) && (re == null || re(x.FileName)))
+                .Select(x => x.FileName);
+            switch (searchOption)
+            {
+                case SearchOption.AllDirectories:
+                    {
+                        return prereq.ToArray();
+                    }
+                case SearchOption.TopDirectoryOnly:
+                    {
+                        int expectedCount = path.Count(x => x == '\\');
+                        if (!path.EndsWith("\\"))
+                        {
+                            expectedCount++;
+                        }
+
+                        return prereq.Where(x => x.Count(x => x == '\\') == expectedCount).ToArray();
+                    }
+            }
+
+            return Array.Empty<string>();
+        }
+
         public DiscFileSystemInfo GetFileSystemInfo(string path)
         {
             throw new NotImplementedException();

@@ -8,7 +8,7 @@ namespace StorageSpace
         private readonly Stream Stream;
         private readonly long OriginalSeekPosition;
 
-        private readonly bool IsAncientFormat = false;
+        private bool IsAncientFormat = false;
 
         public SPACEDB SPACEDB
         {
@@ -60,6 +60,20 @@ namespace StorageSpace
             this.Stream = Stream;
             OriginalSeekPosition = Stream.Position;
 
+            ParsePool();
+        }
+
+        public Pool(Stream Stream, Dictionary<long, Stream> physicalDiskStreams)
+        {
+            this.Stream = Stream;
+            OriginalSeekPosition = Stream.Position;
+            this.PhysicalDiskStreams = physicalDiskStreams;
+
+            ParsePool();
+        }
+
+        private void ParsePool()
+        {
             using BinaryReader reader = new(Stream);
 
             Stream.Seek(0x18, SeekOrigin.Current);
@@ -149,6 +163,59 @@ namespace StorageSpace
             Stream.Seek(OriginalSeekPosition, SeekOrigin.Begin);
         }
 
+        public Dictionary<long, Stream> PhysicalDiskStreams
+        {
+            get; private set;
+        } = [];
+
+        public void SetPhysicalDiskStreams(Dictionary<long, Stream> physicalDiskStreams)
+        {
+            PhysicalDiskStreams = physicalDiskStreams;
+        }
+
+        public static Pool OpenPool(IEnumerable<Stream> poolPartitionStreams)
+        {
+            List<Stream> streams = poolPartitionStreams.ToList();
+
+            if (streams.Count == 0)
+            {
+                throw new ArgumentException("No storage pool partition streams provided.", nameof(poolPartitionStreams));
+            }
+
+            Stream primary = streams[0];
+            primary.Position = 0;
+
+            Pool pool = new(primary);
+
+            Dictionary<long, Stream> diskStreams = [];
+
+            foreach (Stream stream in streams)
+            {
+                try
+                {
+                    stream.Position = 0;
+                    Data.SPACEDB spacedb = Data.SPACEDB.Parse(stream);
+
+                    Data.Subtypes.PhysicalDisk? physicalDisk = pool.SDBBPhysicalDisks.FirstOrDefault(pd => pd.SPACEDBGUID == spacedb.SPACEDBGUID);
+
+                    if (physicalDisk != null)
+                    {
+                        diskStreams[physicalDisk.PhysicalDiskNumber] = stream;
+                    }
+
+                    stream.Position = 0;
+                }
+                catch
+                {
+                    // Ignore streams that do not contain valid pool metadata.
+                }
+            }
+
+            pool.SetPhysicalDiskStreams(diskStreams);
+
+            return pool;
+        }
+
         public Dictionary<long, string> GetDisks()
         {
             Dictionary<long, string> disks = [];
@@ -163,7 +230,7 @@ namespace StorageSpace
 
         public Space OpenDisk(long storeIndex)
         {
-            return new Space(Stream, storeIndex, this, OriginalSeekPosition, IsAncientFormat);
+            return new Space(Stream, storeIndex, this, OriginalSeekPosition, IsAncientFormat, PhysicalDiskStreams);
         }
     }
 }

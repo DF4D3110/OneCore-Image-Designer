@@ -1,4 +1,4 @@
-﻿using Archives.DiscUtils;
+using Archives.DiscUtils;
 using DiscUtils;
 using SevenZipExtractor;
 using System.Runtime.InteropServices;
@@ -37,6 +37,8 @@ namespace MobilePackageGen.Adapters
             get;
         }
 
+        // ── 存储池溯源（OCID 系统重构页在用：SelectReconstructViewModel.cs）
+        //    独立版删掉了这四个字段，此处按换库前状态回填，否则 OCID 编译失败。
         /// <summary>
         /// 是否来自存储池虚拟磁盘
         /// </summary>

@@ -124,6 +124,11 @@ namespace MobilePackageGen.Adapters.RealFileSystem
             throw new NotImplementedException();
         }
 
+        public IEnumerable<string> GetFileSystemEntries(string path, string searchPattern, SearchOption searchOption)
+        {
+            return Directory.EnumerateFileSystemEntries(Path.Combine(RootPath, path), searchPattern, searchOption);
+        }
+
         public DiscFileSystemInfo GetFileSystemInfo(string path)
         {
             throw new NotImplementedException();
