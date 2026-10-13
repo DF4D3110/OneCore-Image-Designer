@@ -66,6 +66,13 @@ namespace OneCore_Image_Designer.Services
             public string WimName = "Windows";
             /// <summary>只预检不执行。</summary>
             public bool DryRun;
+
+            /// <summary>
+            /// 跳过铺底（WCP）步骤。**目标镜像已经存在时必须跳过**：
+            /// 铺底是为"从零造一个镜像骨架"设计的，对已有镜像既无必要，
+            /// 而且实测在已有镜像上会以 CreateNewOfflineStore 0x8007051A（权限不足）失败。
+            /// </summary>
+            public bool SkipFounder;
         }
 
         public sealed class Result
@@ -169,18 +176,27 @@ namespace OneCore_Image_Designer.Services
                 string root = string.IsNullOrWhiteSpace(cfg.ImageRoot) ? DeriveImageRoot(win) : cfg.ImageRoot;
 
                 // ── 步骤 1：铺底（替代 sxsfounder.exe） ──
-                L("=== 步骤 1/7：铺底（SxSFounderService，替代 sxsfounder.exe） ===");
-                await Task.Run(() =>
+                if (cfg.SkipFounder)
                 {
-                    var f = SxSFounderService.Create(root, cfg.Arch, log);
-                    Step("sxsfounder(铺底)", f.Success, f.Success
-                        ? $"CreateNewWindows + CreateNewOfflineStore 成功（disposition {f.WindowsDisposition}/{f.StoreDisposition}）"
-                        : f.Error);
-                }, ct);
-                if (!res.Steps[^1].Ok)
+                    L("=== 步骤 1/7：铺底 —— 已跳过（目标镜像已存在，无需铺底） ===");
+                    Step("sxsfounder(铺底)", true, "已跳过（目标镜像已存在）");
+                }
+                else
                 {
-                    res.Error = "铺底失败（镜像骨架没建起来，后续步骤无法进行）";
-                    return res;
+                    L("=== 步骤 1/7：铺底（SxSFounderService，替代 sxsfounder.exe） ===");
+                    await Task.Run(() =>
+                    {
+                        var f = SxSFounderService.Create(root, cfg.Arch, log);
+                        Step("sxsfounder(铺底)", f.Success, f.Success
+                            ? $"CreateNewWindows + CreateNewOfflineStore 成功（disposition {f.WindowsDisposition}/{f.StoreDisposition}）"
+                            : f.Error);
+                    }, ct);
+                    if (!res.Steps[^1].Ok)
+                    {
+                        res.Error = "铺底失败（镜像骨架没建起来，后续步骤无法进行）。"
+                                  + "若目标镜像已经存在，请改用 SkipFounder / --skip-founder。";
+                        return res;
+                    }
                 }
 
                 // ── 步骤 2：SKU assembly（替代 cbsx.exe /b:） ──

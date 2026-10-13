@@ -172,6 +172,9 @@ namespace OneCore_Image_Designer.Services
                 L("门禁: " + gate.Reason);
                 if (!gate.Allowed) { res.Error = gate.Reason; return res; }
 
+                // WCP 同样要读写目标镜像的 hive，理由见 PrivilegeHelper 的说明
+                PrivilegeHelper.EnableServicingPrivileges(L);
+
                 // ── 让 wcp.dll 可见：优先目标镜像带的服务栈目录，回退宿主 ──
                 if (!TryResolveWcp(full, L)) { res.Error = "找不到 wcp.dll"; return res; }
 

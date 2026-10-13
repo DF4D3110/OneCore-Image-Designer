@@ -273,6 +273,9 @@ namespace OneCore_Image_Designer.Services
             public SkuAssemblyService.PackageIntent Intent = SkuAssemblyService.PackageIntent.Unknown;
             public CbsInstallState TargetState;
             public CbsInstallState CurrentState = CbsInstallState.Unknown;
+
+            /// <summary>已是目标状态而跳过（幂等，不算失败）。</summary>
+            public bool Skipped;
             public CbsInstallState Applicability = CbsInstallState.Unknown;
             public string Identity = "";
             public bool Ok;
@@ -284,6 +287,8 @@ namespace OneCore_Image_Designer.Services
             public bool Success;
             public string Error = "";
             public bool RebootRequired;
+                /// <summary>因已是目标状态而跳过的包数（幂等跳过，不算失败）。</summary>
+                public int Skipped;
             public readonly List<string> EnumeratedIdentities = new();
             public readonly List<PackageOperation> Operations = new();
             public readonly List<string> Log = new();
@@ -399,6 +404,11 @@ namespace OneCore_Image_Designer.Services
                 }
                 log?.Invoke("servicing stack: " + stackDetail);
 
+                // CBS 离线服务要读写目标镜像的 hive。dism /Apply-Image 铺出的镜像会还原
+                // WIM 原始 ACL（hive 归属 TrustedInstaller），此时必须显式启用备份/还原特权，
+                // 否则 ICbsSession::Initialize 会以 0x8007051A (ERROR_NO_SUCH_PRIVILEGE) 失败。
+                PrivilegeHelper.EnableServicingPrivileges(log);
+
                 IntPtr cbscore = LoadLibraryA("cbscore.dll");
                 if (cbscore == IntPtr.Zero)
                 {
@@ -464,7 +474,10 @@ namespace OneCore_Image_Designer.Services
 
                 if (hr < 0)
                 {
+                    string? privHint = PrivilegeHelper.Explain(hr);
+                    if (privHint != null) log?.Invoke("  " + privHint);
                     error = $"ICbsSession::Initialize 失败 0x{hr:X8}（bootDrive=\"{bootDrive}\", winDir=\"{winDir}\"）"
+                          + (privHint != null ? " —— " + privHint : "")
                           + (hr == unchecked((int)0x800F0823)
                              ? " —— CBS_E_NEW_SERVICING_STACK_REQUIRED：镜像声明的 servicing stack 版本高于已加载栈自称的版本。"
                              + "跨代场景（镜像 10.0.x + 可加载栈 6.2.y）会触发它；可改用 DismServicingService 走 DISM 兜底。"
@@ -608,8 +621,20 @@ namespace OneCore_Image_Designer.Services
                         rec.CurrentState = cur;
                         log?.Invoke($"  当前状态={cur}  适用性={app}  目标={rec.TargetState}");
 
-                        // 与 cbsexploder 相同的两项断言
-                        if (cur == rec.TargetState) { rec.Error = $"包已经是目标状态 {cur}"; res.Error = rec.Error; return res; }
+                        // 与 cbsexploder 相同的两项断言，但**中止条件收窄**：
+                        //   · “已经是目标状态” 是**正常情况**（幂等），应当**跳过并继续**，
+                        //     而不是中止整个计划。原实现把它当错误，导致计划里只要有一个
+                        //     包已是目标状态，后面所有包就都装不上了（实测：
+                        //     Enterprise 已 Installed → Core/CoreSingleLanguage 明明是
+                        //     Absent→Installed 也被一起放弃）。
+                        //   · 适用性不足才确实应当拦下。
+                        if (cur == rec.TargetState)
+                        {
+                            rec.Skipped = true;
+                            log?.Invoke($"  ⏭ 已是目标状态 {cur}，跳过该包");
+                            res.Skipped++;
+                            continue;
+                        }
                         if (app != CbsInstallState.Installed)
                         {
                             rec.Error = $"包不适用于当前镜像（applicability={app}）";
