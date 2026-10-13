@@ -41,6 +41,72 @@ namespace OneCore_Image_Designer.ViewModels.SystemReconstruct
             ExpandAllCommand = new RelayCommand(() => FileTreeBuilder.SetAllExpanded(PackageFileTree, true));
             CollapseAllCommand = new RelayCommand(() => FileTreeBuilder.SetAllExpanded(PackageFileTree, false));
             ExtractComponentsCommand = new RelayCommand(ExtractComponents);
+            ExtractDriversFromFolderCommand = new RelayCommand(ExtractDriversFromFolder);
+            ScanHiveCommand = new RelayCommand(ScanHive);
+            PreviewItemCommand = new RelayCommand<object>(PreviewItem);
+            PreviewTreeNodeCommand = new RelayCommand<Models.FileTreeNode>(PreviewTreeNode);
+        }
+
+        // ═════════ 双击预览（XML/文本） ═════════
+
+        /// <summary>列表条目双击：FM 文件从镜像读；OEMInput 用已缓存内容。</summary>
+        public RelayCommand<object> PreviewItemCommand { get; }
+
+        /// <summary>文件树节点双击：解析「磁盘N\分区\路径」从镜像读出。</summary>
+        public RelayCommand<Models.FileTreeNode> PreviewTreeNodeCommand { get; }
+
+        private void PreviewItem(object? item)
+        {
+            if (item is FMFileInfo fm)
+            {
+                if (_loadedDisks == null) { MessageBox.Show("镜像未加载，无法读取 FM 内容。", "预览"); return; }
+                var (dIdx, pIdx, fsPath) = ResolvePartition(fm.PartitionName);
+                if (dIdx < 0) { MessageBox.Show($"找不到分区 {fm.PartitionName}", "预览"); return; }
+                var res = Services.ImageFileReader.Read(_loadedDisks.ElementAt(dIdx), pIdx, fm.SourcePath);
+                ShowPreview(fm.Name, res);
+            }
+            else if (item is PackageInfo pkg && pkg.IsOEMInput)
+            {
+                ShowPreview("OEMInput.xml", new Services.ImageFileReader.ReadResult
+                { Ok = true, Text = OEMInputContent, IsXml = true, Note = "来源分区: " + OEMInputPartition });
+            }
+        }
+
+        private void PreviewTreeNode(Models.FileTreeNode? node)
+        {
+            if (node == null || node.IsFolder) return;
+            if (_loadedDisks == null) { MessageBox.Show("镜像未加载。", "预览"); return; }
+            if (!Services.ImageFileReader.TryParseTreePath(node.FullPath, _loadedDisks,
+                    out int dIdx, out int pIdx, out string fsPath))
+            { MessageBox.Show("无法解析节点路径: " + node.FullPath, "预览"); return; }
+            var res = Services.ImageFileReader.Read(_loadedDisks.ElementAt(dIdx), pIdx, fsPath);
+            ShowPreview(node.FullPath, res);
+        }
+
+        private (int, int, string) ResolvePartition(string partitionName)
+        {
+            if (_loadedDisks == null) return (-1, -1, "");
+            int di = 0;
+            foreach (var disk in _loadedDisks)
+            {
+                int pi = 0;
+                foreach (var part in disk.Partitions)
+                {
+                    if (string.Equals(part.Name, partitionName, StringComparison.OrdinalIgnoreCase))
+                        return (di, pi, "");
+                    pi++;
+                }
+                di++;
+            }
+            return (-1, -1, "");
+        }
+
+        private void ShowPreview(string title, Services.ImageFileReader.ReadResult res)
+        {
+            if (!res.Ok) { MessageBox.Show(res.Note, "预览"); return; }
+            var win = new Views.XmlPreviewWindow(title, res.Text, res.Note, res.IsXml)
+            { Owner = Application.Current?.MainWindow };
+            win.Show();
         }
 
         // === 镜像文件路径 ===
@@ -106,7 +172,22 @@ namespace OneCore_Image_Designer.ViewModels.SystemReconstruct
             set { _selectedFilter = value; OnPropertyChanged(); OnPropertyChanged(nameof(FilteredPackages)); }
         }
 
-        public ObservableCollection<string> FilterTypes { get; } = new() { "全部", "CBS", "SPKG", "Driver", "FM" };
+        public ObservableCollection<string> FilterTypes { get; } = new() { "全部", "CBS", "SPKG", "Driver", "第三方驱动", "FM" };
+
+        // === 驱动扫描通道开关（WCOS 镜像可能没有 *.inf 可扫）===
+        private bool _scanManifestChannel = true;
+        public bool ScanManifestChannel
+        {
+            get => _scanManifestChannel;
+            set { _scanManifestChannel = value; OnPropertyChanged(); }
+        }
+
+        private bool _scanOfflineHiveChannel = true;
+        public bool ScanOfflineHiveChannel
+        {
+            get => _scanOfflineHiveChannel;
+            set { _scanOfflineHiveChannel = value; OnPropertyChanged(); }
+        }
 
         public ObservableCollection<object> FilteredPackages
         {
@@ -117,7 +198,7 @@ namespace OneCore_Image_Designer.ViewModels.SystemReconstruct
 
                 if (SelectedFilter == "全部" || SelectedFilter == "CBS")
                 {
-                    foreach (var p in AllPackages.Where(p => p.Type == PackageType.CBS))
+                    foreach (var p in AllPackages.Where(p => p.Type == PackageType.CBS && !p.IsOEMInput))
                     {
                         if (string.IsNullOrEmpty(filter) || p.Name.ToLowerInvariant().Contains(filter))
                             result.Add(p);
@@ -133,7 +214,25 @@ namespace OneCore_Image_Designer.ViewModels.SystemReconstruct
                 }
                 if (SelectedFilter == "全部" || SelectedFilter == "Driver")
                 {
-                    foreach (var p in AllPackages.Where(p => p.Type == PackageType.Driver))
+                    // 组内连续性：官方驱动在前、第三方在后，分组视图各自成段
+                    foreach (var p in AllPackages.Where(p => p.Type == PackageType.Driver)
+                                 .OrderBy(p => p.IsThirdPartyDriver))
+                    {
+                        if (string.IsNullOrEmpty(filter) || p.Name.ToLowerInvariant().Contains(filter))
+                            result.Add(p);
+                    }
+                }
+                if (SelectedFilter == "第三方驱动")
+                {
+                    foreach (var p in AllPackages.Where(p => p.Type == PackageType.Driver && p.IsThirdPartyDriver))
+                    {
+                        if (string.IsNullOrEmpty(filter) || p.Name.ToLowerInvariant().Contains(filter))
+                            result.Add(p);
+                    }
+                }
+                if (SelectedFilter == "全部")
+                {
+                    foreach (var p in AllPackages.Where(p => p.IsOEMInput))
                     {
                         if (string.IsNullOrEmpty(filter) || p.Name.ToLowerInvariant().Contains(filter))
                             result.Add(p);
@@ -141,7 +240,7 @@ namespace OneCore_Image_Designer.ViewModels.SystemReconstruct
                 }
                 if (SelectedFilter == "全部" || SelectedFilter == "FM")
                 {
-                    foreach (var f in AllFMFiles)
+                    foreach (var f in AllFMFiles.OrderBy(f => f.Vendor))
                     {
                         if (string.IsNullOrEmpty(filter) || f.Name.ToLowerInvariant().Contains(filter))
                             result.Add(f);
@@ -312,6 +411,8 @@ namespace OneCore_Image_Designer.ViewModels.SystemReconstruct
         public RelayCommand ExpandAllCommand { get; }
         public RelayCommand CollapseAllCommand { get; }
         public RelayCommand ExtractComponentsCommand { get; }
+        public RelayCommand ExtractDriversFromFolderCommand { get; }
+        public RelayCommand ScanHiveCommand { get; }
 
         public void BrowseImage()
         {
@@ -379,8 +480,21 @@ namespace OneCore_Image_Designer.ViewModels.SystemReconstruct
                 LoadStatus = "枚举包...";
                 Log("正在枚举CBS/SPKG/Driver包...");
                 var tempOutput = Path.Combine(Path.GetTempPath(), "MobilePackageGen_Temp");
-                var packages = PackageEnumerator.EnumerateAll(_loadedDisks, tempOutput);
-                Log($"枚举到 {packages.Count()} 个包");
+                var packages = PackageEnumerator.EnumerateAll(_loadedDisks, tempOutput).ToList();
+                Log($"枚举到 {packages.Count} 个包");
+
+                // 注册表通道：包 manifest 的 registry 节点识别驱动包（WCOS 无 inf 可扫时补位）
+                if (ScanManifestChannel)
+                {
+                    Log("正在用包内注册表节点补扫驱动包...");
+                    var existing = new HashSet<string>(packages.Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
+                    int added = 0;
+                    foreach (var p in Services.RegistryDriverScanner.ScanManifestRegistry(_loadedDisks, tempOutput, Log))
+                    {
+                        if (existing.Add(p.Name)) { packages.Add(p); added++; }
+                    }
+                    Log($"注册表补扫新增 {added} 个驱动包");
+                }
 
                 foreach (var p in packages)
                 {
@@ -796,17 +910,12 @@ namespace OneCore_Image_Designer.ViewModels.SystemReconstruct
                             }
                         }
 
-                        // 提取固件分区为bin文件（完整重构必需）
-                        Application.Current.Dispatcher.Invoke(() => { BuildStatus = "提取固件分区..."; Progress = 95; });
-                        string firmwareDir = Path.Combine(OutputPath, "Firmware");
-                        int firmwareCount = OneCore_Image_Designer.Services.FirmwareService.ExtractAllFirmwarePartitions(_loadedDisks, firmwareDir);
-                        Application.Current.Dispatcher.Invoke(() => { BuildStatus = $"已提取 {firmwareCount} 个固件分区"; });
-
+                        // 固件分区不再单独导出 bin：所选包/cab 提取已覆盖固件内容，独立 bin 无意义
                         Application.Current.Dispatcher.Invoke(() =>
                         {
                             Progress = 100;
                             BuildStatus = "构建完成";
-                            MessageBox.Show($"选择构建完成！\n\n提取了 {selected.Count} 个包、{selectedFM.Count} 个FM文件和 {firmwareCount} 个固件分区\n输出目录: {OutputPath}\n固件目录: {firmwareDir}", "构建完成", MessageBoxButton.OK, MessageBoxImage.Information);
+                            MessageBox.Show($"选择构建完成！\n\n提取了 {selected.Count} 个包、{selectedFM.Count} 个FM文件\n输出目录: {OutputPath}", "构建完成", MessageBoxButton.OK, MessageBoxImage.Information);
                         });
                     }
                     catch (Exception ex)
@@ -908,7 +1017,15 @@ namespace OneCore_Image_Designer.ViewModels.SystemReconstruct
 
             // 提取预览：先扫描，让用户确认
             var progress = Services.GlobalProgressService.Instance;
+
+            // 任务日志窗口：后台线程写 sink，窗口 400ms 批量刷新（不再逐行 Invoke，防卡死）
+            var sink = new Services.TaskLogSink("组件提取");
+            Services.ComponentExtractor.LiveSink = m => sink.Write(m);
+            var logWin = new Views.TaskLogWindow(sink) { Owner = Application.Current?.MainWindow };
+            logWin.Show();
+
             progress.StartOperation($"正在扫描 {selected.Count} 个组件...", canCancel: false, isIndeterminate: true);
+            sink.Write($"开始扫描 {selected.Count} 个组件（镜像: {ImagePath}）");
 
             Services.ComponentExtractor.ExtractPreviewResult? preview = null;
             try
@@ -948,12 +1065,16 @@ namespace OneCore_Image_Designer.ViewModels.SystemReconstruct
                 if (result != MessageBoxResult.Yes)
                 {
                     ExtractStatus = "已取消提取";
+                    Services.ComponentExtractor.LiveSink = null;
+                    sink.MarkFinished();
+                    logWin.Close();
                     return;
                 }
             }
 
             IsExtracting = true;
             ExtractStatus = "提取中...";
+            sink.Write($"开始提取 → {OutputPath}（模式: {(ExtractGroupByComponent ? "按组件分组" : "按磁盘平铺")}，注册表: {(ExtractIncludeRegistry ? "含" : "不含")}）");
 
             // 启动全局进度面板
             progress.StartOperation($"正在提取 {selected.Count} 个组件...", canCancel: false, isIndeterminate: true);
@@ -1019,8 +1140,145 @@ namespace OneCore_Image_Designer.ViewModels.SystemReconstruct
             finally
             {
                 IsExtracting = false;
+                Services.ComponentExtractor.LiveSink = null;
+                sink.Write("任务结束（窗口保留，可复制/打开日志文件回看）");
+                sink.MarkFinished();
             }
         }
+
+        /// <summary>从外部目录（含 INF 的子目录）打包第三方驱动：生成 wm.xml 源包，可选调 PkgGen 出 cab。</summary>
+        private async void ExtractDriversFromFolder()
+        {
+            var srcDlg = new OpenFolderDialog { Title = "选择驱动源目录（递归扫描 *.inf，每个含 INF 的子目录成一个包）" };
+            if (srcDlg.ShowDialog() != true) return;
+            string scanRoot = srcDlg.FolderName;
+
+            string outRoot = OutputPath;
+            if (string.IsNullOrEmpty(outRoot))
+            {
+                var outDlg = new OpenFolderDialog { Title = "选择驱动包输出目录" };
+                if (outDlg.ShowDialog() == true) { outRoot = outDlg.FolderName; OutputPath = outRoot; }
+                else return;
+            }
+
+            var found = Services.DriverPackageBuilder.Scan(scanRoot);
+            if (found.Count == 0)
+            {
+                MessageBox.Show("所选目录下未找到任何 *.inf。", "驱动打包");
+                return;
+            }
+            var ask = MessageBox.Show(
+                $"扫描到 {found.Count} 个含 INF 的驱动目录。\n" +
+                $"1) 生成源包 + 调 PkgGen 出 cab\n" +
+                $"2) 仅生成 wm.xml 源包（交 addonkit 构建）\n\n" +
+                $"选「是」= 出 cab；「否」= 仅源包；「取消」= 放弃。",
+                "驱动打包方式", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+            if (ask == MessageBoxResult.Cancel) return;
+            bool runPkgGen = ask == MessageBoxResult.Yes;
+
+            // 架构/版本/owner：优先从已加载镜像推断，否则默认 arm64 / 10.0.22621.1 / OEM
+            var anyPkg = AllPackages.FirstOrDefault(p => !string.IsNullOrEmpty(p.Architecture));
+            string arch = anyPkg?.Architecture ?? "arm64";
+            string version = anyPkg?.Version ?? "10.0.22621.1";
+            string owner = (anyPkg?.Name ?? "OEM").Split('.', '-').FirstOrDefault() ?? "OEM";
+
+            var sink = new Services.TaskLogSink("驱动打包");
+            var logWin = new Views.TaskLogWindow(sink) { Owner = Application.Current?.MainWindow };
+            logWin.Show();
+            sink.Write($"源目录: {scanRoot} → 输出: {outRoot}（{(runPkgGen ? "出 cab" : "仅源包")}，arch={arch} ver={version}）");
+
+            try
+            {
+                await Task.Run(() =>
+                {
+                    string pkgRoot = Path.Combine(outRoot, "Packages");
+                    string cabDir = Path.Combine(outRoot, "Drivers");
+                    string? pkggen = null;
+                    if (runPkgGen)
+                    {
+                        int b = Services.BspComponentBuilderService.BuildOfVersion(version);
+                        pkggen = (b > 0 ? Services.AdkToolService.FindToolPath(b, "PkgGen.exe") : null)
+                                 ?? Services.DeviceLayoutBuilderService.FindTool(null, "PkgGen.exe");
+                        if (pkggen == null)
+                            sink.Write("⚠ 未找到 PkgGen.exe（请安装对应 ADK），降级为仅源包");
+                        else sink.Write("PkgGen: " + pkggen);
+                    }
+                    foreach (var p in found)
+                    {
+                        try
+                        {
+                            Services.DriverPackageBuilder.BuildSourcePackage(p, pkgRoot, "MainOS");
+                            sink.Write($"源包: {p.OutputName}（{p.InfFiles.Count} INF，FeatureID {p.FeatureId}）");
+                            if (pkggen != null)
+                            {
+                                var cabs = Services.DriverPackageBuilder.RunPkgGen(pkggen, p,
+                                    owner, version, arch, "fre", pkgRoot, cabDir,
+                                    new System.Collections.Generic.List<string>());
+                                foreach (var c in cabs) sink.Write("  cab: " + Path.GetFileName(c));
+                                if (cabs.Count == 0) sink.Write("  ⚠ 未出 cab（签名/依赖问题，源包仍可用 addonkit 构建）");
+                            }
+                        }
+                        catch (Exception ex) { sink.Write($"❌ {p.OutputName}: {ex.Message}"); }
+                    }
+                });
+            }
+            finally
+            {
+                sink.Write("任务结束（窗口保留，可复制/回看）");
+                sink.MarkFinished();
+            }
+        }
+
+        /// <summary>离线 SYSTEM hive 驱动扫描：结果进独立日志窗口并落盘 CSV。</summary>
+        private async void ScanHive()
+        {
+            if (_loadedDisks == null)
+            {
+                MessageBox.Show("请先加载镜像。", "离线注册表扫描", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var sink = new Services.TaskLogSink("离线注册表驱动扫描");
+            var logWin = new Views.TaskLogWindow(sink) { Owner = Application.Current?.MainWindow };
+            logWin.Show();
+            sink.Write($"镜像: {ImagePath}");
+
+            List<Services.DriverRegistryEntry> entries = new();
+            try
+            {
+                entries = await Task.Run(() => Services.RegistryDriverScanner.ScanOfflineHive(_loadedDisks!, m => sink.Write(m)));
+            }
+            catch (Exception ex) { sink.Write("❌ 扫描失败: " + ex.Message); }
+            finally
+            {
+                int third = entries.Count(e => e.IsThirdParty);
+                sink.Write($"共 {entries.Count} 条驱动注册项（第三方 {third}）");
+                if (entries.Count > 0)
+                {
+                    try
+                    {
+                        string outDir = !string.IsNullOrEmpty(OutputPath) && Directory.Exists(OutputPath)
+                            ? OutputPath : Path.Combine(Path.GetTempPath(), "OneCoreImageDesigner_Logs");
+                        string csv = Path.Combine(outDir, "DriverRegistryScan_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".csv");
+                        var sb = new System.Text.StringBuilder();
+                        sb.AppendLine("Name,Kind,SourceKey,ImagePath,InfPath,ClassGuid,ThirdParty");
+                        foreach (var e in entries.OrderBy(e => e.Name))
+                            sb.AppendLine(string.Join(',',
+                                Csv(e.Name), Csv(e.SourceKey.Contains("Services") ? "Service" : "ClassInf"),
+                                Csv(e.SourceKey), Csv(e.ImagePath), Csv(e.InfPath), Csv(e.ClassGuid),
+                                e.IsThirdParty ? "1" : "0"));
+                        File.WriteAllText(csv, sb.ToString(), System.Text.Encoding.UTF8);
+                        sink.Write("CSV 已保存: " + csv);
+                    }
+                    catch (Exception ex) { sink.Write("⚠ CSV 保存失败: " + ex.Message); }
+                }
+                sink.Write("任务结束（窗口保留，可复制/回看）");
+                sink.MarkFinished();
+            }
+        }
+
+        private static string Csv(string s) =>
+            string.IsNullOrEmpty(s) ? "\"\"" : "\"" + s.Replace("\"", "\"\"") + "\"";
 
         public event PropertyChangedEventHandler? PropertyChanged;
         protected void OnPropertyChanged([CallerMemberName] string? name = null)

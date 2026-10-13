@@ -8,6 +8,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Win32;
 using OneCore_Image_Designer.Services;
+using OneCore_Image_Designer.Models;
 
 namespace OneCore_Image_Designer.ViewModels.Cbs
 {
@@ -186,8 +187,12 @@ namespace OneCore_Image_Designer.ViewModels.Cbs
 
                 TreeText = BuildTree(OutputDir);
                 HasResult = true;
+                var artifact = IntegrationArtifactRegistry.Shared.Register(new IntegrationArtifact(
+                    IntegrationArtifactKind.CbsOutput, OutputDir, "CBS package reconstruction output"));
+                var preflight = IntegrationArtifactRegistry.Shared.Preflight(artifact);
                 Status = $"✅ 完成：{res.PackagesBuilt} 包 / {res.FilesWritten} 文件（WinSxS manifest {res.ManifestsToWinSxS}、servicing mum {res.MumsToServicing}"
-                       + (res.FilesMissing > 0 ? $"，缺源 {res.FilesMissing}" : "，缺源 0") + $"）→ {OutputDir}";
+                       + (res.FilesMissing > 0 ? $"，缺源 {res.FilesMissing}" : "，缺源 0") + $"）→ {OutputDir}"
+                       + (preflight.IsReady ? "；产物已登记" : "；产物预检失败: " + string.Join("; ", preflight.Errors));
             }
             catch (Exception ex) { Status = "异常: " + ex.Message; }
             finally { IsBusy = false; BuildCommand.NotifyCanExecuteChanged(); }

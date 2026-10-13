@@ -29,10 +29,17 @@ namespace OneCore_Image_Designer.Models.MobilePackageGen
 
         // 特殊项标记
         public bool IsOEMInput { get; set; }
+        /// <summary>Driver 包专用：INF 基名不以 microsoft 开头（如 dual_/厂商名）= 第三方驱动（22621 官方包实证命名规律）。</summary>
+        public bool IsThirdPartyDriver { get; set; }
 
         public string DiskDisplay => DiskIndex >= 0 ? $"磁盘{DiskIndex}" : "未知磁盘";
         public string StoragePoolDisplay => IsFromStoragePool ? " [存储池]" : "";
         public string FullLocationDisplay => $"{DiskDisplay}{StoragePoolDisplay}\\{PartitionName}";
+
+        /// <summary>分组列表一级键：第三方驱动独立成组，OEMInput 单独成组。</summary>
+        public string GroupKey => IsOEMInput ? "OEMInput"
+            : Type == PackageType.Driver && IsThirdPartyDriver ? "第三方驱动"
+            : Type.ToString();
 
         public string TypeDisplay
         {
@@ -43,7 +50,7 @@ namespace OneCore_Image_Designer.Models.MobilePackageGen
                 {
                     PackageType.CBS => "CBS",
                     PackageType.SPKG => "SPKG",
-                    PackageType.Driver => "Driver",
+                    PackageType.Driver => IsThirdPartyDriver ? "Driver · 第三方" : "Driver",
                     _ => "Unknown"
                 };
             }

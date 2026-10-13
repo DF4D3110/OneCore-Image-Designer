@@ -148,11 +148,15 @@ namespace OneCore_Image_Designer.Services
             if (string.IsNullOrWhiteSpace(doc.Product))
                 r.Warnings.Add($"Product 为空，将写入默认值 {OEMInputDoc.DefaultProductName}");
 
-            // ── 第二层：官方 XSD 结构校验 ──
+            // ── 第 1.5 层：时代门控（目标 build 早于字段出现时代时提示）──
+            foreach (var w in OemInputEraRulesService.CheckEra(doc))
+                r.Warnings.Add(w);
+
+            // ── 第二层：官方 XSD 结构校验（按 TargetBuild 选 schema 家族）──
             try
             {
                 string xml = GenerateXml(doc);
-                (bool ok, List<string> xsdErrs) = ValidateAgainstXsd(xml, doc.SchemaVersion);
+                (bool ok, List<string> xsdErrs) = ValidateAgainstXsd(xml, doc.SchemaVersion, doc.TargetBuild);
                 r.SchemaValid = ok;
                 if (!ok)
                     foreach (var e in xsdErrs) r.Errors.Add("[XSD] " + e);
@@ -175,8 +179,10 @@ namespace OneCore_Image_Designer.Services
         /// 用官方嵌入 XSD 校验 XML。关键：先比对根元素命名空间与目标版本，
         /// 不一致直接判失败——否则 .NET 的 XmlSchemaSet 对「命名空间不在集合内」
         /// 会静默通过（假 PASS，实测踩过）。
+        /// build&gt;0 时按该 build 选择对应时代的 schema 家族（见 OemInputSchemaFamilyService）。
         /// </summary>
-        public static (bool ok, List<string> errors) ValidateAgainstXsd(string xml, OemInputSchemaVersion version)
+        public static (bool ok, List<string> errors) ValidateAgainstXsd(
+            string xml, OemInputSchemaVersion version, int build = 0)
         {
             var errors = new List<string>();
             string wantNs = version == OemInputSchemaVersion.V2_2019_06
@@ -205,8 +211,8 @@ namespace OneCore_Image_Designer.Services
                 return (false, errors);
             }
 
-            // 2) 载入对应 XSD 做结构校验
-            Stream? xsdStream = LoadSchemaStream(version);
+            // 2) 载入对应 XSD 做结构校验（按 build 选家族，缺失回退基线）
+            Stream? xsdStream = OemInputSchemaFamilyService.OpenSchemaStream(build, version);
             if (xsdStream is null)
             {
                 // 资源缺失不应让校验整体失败——降级为警告级
@@ -249,15 +255,6 @@ namespace OneCore_Image_Designer.Services
             }
 
             return (errors.Count == 0, errors);
-        }
-
-        private static Stream? LoadSchemaStream(OemInputSchemaVersion version)
-        {
-            Assembly asm = typeof(OEMInputService).Assembly;
-            string suffix = version == OemInputSchemaVersion.V2_2019_06 ? "OEMInput.V2.xsd" : "OEMInput.V1.xsd";
-            string? name = asm.GetManifestResourceNames()
-                .FirstOrDefault(n => n.EndsWith(suffix, StringComparison.OrdinalIgnoreCase));
-            return name is null ? null : asm.GetManifestResourceStream(name);
         }
 
         public static string GenerateDescription(OEMInputDoc doc)

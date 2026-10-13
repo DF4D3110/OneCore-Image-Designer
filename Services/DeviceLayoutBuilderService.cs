@@ -74,11 +74,11 @@ namespace OneCore_Image_Designer.Services
     /// </summary>
     public static class DeviceLayoutBuilderService
     {
-        const string TokenMicrosoft = "31bf3856ad364e35";  // 现代布局包 assemblyIdentity 用
-        const string TokenTestDefault = "628844477771337a"; // Phone/社区 + 现代 FIP 用
+        internal const string TokenMicrosoft = "31bf3856ad364e35";  // 现代布局包 assemblyIdentity 用
+        internal const string TokenTestDefault = "628844477771337a"; // Phone/社区 + 现代 FIP 用
 
         // 现代样本 WRP 安全描述符（照抄，imageapp 需要）
-        const string WrpSddl = "O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464G:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464D:P(A;;FA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)(A;;GRGX;;;BA)(A;;GRGX;;;SY)(A;;GRGX;;;BU)(A;;GRGX;;;S-1-15-2-1)(A;;GRGX;;;S-1-15-2-2)S:(AU;FASA;0x000D0116;;;WD)";
+        internal const string WrpSddl = "O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464G:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464D:P(A;;FA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)(A;;GRGX;;;BA)(A;;GRGX;;;SY)(A;;GRGX;;;BU)(A;;GRGX;;;S-1-15-2-1)(A;;GRGX;;;S-1-15-2-2)S:(AU;FASA;0x000D0116;;;WD)";
 
         public static DeviceLayoutBuildResult Build(DeviceLayoutBuildRequest req)
         {
@@ -169,6 +169,7 @@ namespace OneCore_Image_Designer.Services
             res.CabPath = ok ? cabPath : string.Empty;
             res.Success = ok;
             if (ok && !string.IsNullOrWhiteSpace(req.SigningPfx)) RunSigntool(req, cabPath, res);
+            if (ok) CleanPackageArtifacts(staging, cdf);
             return res;
         }
 
@@ -236,6 +237,8 @@ namespace OneCore_Image_Designer.Services
             bool okFip = PackCab(req, fipStaging, fipCab, res, requireLayout: false);
             res.FipCabPath = okFip ? fipCab : string.Empty;
             res.Log.Add((cat2 && okFip ? "⑥ FIP 桩包完成: " : "⑥ ⚠ FIP 桩包不完整: ") + Path.GetFileName(fipCab));
+            if (okLayout) CleanPackageArtifacts(staging, cdf1);
+            if (okFip) CleanPackageArtifacts(fipStaging, cdf2);
 
             // ── FM（现代三段，ID=owner，无 Features/SOCPackages）──
             string fmPath = Path.Combine(req.OutputDirectory, fmid + "FM.xml");
@@ -254,7 +257,7 @@ namespace OneCore_Image_Designer.Services
             string baseName = pkg.Replace('.', '-');
             return baseName.EndsWith("-Package", StringComparison.OrdinalIgnoreCase) ? baseName : baseName + "-Package";
         }
-        static string StripPackageSuffix(string pkg) =>
+        internal static string StripPackageSuffix(string pkg) =>
             pkg.EndsWith("-Package", StringComparison.OrdinalIgnoreCase) ? pkg[..^"-Package".Length] : pkg;
         /// <summary>SpaceSplit（MSDeviceLayout）官方进包文件名是 DeviceLayoutMS.xml，其余为 DeviceLayout.xml。</summary>
         static string LayoutFileName(DeviceLayoutBuildRequest req) =>
@@ -264,7 +267,7 @@ namespace OneCore_Image_Designer.Services
             var parts = dotted.Split('.');
             return parts.Length >= 3 ? parts[^2] : parts[^1]; // ...{FOSGENDEV}.FIP → FOSGENDEV
         }
-        static string DefaultFipName(string layoutPkgOrDotted, string soc, string fmid)
+        internal static string DefaultFipName(string layoutPkgOrDotted, string soc, string fmid)
         {
             string cap = soc.StartsWith("DEVICELAYOUT_", StringComparison.OrdinalIgnoreCase) ? soc : "DEVICELAYOUT_" + soc.ToUpperInvariant();
             // 现代布局包名是连字符式（Microsoft-OneCore-…-Package），owner = 第一段；早期点分式取第一段等价
@@ -273,7 +276,7 @@ namespace OneCore_Image_Designer.Services
             string fm = string.IsNullOrWhiteSpace(fmid) ? DefaultFmid(layoutPkgOrDotted) : fmid;
             return $"{fam}.{cap}.{fm}.FIP";
         }
-        static string Dotted32(string seed)
+        internal static string Dotted32(string seed)
         {
             var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(seed));
             return Convert.ToHexString(bytes).Substring(0, 32).ToLowerInvariant();
@@ -281,7 +284,7 @@ namespace OneCore_Image_Designer.Services
 
         // ════════════════════════ manifest / mum / fm 模板 ════════════════════════
 
-        static string ComponentTail(string innerName, string token, string version, string arch)
+        internal static string ComponentTail(string innerName, string token, string version, string arch)
         {
             string cleaned = WinSxSHashCalculator.NormalizeNameForFolder(innerName);
             string hash = WinSxSHashCalculator.CalculateWinSxSHash(innerName, token, arch, version, culture: "neutral", versionScope: "nonSxS");
@@ -468,7 +471,7 @@ $@"<assembly xmlns=""urn:schemas-microsoft-com:asm.v3"" manifestVersion=""1.0"" 
         }
 
         // ── 共用：mum 里 layoutRel 已是 {componentDir}\DeviceLayout.xml ──
-        static string CdfText(string staging, string pkgId, params string[] relFiles)
+        internal static string CdfText(string staging, string pkgId, params string[] relFiles)
         {
             string P(string rel) => $"<hash>\\\\?\\{staging}\\{rel}=\\\\?\\{staging}\\{rel}";
             var sb = new StringBuilder();
@@ -494,14 +497,21 @@ CATATTR3=0x00010001:PE:TRUSTED
         static string CdfText(string staging, string pkgId, string layoutRel)
             => CdfText(staging, pkgId, new[] { layoutRel });
 
-        static string Sha256Base64(string file) { using var sha = SHA256.Create(); return Convert.ToBase64String(sha.ComputeHash(File.ReadAllBytes(file))); }
-        static string Sha256Hex(string file) { using var sha = SHA256.Create(); return Convert.ToHexString(sha.ComputeHash(File.ReadAllBytes(file))); }
-        static void WriteXml(string path, string body) => File.WriteAllText(path, "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\r\n" + body, new UTF8Encoding(false));
-        static void Recreate(string dir) { if (Directory.Exists(dir)) Directory.Delete(dir, true); Directory.CreateDirectory(dir); }
-        static bool ValidateIdentifier(string id) => !string.IsNullOrEmpty(id) && id.All(c => char.IsLetterOrDigit(c) || c is '.' or '_' or '-');
+        internal static string Sha256Base64(string file) { using var sha = SHA256.Create(); return Convert.ToBase64String(sha.ComputeHash(File.ReadAllBytes(file))); }
+        internal static string Sha256Hex(string file) { using var sha = SHA256.Create(); return Convert.ToHexString(sha.ComputeHash(File.ReadAllBytes(file))); }
+        internal static void WriteXml(string path, string body) => File.WriteAllText(path, "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\r\n" + body, new UTF8Encoding(false));
+        internal static void Recreate(string dir) { if (Directory.Exists(dir)) Directory.Delete(dir, true); Directory.CreateDirectory(dir); }
+        internal static bool ValidateIdentifier(string id) => !string.IsNullOrEmpty(id) && id.All(c => char.IsLetterOrDigit(c) || c is '.' or '_' or '-');
 
         // ── 外部工具 ──
-        static bool RunMakecat(DeviceLayoutBuildRequest req, string cdfPath, string staging, DeviceLayoutBuildResult res)
+        internal static bool RunMakecat(DeviceLayoutBuildRequest req, string cdfPath, string staging, List<string> log)
+        {
+            var tmp = new DeviceLayoutBuildResult();
+            bool r = RunMakecat(req, cdfPath, staging, tmp);
+            log.AddRange(tmp.Log);
+            return r;
+        }
+        internal static bool RunMakecat(DeviceLayoutBuildRequest req, string cdfPath, string staging, DeviceLayoutBuildResult res)
         {
             string? exe = FindTool(req.MakecatPath, "makecat.exe");
             if (exe == null) { res.Log.Add("⚠ 未找到 makecat.exe（装 WDK/SDK 或指定路径）"); return false; }
@@ -523,7 +533,14 @@ CATATTR3=0x00010001:PE:TRUSTED
         /// cabarc 的 <c>-r</c> 递归静默跳过深层 DeviceLayout.xml 却仍返回 0）则回退长路径安全的托管引擎，
         /// 托管仍不合格才判失败。绝不产出缺布局/mum 的坏 CAB。
         /// </summary>
-        static bool PackCab(DeviceLayoutBuildRequest req, string staging, string cabPath, DeviceLayoutBuildResult res,
+        internal static bool PackCab(DeviceLayoutBuildRequest req, string staging, string cabPath, List<string> log, bool requireLayout = true)
+        {
+            var tmp = new DeviceLayoutBuildResult();
+            bool r = PackCab(req, staging, cabPath, tmp, requireLayout);
+            log.AddRange(tmp.Log);
+            return r;
+        }
+        internal static bool PackCab(DeviceLayoutBuildRequest req, string staging, string cabPath, DeviceLayoutBuildResult res,
             bool requireLayout)
         {
             string layoutName = requireLayout ? LayoutFileName(req) : "";
@@ -560,7 +577,14 @@ CATATTR3=0x00010001:PE:TRUSTED
             catch (Exception ex) { reason = "枚举 CAB 失败: " + ex.Message; return false; }
         }
 
-        static bool RunSigntool(DeviceLayoutBuildRequest req, string cabPath, DeviceLayoutBuildResult res)
+        internal static bool RunSigntool(DeviceLayoutBuildRequest req, string cabPath, List<string> log)
+        {
+            var tmp = new DeviceLayoutBuildResult();
+            bool r = RunSigntool(req, cabPath, tmp);
+            log.AddRange(tmp.Log);
+            return r;
+        }
+        internal static bool RunSigntool(DeviceLayoutBuildRequest req, string cabPath, DeviceLayoutBuildResult res)
         {
             string? exe = FindTool(req.SignToolPath, "signtool.exe");
             if (exe == null) { res.Log.Add("⚠ 未找到 signtool.exe，跳过签名"); return false; }
@@ -570,6 +594,21 @@ CATATTR3=0x00010001:PE:TRUSTED
             bool ok = Run(exe, args, null, 60_000, res) == 0;
             res.Log.Add(ok ? "cab 已签名" : "⚠ 签名失败");
             return ok;
+        }
+
+        /// <summary>
+        /// 打包成功后清理中间物：删除该包的 staging 目录与 .cdf 清单，输出目录只留最终 cab
+        /// （update.cat 已打进 cab，无需单独保留）。打包失败时不要调用——留着便于排查。
+        /// 删除异常静默吞掉，绝不影响已产出的 cab。
+        /// </summary>
+        internal static void CleanPackageArtifacts(string? stagingDir, params string?[] cdfPaths)
+        {
+            try { if (!string.IsNullOrEmpty(stagingDir) && Directory.Exists(stagingDir)) Directory.Delete(stagingDir, true); }
+            catch { }
+            foreach (var c in cdfPaths)
+            {
+                try { if (!string.IsNullOrEmpty(c) && File.Exists(c)) File.Delete(c); } catch { }
+            }
         }
 
         static int Run(string exe, string args, string? workDir, int timeoutMs, DeviceLayoutBuildResult res)
@@ -587,10 +626,10 @@ CATATTR3=0x00010001:PE:TRUSTED
             catch (Exception ex) { res.Log.Add($"{Path.GetFileName(exe)} 失败: {ex.Message}"); return -1; }
         }
 
-        static string? FindTool(string? explicitPath, string fileName)
+        internal static string? FindTool(string? explicitPath, string fileName)
         {
             if (!string.IsNullOrWhiteSpace(explicitPath) && File.Exists(explicitPath)) return explicitPath;
-            string[] roots = { @"E:\wcos\Tool", @"E:\Assessment and Deployment Kit\build_tools", @"F:\Program Files", @"C:\Program Files (x86)\Windows Kits\10\bin" };
+            string[] roots = { @"E:\wcos\Tool", @"E:\Assessment and Deployment Kit\adk-src\adk", @"E:\Assessment and Deployment Kit\build_tools", @"F:\Program Files", @"C:\Program Files (x86)\Windows Kits\10\bin", @"D:\Windows Kits\10\bin", @"D:\Windows Kits\10\tools\bin\i386" };
             foreach (var r in roots)
             {
                 if (!Directory.Exists(r)) continue;

@@ -120,6 +120,39 @@ namespace OneCore_Image_Designer.ViewModels.OEMInput
         public string SchemaVersionHint => _oemInputData.IsSchemaV2
             ? "V2：语言用扁平 Languages + 唯一 Default" : "V1：语言用 SupportedLanguages 三分组 + BootUILanguage";
 
+        /// <summary>目标 build 代理（读写落到 OEMInputData.TargetBuild；0=按 20348 基线校验）。</summary>
+        public int TargetBuild
+        {
+            get => _oemInputData.TargetBuild;
+            set
+            {
+                if (_oemInputData.TargetBuild != value)
+                {
+                    _oemInputData.TargetBuild = value;
+                    OnPropertyChanged();
+                    OnPropertyChanged(nameof(SchemaFamilyHint));
+                    IsDirty = true;
+                }
+            }
+        }
+
+        /// <summary>当前 build+代际实际选中的 schema 家族（校验用哪份官方 XSD）。</summary>
+        public string SchemaFamilyHint => TargetBuild > 0
+            ? $"XSD 家族：{Services.OemInputSchemaFamilyService.FamilyLabel(TargetBuild, _oemInputData.SchemaVersion)}"
+            : "XSD 家族：20348 基线（未指定目标 build）";
+
+        /// <summary>从包根路径自动探测 5 位 build 号（1xxxx/2xxxx），命中则填入 TargetBuild。</summary>
+        private void TryDetectTargetBuildFromPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return;
+            var m = System.Text.RegularExpressions.Regex.Match(path, @"(?<!\d)1[0-9]{4}(?!\d)|(?<!\d)2[0-9]{4}(?!\d)");
+            if (m.Success && int.TryParse(m.Value, out int b) && b != _oemInputData.TargetBuild)
+            {
+                TargetBuild = b;
+                ScanSummary += $"\n自动探测目标 build：{b}（XSD 校验按该时代家族）";
+            }
+        }
+
         // ── 脏标记（ICD 式：离开/关闭前提示保存）──
         private bool _isDirty;
         public bool IsDirty
@@ -427,6 +460,7 @@ namespace OneCore_Image_Designer.ViewModels.OEMInput
             {
                 MSPackageRoot = dialog.FolderName;
                 ValidateMSPackageRoot();
+                TryDetectTargetBuildFromPath(dialog.FolderName);
                 _ = RescanPackageAsync();
             }
         }

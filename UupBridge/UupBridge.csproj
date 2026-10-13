@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="..\UupShared\UupShared.csproj" />
     <ProjectReference Include="..\ThirdParty\UUPMediaCreator\src\UnifiedUpdatePlatform.Services.WindowsUpdate\UnifiedUpdatePlatform.Services.WindowsUpdate.csproj" />
     <ProjectReference Include="..\ThirdParty\UUPMediaCreator\src\UnifiedUpdatePlatform.Services.WindowsUpdate.Downloads\UnifiedUpdatePlatform.Services.WindowsUpdate.Downloads.csproj" />
   </ItemGroup>

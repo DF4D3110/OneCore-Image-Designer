@@ -175,20 +175,22 @@ namespace OneCore_Image_Designer.ViewModels.DeviceLayout
         {
             1 => "第 1 步 · 包信息：时代 / 包 ID / SOC / 版本 / 架构 / 扇区 / 布局形状",
             2 => "第 2 步 · 编辑分区：在图形条上选中分区编辑，或从 XML / CAB / 模板载入起点",
-            3 => "第 3 步 · 验证：官方规则校验（硬闸门）。通过才能进入打包",
-            4 => "第 4 步 · 打包：生成 FM + CAB（可签名）",
+            3 => "第 3 步 · 验证：官方规则校验（硬闸门）。通过才能进入驱动/打包",
+            4 => "第 4 步 · 驱动：选择驱动源目录、扫描预览、命名空间与 Feature 分组（可跳过）",
+            5 => "第 5 步 · 打包：生成 FM + CAB（可签名，可含 BSP 组件）",
             _ => ""
         };
 
         public StepState State1 => Step > 1 || _metaComplete ? StepState.Done : StepState.Current;
         public StepState State2 => Step > 2 ? StepState.Done : Step == 2 ? StepState.Current : StepState.Locked;
         public StepState State3 => _validatedOk == true ? StepState.Done : _validatedOk == false ? StepState.Failed : Step >= 3 ? StepState.Current : StepState.Locked;
-        public StepState State4 => Step == 4 ? StepState.Current : _validatedOk == true ? StepState.Done : StepState.Locked;
+        public StepState State4 => Step > 4 ? StepState.Done : Step == 4 ? StepState.Current : StepState.Locked;
+        public StepState State5 => Step == 5 ? StepState.Current : _validatedOk == true ? StepState.Done : StepState.Locked;
         void RefreshStepStates()
         {
-            foreach (var n in new[] { nameof(State1), nameof(State2), nameof(State3), nameof(State4) })
+            foreach (var n in new[] { nameof(State1), nameof(State2), nameof(State3), nameof(State4), nameof(State5) })
                 OnPropertyChanged(n);
-            foreach (var n in new[] { nameof(ShowStep1), nameof(ShowStep2), nameof(ShowStep3), nameof(ShowStep4) })
+            foreach (var n in new[] { nameof(ShowStep1), nameof(ShowStep2), nameof(ShowStep3), nameof(ShowStep4), nameof(ShowStep5) })
                 OnPropertyChanged(n);
             OnPropertyChanged(nameof(CanNext));
             OnPropertyChanged(nameof(CanPrev));
@@ -198,7 +200,8 @@ namespace OneCore_Image_Designer.ViewModels.DeviceLayout
         {
             1 => _metaComplete,
             2 => Disks.Sum(d => d.Parts.Count) > 0,
-            3 => _validatedOk == true,   // 硬闸门：验证通过才能进④
+            3 => _validatedOk == true,   // 硬闸门：验证通过才能进驱动/打包
+            4 => true,                   // 驱动步可跳过（不配驱动也能进打包）
             _ => false
         };
         public bool CanPrev => Step > 1;
@@ -207,7 +210,7 @@ namespace OneCore_Image_Designer.ViewModels.DeviceLayout
         public void Next() { if (!CanNext) return; GoToStep(Step + 1); }
         public void Prev() { if (CanPrev) GoToStep(Step - 1); }
         /// <summary>从校验步直接跳打包步（校验通过后）。</summary>
-        public void JumpToPackage() { if (_validatedOk == true) GoToStep(4); }
+        public void JumpToPackage() { if (_validatedOk == true) GoToStep(5); }
 
         bool _metaComplete;
         public bool MetaComplete { get => _metaComplete; set { _metaComplete = value; OnPropertyChanged(); RefreshStepStates(); } }
@@ -291,6 +294,7 @@ namespace OneCore_Image_Designer.ViewModels.DeviceLayout
         public Visibility ShowStep2 => Step == 2 ? Visibility.Visible : Visibility.Collapsed;
         public Visibility ShowStep3 => Step == 3 ? Visibility.Visible : Visibility.Collapsed;
         public Visibility ShowStep4 => Step == 4 ? Visibility.Visible : Visibility.Collapsed;
+        public Visibility ShowStep5 => Step == 5 ? Visibility.Visible : Visibility.Collapsed;
         public string DiskCountText => $"{Disks.Count} 块盘 / {TotalPartCount} 个分区";
         public int SectorIndex { get => SectorSize >= 4096 ? 1 : 0; set { if (SectorIndex == value) return; SectorSize = value == 1 ? 4096 : 512; OnPropertyChanged(); } }
 
@@ -537,6 +541,37 @@ namespace OneCore_Image_Designer.ViewModels.DeviceLayout
             _validatedOk = null; RefreshStepStates();
             OnPropertyChanged(nameof(TotalPartCount));
             OnPropertyChanged(nameof(DiskCountText));
+        }
+
+        /// <summary>选中分区在当前盘内上移一位（GPT 顺序即刷写顺序）。</summary>
+        public void MovePartitionUp()
+        {
+            var d = SelectedDisk; var p = SelectedPartition;
+            if (d == null || p == null) return;
+            int i = d.Parts.IndexOf(p);
+            if (i <= 0) return;
+            d.Parts.RemoveAt(i);
+            d.Parts.Insert(i - 1, p);
+            TouchPartitionOrder();
+        }
+
+        /// <summary>选中分区在当前盘内下移一位。</summary>
+        public void MovePartitionDown()
+        {
+            var d = SelectedDisk; var p = SelectedPartition;
+            if (d == null || p == null) return;
+            int i = d.Parts.IndexOf(p);
+            if (i < 0 || i >= d.Parts.Count - 1) return;
+            d.Parts.RemoveAt(i);
+            d.Parts.Insert(i + 1, p);
+            TouchPartitionOrder();
+        }
+
+        void TouchPartitionOrder()
+        {
+            _loadedTemplate = null; _sourceXmlPath = null;
+            _validatedOk = null; RefreshStepStates();
+            SelectedDisk?.RebuildTiles();
         }
 
         // ═══ 磁盘级操作（加盘/加池盘/删盘/属性提交/选中） ═══
@@ -810,6 +845,192 @@ namespace OneCore_Image_Designer.ViewModels.DeviceLayout
             Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DeviceLayoutOut");
         public string? SigningPfx { get; set; }
 
+        // ═════════ BSP 组件（OEMDevicePlatform / DeviceInfo / machineinfo / SMBIOS）════════
+        bool _wantDevicePlatform;
+        public bool WantDevicePlatform { get => _wantDevicePlatform; set { _wantDevicePlatform = value; OnPropertyChanged(); OnPropertyChanged(nameof(HasAnyBspComponent)); } }
+        bool _wantDeviceInfo;
+        public bool WantDeviceInfo { get => _wantDeviceInfo; set { _wantDeviceInfo = value; OnPropertyChanged(); OnPropertyChanged(nameof(HasAnyBspComponent)); } }
+        bool _wantMachineInfo;
+        public bool WantMachineInfo { get => _wantMachineInfo; set { _wantMachineInfo = value; OnPropertyChanged(); OnPropertyChanged(nameof(HasAnyBspComponent)); } }
+        bool _wantSmbios;
+        public bool WantSmbios { get => _wantSmbios; set { _wantSmbios = value; OnPropertyChanged(); OnPropertyChanged(nameof(HasAnyBspComponent)); } }
+        public bool HasAnyBspComponent => WantDevicePlatform || WantDeviceInfo || WantMachineInfo || WantSmbios || WantDrivers;
+
+        string _deviceName = "";
+        public string DeviceName { get => _deviceName; set { _deviceName = value; OnPropertyChanged(); OnPropertyChanged(nameof(MachineInfoEraHint)); } }
+
+        string _dpIds = "*";
+        /// <summary>OEMDevicePlatform 的 DevicePlatformIDs（逗号分隔；* = 任意）。</summary>
+        public string DevicePlatformIds { get => _dpIds; set { _dpIds = value; OnPropertyChanged(); } }
+
+        string _minSectorCount = "20971520";
+        public string MinSectorCount { get => _minSectorCount; set { _minSectorCount = value; OnPropertyChanged(); } }
+
+        int _biosModeIndex = 0;   // 0=UEFI 1=不写
+        public int BiosModeIndex { get => _biosModeIndex; set { _biosModeIndex = value; OnPropertyChanged(); } }
+
+        // DeviceInfo 注册表包
+        string _socVersion = "arm64";
+        public string SocVersion { get => _socVersion; set { _socVersion = value; OnPropertyChanged(); } }
+        string _hardwareVersion = "0.0.0.1";
+        public string HardwareVersion { get => _hardwareVersion; set { _hardwareVersion = value; OnPropertyChanged(); } }
+        string _deviceManufacturer = "";
+        public string DeviceManufacturer { get => _deviceManufacturer; set { _deviceManufacturer = value; OnPropertyChanged(); } }
+        string _deviceModel = "";
+        public string DeviceModel { get => _deviceModel; set { _deviceModel = value; OnPropertyChanged(); } }
+
+        // machineinfo.xml
+        string _miManufacturer = "";
+        public string MiManufacturer { get => _miManufacturer; set { _miManufacturer = value; OnPropertyChanged(); } }
+        string _miFamily = "";
+        public string MiFamily { get => _miFamily; set { _miFamily = value; OnPropertyChanged(); } }
+        string _miProductName = "";
+        public string MiProductName { get => _miProductName; set { _miProductName = value; OnPropertyChanged(); } }
+        string _miSku = "1";
+        public string MiSku { get => _miSku; set { _miSku = value; OnPropertyChanged(); } }
+
+        /// <summary>machineinfo 时代界限提示（17666+ 才有 MachineInfoFile 机制）。</summary>
+        public string MachineInfoEraHint
+        {
+            get
+            {
+                int b = Services.BspComponentBuilderService.BuildOfVersion(Version);
+                if (b > 0 && b < Services.BspComponentBuilderService.MachineInfoFirstBuild)
+                    return $"⚠ machineinfo.xml 是 {Services.BspComponentBuilderService.MachineInfoFirstBuild}+ 的机制（当前版本 {b} 的 imageapp 不读取）";
+                return "";
+            }
+        }
+        public bool ShowMachineInfoEraHint => MachineInfoEraHint.Length > 0;
+
+        // SMBIOS（IoT）
+        string _smbiosProduct = "";
+        public string SmbiosProduct { get => _smbiosProduct; set { _smbiosProduct = value; OnPropertyChanged(); } }
+        string _smbiosSku = "";
+        public string SmbiosSku { get => _smbiosSku; set { _smbiosSku = value; OnPropertyChanged(); } }
+        string _smbiosFamily = "";
+        public string SmbiosFamily { get => _smbiosFamily; set { _smbiosFamily = value; OnPropertyChanged(); } }
+        string _smbiosBbProd = "";
+        public string SmbiosBbProd { get => _smbiosBbProd; set { _smbiosBbProd = value; OnPropertyChanged(); } }
+
+        // 驱动处理
+        bool _wantDrivers;
+        public bool WantDrivers { get => _wantDrivers; set { _wantDrivers = value; OnPropertyChanged(); OnPropertyChanged(nameof(HasAnyBspComponent)); } }
+        string _driverScanRoot = "";
+        /// <summary>驱动源目录：递归扫描 *.inf，按所在目录分组各成一个 Drivers.&lt;InfName&gt; 包。</summary>
+        public string DriverScanRoot { get => _driverScanRoot; set { _driverScanRoot = value; OnPropertyChanged(); } }
+        bool _driverRunPkgGen = true;
+        /// <summary>勾选=生成源包后直接调 ADK 的 PkgGen.exe 出 cab；不勾=只出 wm.xml 源包交 addonkit 构建。</summary>
+        public bool DriverRunPkgGen { get => _driverRunPkgGen; set { _driverRunPkgGen = value; OnPropertyChanged(); } }
+        string _driverNamespace = "Drivers";
+        /// <summary>驱动包命名空间段（addonkit 默认 Drivers；NXP 等厂商用自定义如 iMX）。包名=&lt;ns&gt;.&lt;InfName&gt;。</summary>
+        public string DriverNamespace { get => _driverNamespace; set { _driverNamespace = value; OnPropertyChanged(); } }
+        string _driverFeatureGroup = "";
+        /// <summary>FeatureID 分组（NXP 范式：全部驱动共用 IMX_DRIVERS）；留空=每包 &lt;NS&gt;_&lt;INF&gt;（addonkit 范式）。</summary>
+        public string DriverFeatureGroup { get => _driverFeatureGroup; set { _driverFeatureGroup = value; OnPropertyChanged(); } }
+
+        /// <summary>驱动扫描预览行（Step4 列表可见：包名/FeatureID/INF 数/目录）。</summary>
+        public ObservableCollection<DriverPreviewRow> DriverPreview { get; } = new();
+        public string DriverPreviewSummary => DriverPreview.Count == 0
+            ? "尚未扫描。选择驱动源目录后点「扫描预览」。"
+            : $"共 {DriverPreview.Count} 个驱动包，{DriverPreview.Sum(r => r.InfCount)} 个 INF";
+
+        public void ScanDriversPreview()
+        {
+            DriverPreview.Clear();
+            var ns = string.IsNullOrWhiteSpace(DriverNamespace) ? "Drivers" : DriverNamespace.Trim();
+            foreach (var p in Services.DriverPackageBuilder.Scan(DriverScanRoot, ns, DriverFeatureGroup.Trim()))
+                DriverPreview.Add(new DriverPreviewRow
+                {
+                    OutputName = p.OutputName,
+                    FeatureId = p.FeatureId,
+                    InfCount = p.InfFiles.Count,
+                    InfList = string.Join("、", p.InfFiles),
+                    SourceDir = p.SourceDir
+                });
+            OnPropertyChanged(nameof(DriverPreviewSummary));
+        }
+
+        public void RemoveDriverPreviewAt(int i)
+        {
+            if (i < 0 || i >= DriverPreview.Count) return;
+            DriverPreview.RemoveAt(i);
+            OnPropertyChanged(nameof(DriverPreviewSummary));
+        }
+
+        // 最近一次布局打包结果（组件生成时并入统一 FM）
+        string _lastLayoutPkg = "", _lastLayoutComponent = "", _lastLayoutFip = "", _lastLayoutSoc = "";
+
+        /// <summary>生成所选 BSP 组件（可单独造，不依赖本次布局打包）。返回结果供日志展示。</summary>
+        public async Task<Services.BspComponentResult> BuildComponentsAsync()
+        {
+            bool buildLayoutFirst = HasAnyBspComponent && string.IsNullOrEmpty(_lastLayoutPkg) && _validatedOk == true;
+            if (buildLayoutFirst)
+            {
+                // 纯组件模式下若布局已验证过，先补一次布局打包以便统一 FM 引用
+                var lr = await BuildAsync();
+                if (lr.Success) RememberLayout(lr);
+            }
+            var req = new Services.BspComponentRequest
+            {
+                OutputDirectory = OutputDir,
+                Architecture = Architecture.Trim(),
+                Version = Version.Trim(),
+                OwnerName = OwnerOfPackage(PackageId),
+                DeviceName = DeviceName.Trim(),
+                Partition = PartitionTarget.Trim(),
+                Modern = IsModern,
+                BuildDevicePlatform = WantDevicePlatform,
+                BuildDeviceInfo = WantDeviceInfo,
+                BuildMachineInfo = WantMachineInfo,
+                BuildSmbios = WantSmbios,
+                MinSectorCount = long.TryParse(MinSectorCount, out long msc) ? msc : 20971520,
+                DevicePlatformIDs = DevicePlatformIds.Split(',', ';', ' ')
+                    .Select(x => x.Trim()).Where(x => x.Length > 0).ToList(),
+                BiosMode = BiosModeIndex == 0 ? "UEFI" : "",
+                SocVersion = SocVersion.Trim(),
+                HardwareVersion = HardwareVersion.Trim(),
+                BspVersion = (Version.Split('.').Length >= 3 ? Version.Split('.')[2] + "." + Version.Split('.')[3] : Version).Trim(),
+                DeviceManufacturer = string.IsNullOrWhiteSpace(DeviceManufacturer) ? OwnerOfPackage(PackageId) : DeviceManufacturer.Trim(),
+                DeviceModel = string.IsNullOrWhiteSpace(DeviceModel) ? DeviceName.Trim() + " Device" : DeviceModel.Trim(),
+                OemSoftwareVersion = Version.Trim(),
+                MachineInfoManufacturer = string.IsNullOrWhiteSpace(MiManufacturer) ? OwnerOfPackage(PackageId) : MiManufacturer.Trim(),
+                MachineInfoFamily = MiFamily.Trim(),
+                MachineInfoProductName = string.IsNullOrWhiteSpace(MiProductName) ? DeviceName.Trim() : MiProductName.Trim(),
+                MachineInfoSku = string.IsNullOrWhiteSpace(MiSku) ? "1" : MiSku.Trim(),
+                SmbiosOemName = OwnerOfPackage(PackageId),
+                SmbiosProduct = SmbiosProduct.Trim(),
+                SmbiosSku = SmbiosSku.Trim(),
+                SmbiosFamily = SmbiosFamily.Trim(),
+                SmbiosBbProd = SmbiosBbProd.Trim(),
+                DriverScanRoot = WantDrivers ? DriverScanRoot.Trim() : "",
+                DriverRunPkgGen = DriverRunPkgGen,
+                DriverNamespace = string.IsNullOrWhiteSpace(DriverNamespace) ? "Drivers" : DriverNamespace.Trim(),
+                DriverFeatureGroup = DriverFeatureGroup.Trim(),
+                LayoutPackageName = _lastLayoutPkg,
+                LayoutComponentName = _lastLayoutComponent,
+                LayoutFipName = _lastLayoutFip,
+                LayoutSoc = _lastLayoutSoc,
+                SigningPfx = SigningPfx,
+            };
+            return await Task.Run(() => Services.BspComponentBuilderService.BuildAll(req));
+        }
+
+        void RememberLayout(Services.DeviceLayoutBuildResult lr)
+        {
+            _lastLayoutSoc = Soc.Trim();
+            if (IsModern)
+            {
+                _lastLayoutPkg = !string.IsNullOrWhiteSpace(lr.CabPath)
+                    ? Path.GetFileNameWithoutExtension(lr.CabPath).Replace($"~{Services.DeviceLayoutBuilderService.TokenMicrosoft}~{Architecture}~~", "")
+                    : "";
+                _lastLayoutComponent = Services.DeviceLayoutBuilderService.StripPackageSuffix(_lastLayoutPkg);
+                _lastLayoutFip = Services.DeviceLayoutBuilderService.DefaultFipName(PackageId.Trim(), Soc.Trim(), "");
+            }
+        }
+
+        static string OwnerOfPackage(string pkg) =>
+            (pkg ?? "").Split('-', '.').FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)) ?? "OEM";
+
         public async Task<DeviceLayoutBuildResult> BuildAsync()
         {
             var doc = CommitDoc();
@@ -835,6 +1056,17 @@ namespace OneCore_Image_Designer.ViewModels.DeviceLayout
         public event PropertyChangedEventHandler? PropertyChanged;
         void OnPropertyChanged([CallerMemberName] string? n = null) =>
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(n));
+    }
+
+    /// <summary>Step4 驱动扫描预览行。</summary>
+    public class DriverPreviewRow
+    {
+        public string OutputName { get; set; } = "";
+        public string FeatureId { get; set; } = "";
+        public int InfCount { get; set; }
+        public string InfList { get; set; } = "";
+        public string SourceDir { get; set; } = "";
+        public string Display => $"{OutputName}   [{FeatureId}]   {InfCount} INF";
     }
 
     /// <summary>步进状态 → 步进条底色。</summary>

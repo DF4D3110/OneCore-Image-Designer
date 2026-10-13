@@ -139,6 +139,18 @@ namespace OneCore_Image_Designer.Views.DeviceLayout
             SyncTiles();
         }
 
+        void PartUp_Click(object sender, RoutedEventArgs e)
+        {
+            Vm.MovePartitionUp();
+            SyncTiles();
+        }
+
+        void PartDown_Click(object sender, RoutedEventArgs e)
+        {
+            Vm.MovePartitionDown();
+            SyncTiles();
+        }
+
         void ApplyProp_Click(object sender, RoutedEventArgs e)
         {
             // TextBox 已即时写回分区对象；这里刷新色块与校验态
@@ -196,11 +208,75 @@ namespace OneCore_Image_Designer.Views.DeviceLayout
             try
             {
                 var res = await Vm.BuildAsync();
-                Vm.LastLog = res.Success
+                string msg = res.Success
                     ? "✅ 打包完成：" + res.CabPath + (string.IsNullOrEmpty(res.FipCabPath) ? "" : "；FIP：" + res.FipCabPath) + "；FM：" + res.FmPath
                     : "❌ 打包失败：" + res.Error;
+                if (res.Success && Vm.HasAnyBspComponent)
+                {
+                    var cres = await Vm.BuildComponentsAsync();
+                    var done = new System.Collections.Generic.List<string>();
+                    if (!string.IsNullOrEmpty(cres.DevicePlatformCabPath)) done.Add("DevicePlatform");
+                    if (!string.IsNullOrEmpty(cres.DeviceInfoCabPath)) done.Add("DeviceInfo");
+                    if (!string.IsNullOrEmpty(cres.MachineInfoPath)) done.Add("machineinfo");
+                    if (!string.IsNullOrEmpty(cres.SmbiosSourceDir)) done.Add("SMBIOS源");
+                    if (cres.DriverPackages.Count > 0) done.Add($"驱动包×{cres.DriverPackages.Count}");
+                    if (!string.IsNullOrEmpty(cres.FmPath)) done.Add("统一FM");
+                    msg += cres.Error == null
+                        ? "\n✅ BSP 组件完成：" + string.Join("、", done)
+                        : "\n❌ BSP 组件失败：" + cres.Error;
+                }
+                Vm.LastLog = msg;
             }
             finally { BtnBuild.IsEnabled = true; }
+        }
+
+        async void BuildComponents_Click(object sender, RoutedEventArgs e)
+        {
+            if (!Vm.HasAnyBspComponent)
+            {
+                Vm.LastLog = "未勾选任何 BSP 组件。";
+                return;
+            }
+            BtnBuildComponents.IsEnabled = false;
+            try
+            {
+                var cres = await Vm.BuildComponentsAsync();
+                var done = new System.Collections.Generic.List<string>();
+                if (!string.IsNullOrEmpty(cres.DevicePlatformCabPath)) done.Add("DevicePlatform：" + cres.DevicePlatformCabPath);
+                if (!string.IsNullOrEmpty(cres.DeviceInfoCabPath)) done.Add("DeviceInfo：" + cres.DeviceInfoCabPath);
+                if (!string.IsNullOrEmpty(cres.MachineInfoPath)) done.Add("machineinfo：" + cres.MachineInfoPath);
+                if (!string.IsNullOrEmpty(cres.SmbiosSourceDir)) done.Add("SMBIOS 源目录：" + cres.SmbiosSourceDir);
+                foreach (var dp in cres.DriverPackages)
+                    done.Add("驱动 " + dp.OutputName + "（" + dp.FeatureId + "）" +
+                             (string.IsNullOrEmpty(dp.CabPath) ? "：源包 " + dp.PackageDir : "：cab " + dp.CabPath));
+                if (!string.IsNullOrEmpty(cres.FmPath)) done.Add("统一 FM：" + cres.FmPath);
+                Vm.LastLog = cres.Error == null
+                    ? "✅ BSP 组件生成完成：\n" + string.Join("\n", done)
+                    : "❌ BSP 组件失败：" + cres.Error;
+            }
+            finally { BtnBuildComponents.IsEnabled = true; }
+        }
+
+        void BrowseDriverRoot_Click(object sender, RoutedEventArgs e)
+        {
+            var dlg = new OpenFolderDialog { Title = "选择驱动源目录（递归扫描 *.inf，每个含 INF 的目录成一个驱动包）" };
+            if (dlg.ShowDialog() == true) Vm.DriverScanRoot = dlg.FolderName;
+        }
+
+        void ScanDrivers_Click(object sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(Vm.DriverScanRoot) || !System.IO.Directory.Exists(Vm.DriverScanRoot))
+            {
+                Vm.LastLog = "请先选择有效的驱动源目录。";
+                return;
+            }
+            BtnScanDrv.IsEnabled = false;
+            try
+            {
+                Vm.ScanDriversPreview();
+                Vm.LastLog = Vm.DriverPreviewSummary;
+            }
+            finally { BtnScanDrv.IsEnabled = true; }
         }
 
         // ── 步进 ──

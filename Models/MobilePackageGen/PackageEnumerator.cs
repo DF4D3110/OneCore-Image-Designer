@@ -222,7 +222,11 @@ namespace OneCore_Image_Designer.Models.MobilePackageGen
                             CabFileName = cabFileName,
                             CabFilePath = cabFile,
                             PartitionName = partitionName,
-                            SourceManifest = manifestFile
+                            SourceManifest = manifestFile,
+                            // 官方驱动 INF 基名以 microsoft 开头（22621 Common-Drivers 包实证：
+                            // microsoft-* 为 inbox，dual_*/厂商名 为第三方）
+                            IsThirdPartyDriver = !Path.GetFileNameWithoutExtension(manifestFile)
+                                .StartsWith("microsoft", StringComparison.OrdinalIgnoreCase)
                         });
                     }
                     catch { }

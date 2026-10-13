@@ -66,6 +66,18 @@ namespace OneCore_Image_Designer.Models
         public bool IsSchemaV1 => SchemaVersion == OemInputSchemaVersion.V1_2004_10;
         public bool IsSchemaV2 => SchemaVersion == OemInputSchemaVersion.V2_2019_06;
 
+        private int _targetBuild;
+        /// <summary>
+        /// 目标 OS build（如 15063/17763/20348）。&gt;0 时 XSD 校验按该 build 选择
+        /// 对应时代的官方 schema 家族（41 版 featureapi 实证：V1/V2 各有多代演进）；
+        /// 0=未指定，回退 20348 基线（与旧行为一致）。
+        /// </summary>
+        public int TargetBuild
+        {
+            get => _targetBuild;
+            set { _targetBuild = value; OnPropertyChanged(); }
+        }
+
         /// <summary>UI 文案：V1 显示 SOC，V2 显示 DeviceLayoutType（值同源）。</summary>
         public string DeviceLayoutLabel => IsSchemaV2 ? "DeviceLayoutType" : "SOC (DeviceLayoutType)";
 

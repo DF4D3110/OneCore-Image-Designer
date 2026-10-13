@@ -44,5 +44,19 @@ namespace OneCore_Image_Designer.Views.SystemReconstruct
                 });
             }
         }
+
+        private void PackageList_DoubleClick(object sender, RoutedEventArgs e)
+        {
+            if (sender is ListBox lb && lb.SelectedItem != null)
+                (DataContext as ViewModels.SystemReconstruct.SelectReconstructViewModel)
+                    ?.PreviewItemCommand.Execute(lb.SelectedItem);
+        }
+
+        private void FileTree_DoubleClick(object sender, RoutedEventArgs e)
+        {
+            if (sender is TreeView tv && tv.SelectedItem is Models.FileTreeNode node && !node.IsFolder)
+                (DataContext as ViewModels.SystemReconstruct.SelectReconstructViewModel)
+                    ?.PreviewTreeNodeCommand.Execute(node);
+        }
     }
 }

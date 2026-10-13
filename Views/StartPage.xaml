@@ -99,6 +99,7 @@
                     <ColumnDefinition Width="2*"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="2*"/>
                 </Grid.ColumnDefinitions>
 
                 <Button Grid.Column="0" Style="{StaticResource StartTile}" Height="156"
@@ -149,6 +150,32 @@
                         <TextBlock Text="使用 OS 包和 OEMInput 输出 FFU / VHDX。"
                                    Style="{StaticResource StartTileDescription}"/>
                     </StackPanel>
+                </Button>
+
+                <Button Grid.Column="3" Style="{StaticResource StartTile}" Height="156"
+                        Command="{Binding OpenUpdateAppCommand}"
+                        AutomationProperties.Name="Tile-updateapp更新调度">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="112"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Border Background="{StaticResource ICDAccentBright}" Margin="0">
+                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                                <TextBlock Text="&#xE895;" FontFamily="Segoe MDL2 Assets" FontSize="38"
+                                           Foreground="White" HorizontalAlignment="Center"/>
+                                <TextBlock Text="UPDATE" FontSize="10" Foreground="White"
+                                           HorizontalAlignment="Center" Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </Border>
+                        <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="22,0,18,0">
+                            <TextBlock Text="updateapp 更新调度" Style="{StaticResource StartTileTitle}" FontSize="17"/>
+                            <TextBlock Text="按 build 调度系统更新" FontSize="12" Foreground="{StaticResource ICDAccentDark}"
+                                       Margin="0,4,0,0"/>
+                            <TextBlock Text="动态加载所选版本 updateapp 的命令集，离线镜像或在线执行 stage / commit / install 等更新操作。"
+                                       Style="{StaticResource StartTileDescription}"/>
+                        </StackPanel>
+                    </Grid>
                 </Button>
             </Grid>
 

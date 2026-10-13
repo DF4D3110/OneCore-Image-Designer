@@ -100,6 +100,7 @@ namespace OneCore_Image_Designer.ViewModels
         [RelayCommand] private void OpenFfuBrowser() => _mainVM.NavigateToFFUBrowser();
         [RelayCommand] private void OpenUup() => _mainVM.NavigateToUup();
         [RelayCommand] private void OpenSxs() => _mainVM.NavigateToSxs();
+        [RelayCommand] private void OpenUpdateApp() => _mainVM.NavigateToUpdateApp();
 
         // ── 实用工具入口（直接开窗口）──
         [RelayCommand] private void OpenToolRegistry() => _mainVM.OpenToolRegistry();

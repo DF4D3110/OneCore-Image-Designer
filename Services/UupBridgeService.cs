@@ -9,8 +9,17 @@ namespace OneCore_Image_Designer.Services
 {
     public sealed class UupBridgeService
     {
-        private static readonly string BridgeExecutable = Path.Combine(
-            AppDomain.CurrentDomain.BaseDirectory, "UupBridge", "UupBridge.exe");
+        private readonly string _bridgeExecutable;
+        private readonly Func<string[], IProgress<string>?, CancellationToken, Task> _runBridge;
+
+        public UupBridgeService(
+            string? bridgeExecutable = null,
+            Func<string[], IProgress<string>?, CancellationToken, Task>? runBridge = null)
+        {
+            _bridgeExecutable = bridgeExecutable ?? Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory, "UupBridge", "UupBridge.exe");
+            _runBridge = runBridge ?? RunBridgeProcessAsync;
+        }
 
         public async Task<UupScanSnapshot> ScanAsync(
             UupScanRequest request,
@@ -29,7 +38,7 @@ namespace OneCore_Image_Designer.Services
                 System.Text.Json.JsonSerializer.Serialize(request), cancellationToken).ConfigureAwait(false);
             try
             {
-                await RunBridgeAsync(["scan", requestPath, snapshotPath], log, cancellationToken)
+                await _runBridge(["scan", requestPath, snapshotPath], log, cancellationToken)
                     .ConfigureAwait(false);
                 return await Task.Run(() =>
                 {
@@ -54,34 +63,31 @@ namespace OneCore_Image_Designer.Services
         {
             if (string.IsNullOrWhiteSpace(snapshot.SnapshotPath))
                 throw new InvalidOperationException("当前更新列表没有对应的扫描快照。请重新扫描或从带 payload 的快照载入。");
-            var payloadPath = Path.Combine(Path.GetDirectoryName(snapshot.SnapshotPath)!,
-                string.IsNullOrWhiteSpace(snapshot.PayloadFile)
-                    ? Path.GetFileNameWithoutExtension(snapshot.SnapshotPath) + ".data.json.gz"
-                    : snapshot.PayloadFile);
+            var payloadPath = UupPayloadLocator.ResolvePayloadPath(snapshot.SnapshotPath, snapshot.PayloadFile);
             if (!File.Exists(payloadPath))
                 throw new FileNotFoundException("扫描快照的更新 payload 不存在，请重新扫描。", payloadPath);
 
             EnsureBridge();
-            await RunBridgeAsync(
+            await _runBridge(
                 ["download", payloadPath, selectedEntry.UpdateId, outputDirectory, snapshot.Architecture],
                 log, cancellationToken).ConfigureAwait(false);
         }
 
-        private static void EnsureBridge()
+        private void EnsureBridge()
         {
-            if (!File.Exists(BridgeExecutable))
-                throw new FileNotFoundException("仓库内 UUP 桥接程序不存在。请重新构建或安装完整应用。", BridgeExecutable);
+            if (!File.Exists(_bridgeExecutable))
+                throw new FileNotFoundException("仓库内 UUP 桥接程序不存在。请重新构建或安装完整应用。", _bridgeExecutable);
         }
 
-        private static Task RunBridgeAsync(
+        private Task RunBridgeProcessAsync(
             string[] arguments,
             IProgress<string>? log,
             CancellationToken cancellationToken)
         {
             var psi = new ProcessStartInfo
             {
-                FileName = BridgeExecutable,
-                WorkingDirectory = Path.GetDirectoryName(BridgeExecutable)!,
+                FileName = _bridgeExecutable,
+                WorkingDirectory = Path.GetDirectoryName(_bridgeExecutable)!,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,

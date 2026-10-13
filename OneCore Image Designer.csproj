@@ -19,7 +19,7 @@
   <ItemGroup>
     <Resource Include="Assets\app.ico" />
     <Resource Include="Assets\banner.png" />
-    <!-- 设备布局内置模板 + 各 ADK 时代官方校验规则：随输出目录发布，运行时按路径加载 -->
+    <!-- 设备布局内置模板 + 按 Windows 系统 build 归档的官方校验规则（非 ADK 版本）：随输出目录发布，运行时按路径加载 -->
     <None Include="Assets\Templates\**\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Assets\ValidationRules\**\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <None Update="ThirdParty\SxS\**\*.*" CopyToOutputDirectory="PreserveNewest" />
@@ -38,11 +38,14 @@
   <ItemGroup>
     <ProjectReference Include="MobilePackageGen\MobilePackageGen.Common\MobilePackageGen.Common.csproj" />
     <ProjectReference Include="UupBridge\UupBridge.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="UupShared\UupShared.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <Compile Remove="MobilePackageGen\**\*.cs" />
     <Compile Remove="UupBridge\**\*.cs" />
+    <Compile Remove="UupShared\**\*.cs" />
+    <Compile Remove="Tests\**\*.cs" />
     <Compile Remove="ThirdParty\**\*.cs" />
     <Compile Remove="AssemblyInfo.cs" />
   </ItemGroup>
@@ -51,9 +54,20 @@
     <EmbeddedResource Include="Tools\wcpex\wcpex.exe" />
     <EmbeddedResource Include="Tools\wcpex\wcp.dll" />
     <EmbeddedResource Include="Services\guids.csv" />
-    <!-- 官方 ADK tools_20348 featureapi.dll 内嵌的 OEMInput schema，用于真实校验 -->
+    <!-- 官方 ADK featureapi.dll 内嵌的 OEMInput schema，用于真实校验。
+         无后缀=20348 基线；带 build 区间后缀=按目标 build 选择的 schema 家族
+         （41 版 featureapi 哈希归组实证，见 Services/OemInputSchemaFamilyService.cs） -->
     <EmbeddedResource Include="Schemas\OEMInput.V1.xsd" />
     <EmbeddedResource Include="Schemas\OEMInput.V2.xsd" />
+    <EmbeddedResource Include="Schemas\OEMInput.V1.10527-14959.xsd" />
+    <EmbeddedResource Include="Schemas\OEMInput.V1.14986-17040.xsd" />
+    <EmbeddedResource Include="Schemas\OEMInput.V1.17047-17125.xsd" />
+    <EmbeddedResource Include="Schemas\OEMInput.V1.17666-18362.xsd" />
+    <EmbeddedResource Include="Schemas\OEMInput.V1.18890-18941.xsd" />
+    <EmbeddedResource Include="Schemas\OEMInput.V1.18963.xsd" />
+    <EmbeddedResource Include="Schemas\OEMInput.V2.18963.xsd" />
+    <EmbeddedResource Include="Schemas\OEMInput.V2.18985-19041.xsd" />
+    <EmbeddedResource Include="Schemas\OEMInput.V2.22621.xsd" />
   </ItemGroup>
 
   <!-- 内置微软 iot-adk-addonkit 17763-v7：整目录拷入输出 addonkit\，

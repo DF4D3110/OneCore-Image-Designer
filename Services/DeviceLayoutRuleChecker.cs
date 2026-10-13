@@ -32,8 +32,10 @@ namespace OneCore_Image_Designer.Services
     /// <summary>
     /// 设备布局官方规则校验器。
     ///
-    /// 规则来源：ADK <c>DeviceLayoutValidation.dll</c> 内嵌 XML（已按 ADK 时代提取到
-    /// Assets\ValidationRules\{era}\）。规则形状与 DeviceLayout.xml 同构，但每个字段是
+    /// 规则来源：各 ADK 版 <c>DeviceLayoutValidation.dll</c> 内嵌 XML（41 版全量导出、
+    /// 按内容哈希归族后提取到 Assets\ValidationRules\{ADK build}\，目录名=该族代表 ADK 版本；
+    /// 另有 10527=DLL 原生族、phone=早期 cab/手机样本独有规则）。
+    /// 规则形状与 DeviceLayout.xml 同构，但每个字段是
     /// 「约束表达式」而非数值，官方语法（从 14 份规则逆向归纳）：
     ///  · *ANY*                             — 任意
     ///  · N / 0xN                           — 精确相等（扇区数按 RulesSectorSize 换算）
@@ -54,7 +56,7 @@ namespace OneCore_Image_Designer.Services
         public static string RulesRoot =>
             Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Assets", "ValidationRules");
 
-        /// <summary>枚举所有时代目录下的规则文件（含 era 标签）。</summary>
+        /// <summary>枚举所有规则目录（目录名=ADK build 族代表版本 / phone 早期专有规则）下的规则文件。</summary>
         public static List<(string Era, string File, string Name, string Scope)> ListRules()
         {
             var list = new List<(string, string, string, string)>();

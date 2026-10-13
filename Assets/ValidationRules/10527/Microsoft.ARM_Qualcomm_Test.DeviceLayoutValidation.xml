@@ -1,8 +1,7 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <DeviceLayout xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns="http://schemas.microsoft.com/embedded/2004/10/ImageUpdate">
   <!-- CPUTYPE:SV:SOC:DEVICE:RELEASETYPE:VERSIONTAG - must use C#-RegEx syntax in wild cards -->
-  <Scope>arm.*:*:.+_test:.+:.+:WindowsMobile:10:.+</Scope>
-  <RulesSectorSize>512</RulesSectorSize>
+  <Scope>arm.*:qualcomm:qc.+_test:.+:.+:WindowsMobile:10:.+</Scope>
   <ExcludedScopes>
       <Scope>arm.*:qualcomm:fake.*:.+:.+:.+:.+</Scope>
       <Scope>arm.*:qualcomm:qc8960.*:.+:.+:.+:.+</Scope>
@@ -19,18 +18,19 @@
     <Partition>
       <Name>DPP</Name>
       <!-- PARTITION_BASIC_DATA_GUID -->
-      <PartitionType>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</PartitionType>
+      <Type>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</Type>
       <TotalSectors>greater_or_equal(16384)</TotalSectors>
       <RequiredToFlash>true</RequiredToFlash>
       <ByteAlignment>*ANY*</ByteAlignment>
       <FileSystem>allow_default_plus_equal(FAT)</FileSystem>
+      <Position>1</Position>
     </Partition>
 
     <!-- Secure BACKUP Parititions place holder and template -->
     <Partition>
        <Name>BACKUP_*</Name>
        <TotalSectors>*PARENT*</TotalSectors>
-       <PartitionType>{A3381699-350C-465E-BD5D-FA3AB901A39A}</PartitionType>
+       <Type>{A3381699-350C-465E-BD5D-FA3AB901A39A}</Type>
        <Bootable>*PARENT*</Bootable>
        <RequiredToFlash>true</RequiredToFlash>
     </Partition>
@@ -43,7 +43,7 @@
       <FileSystem>FAT</FileSystem>
       <TotalSectors>greater_or_equal(65536)</TotalSectors>
       <!-- PARTITION_SYSTEM_GUID -->
-      <PartitionType>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</PartitionType>
+      <Type>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</Type>
       <ByteAlignment>*ANY*</ByteAlignment>
       <RequiredToFlash>true</RequiredToFlash>
       <Position>BACKUP_BOOKEND</Position>
@@ -53,16 +53,15 @@
     <Partition>
       <Name>CrashDump</Name>
       <!-- PARTITION_BASIC_DATA_GUID -->
-      <PartitionType>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</PartitionType>
+      <Type>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</Type>
       <TotalSectors>*ANY*</TotalSectors>
       <FileSystem>NTFS</FileSystem>
-      <Optional>true</Optional>
     </Partition>
 
     <Partition>
       <Name>SVRawDump</Name>
       <!-- dedicated partition for SBL to write RAW dump + some overhead -->
-      <PartitionType>{66C9B323-F7FC-48B6-BF96-6F32E335A428}</PartitionType>
+      <Type>{66C9B323-F7FC-48B6-BF96-6F32E335A428}</Type>
       <TotalSectors>*ANY*</TotalSectors>
       <Optional>true</Optional>
     </Partition>
@@ -70,7 +69,7 @@
    <Partition>
       <Name>MainOS</Name>
       <!-- PARTITION_BASIC_DATA_GUID -->
-      <PartitionType>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</PartitionType>
+      <Type>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</Type>
       <MinFreeSectors>between(102400,512000)</MinFreeSectors>
       <ByteAlignment>*ANY*</ByteAlignment>
       <RequiresCompression>*ANY*</RequiresCompression>
@@ -82,7 +81,7 @@
     <Partition>
       <Name>Data</Name>
       <!-- PARTITION_BASIC_DATA_GUID -->
-      <PartitionType>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</PartitionType>
+      <Type>{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}</Type>
       <UseAllSpace>true</UseAllSpace>
       <TotalSectors>allow_default_plus_greater_or_equal(921600)</TotalSectors>
       <ByteAlignment>*ANY*</ByteAlignment>
@@ -94,7 +93,7 @@
 
   <!-- END MICROSOFT PARTITIONS -->
 
-  <SectorSize>one_of(512,4096)</SectorSize>
+  <SectorSize>512</SectorSize>
   <ChunkSize>*ANY*</ChunkSize>
   <DefaultPartitionByteAlignment>*ANY*</DefaultPartitionByteAlignment>
 </DeviceLayout>

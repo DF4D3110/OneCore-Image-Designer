@@ -1,0 +1,135 @@
+<UserControl x:Class="OneCore_Image_Designer.Views.UpdateAppView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                  Background="{StaticResource IcdStartBackground}">
+        <Grid Background="{StaticResource IcdStartBackground}" Margin="28" MaxWidth="1600"
+              HorizontalAlignment="Center">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <StackPanel>
+                <TextBlock Text="updateapp 更新调度" FontSize="26" FontWeight="Light"
+                           Foreground="{StaticResource ICDTitleForeground}"/>
+                <TextBlock Text="按所选 build 动态加载该版本 updateapp.exe 实际支持的命令（来自 exe 内嵌官方用法），选择命令、填参数后提权执行并实时回传日志。"
+                           Margin="0,6,0,18" Foreground="{StaticResource ICDSubtle}" TextWrapping="Wrap"/>
+            </StackPanel>
+
+            <Border Grid.Row="1" Style="{StaticResource ICDCard}" Margin="0,0,0,14">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Margin="0,0,16,0" MinWidth="160">
+                        <TextBlock Text="目标 build" Foreground="{StaticResource ICDSubtle}"/>
+                        <ComboBox ItemsSource="{Binding Builds}" SelectedItem="{Binding SelectedBuild}"
+                                  Margin="0,4,0,0"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Margin="0,0,16,0">
+                        <TextBlock Text="执行目标" Foreground="{StaticResource ICDSubtle}"/>
+                        <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                            <RadioButton Content="离线镜像（VHD/FFU）" IsChecked="{Binding IsOfflineTarget}"
+                                         GroupName="uaTarget" Margin="0,0,24,0"/>
+                            <RadioButton Content="在线（当前运行系统）" IsChecked="{Binding IsLiveTarget}"
+                                         GroupName="uaTarget"/>
+                        </StackPanel>
+                        <TextBlock Text="{Binding TargetHint}" Foreground="{StaticResource ICDSubtle}"
+                                   TextWrapping="Wrap" Margin="0,4,0,0"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" VerticalAlignment="Center">
+                        <TextBlock Text="命令条数" Foreground="{StaticResource ICDSubtle}"/>
+                        <TextBlock Text="{Binding Commands.Count}" FontSize="20"
+                                   Foreground="{StaticResource ICDAccentDark}"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <Grid Grid.Row="2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="420"/>
+                </Grid.ColumnDefinitions>
+
+                <Border Style="{StaticResource ICDCard}" Margin="0,0,14,0">
+                    <DockPanel>
+                        <StackPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+                            <TextBlock Text="该版本支持的命令（官方用法解析）" FontSize="16"
+                                       Foreground="{StaticResource ICDTitleForeground}"/>
+                            <TextBlock Text="命令集随 build 变化：老版本有 installfromsd/stagetosd/stageinproc，新版本有 rollback/finalizecommit/getfeatures 等；选错版本会提示命令不存在。"
+                                       Foreground="{StaticResource ICDSubtle}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                        </StackPanel>
+                        <DataGrid ItemsSource="{Binding Commands}" SelectedItem="{Binding SelectedCommand}"
+                                  AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False"
+                                  HeadersVisibility="Column" SelectionMode="Single">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="命令" Binding="{Binding Name}" Width="170"/>
+                                <DataGridTextColumn Header="分类" Binding="{Binding Category}" Width="80"/>
+                                <DataGridTextColumn Header="风险" Binding="{Binding Risk}" Width="80"/>
+                                <DataGridTextColumn Header="参数模板（官方）" Binding="{Binding ArgsTemplate}" Width="*"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </DockPanel>
+                </Border>
+
+                <StackPanel Grid.Column="1">
+                    <Border Style="{StaticResource ICDCard}" Margin="0,0,0,14">
+                        <StackPanel>
+                            <TextBlock Text="执行" FontSize="16" Foreground="{StaticResource ICDTitleForeground}"/>
+                            <TextBlock Text="{Binding CommandArgsHint}" TextWrapping="Wrap"
+                                       Foreground="{StaticResource ICDForeground}" Margin="0,8,0,4"
+                                       FontFamily="Consolas"/>
+                            <TextBlock Text="{Binding RiskText}" Foreground="{StaticResource ICDSubtle}"
+                                       TextWrapping="Wrap" Margin="0,0,0,8"/>
+                            <TextBlock Text="⚠ 该命令可能重启设备或改动运行中系统，离线模式请确认已选镜像。"
+                                       Foreground="#FFC00000" TextWrapping="Wrap" Margin="0,0,0,8"
+                                       Visibility="{Binding ShowLiveWarning, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+
+                            <TextBlock Text="镜像路径（离线 mountandinstall 必填）" Foreground="{StaticResource ICDSubtle}"/>
+                            <DockPanel Margin="0,3,0,8">
+                                <Button DockPanel.Dock="Right" Content="…" Command="{Binding BrowseImageCommand}"
+                                        Style="{StaticResource ICDToolbarButton}" Margin="8,0,0,0"/>
+                                <TextBox Text="{Binding ImagePath, UpdateSourceTrigger=PropertyChanged}"/>
+                            </DockPanel>
+
+                            <TextBlock Text="包/动作清单路径（install/stage 系）" Foreground="{StaticResource ICDSubtle}"/>
+                            <DockPanel Margin="0,3,0,8">
+                                <Button DockPanel.Dock="Right" Content="…" Command="{Binding BrowsePackagesCommand}"
+                                        Style="{StaticResource ICDToolbarButton}" Margin="8,0,0,0"/>
+                                <TextBox Text="{Binding PackagePath, UpdateSourceTrigger=PropertyChanged}"/>
+                            </DockPanel>
+
+                            <TextBlock Text="附加参数（可选，如 noreboot / finalize）" Foreground="{StaticResource ICDSubtle}"/>
+                            <TextBox Text="{Binding ExtraArgs, UpdateSourceTrigger=PropertyChanged}" Margin="0,3,0,10"/>
+
+                            <StackPanel Orientation="Horizontal">
+                                <Button Content="提权执行所选命令" Command="{Binding RunSelectedCommand}"
+                                        Style="{StaticResource ICDToolbarPrimaryButton}"
+                                        IsEnabled="{Binding IsNotRunning}" Margin="0,0,8,0"/>
+                                <Button Content="取消回传" Command="{Binding CancelRunCommand}"
+                                        Style="{StaticResource ICDToolbarButton}"
+                                        IsEnabled="{Binding IsRunning}"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource ICDCard}">
+                        <DockPanel>
+                            <TextBlock DockPanel.Dock="Top" Text="执行日志" FontSize="16"
+                                       Foreground="{StaticResource ICDTitleForeground}" Margin="0,0,0,6"/>
+                            <TextBox Text="{Binding Log, Mode=OneWay}" IsReadOnly="True"
+                                     TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                                     FontFamily="Consolas" FontSize="11.5"
+                                     MinHeight="220" MaxHeight="340"
+                                     Background="#FFF7F9FB" BorderThickness="1"/>
+                        </DockPanel>
+                    </Border>
+                </StackPanel>
+            </Grid>
+        </Grid>
+    </ScrollViewer>
+</UserControl>

@@ -1921,10 +1921,14 @@ namespace OneCore_Image_Designer.Services
 
         private static string? _logFilePath;
 
+        /// <summary>可选日志转发钩子（工作线程调用；用于把提取过程实时汇入任务日志窗口）。</summary>
+        public static Action<string>? LiveSink;
+
         private static void Log(string message)
         {
             string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
             System.Diagnostics.Debug.WriteLine($"[ComponentExtractor] {message}");
+            try { LiveSink?.Invoke(message); } catch { }
 
             try
             {

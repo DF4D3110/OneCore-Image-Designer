@@ -3,8 +3,13 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -34,33 +39,86 @@ namespace OneCore_Image_Designer.Services
 
         private static HttpClient CreateClient()
         {
-            var c = new HttpClient();
+            // SSL 加固：显式锁定 TLS 1.2/1.3（不依赖系统默认协商），
+            // SocketsHttpHandler 强制 HTTP/1.1（规避部分网络对 h2 的 ALPN 干扰），
+            // 并绕过系统代理（直连更稳，代理异常时报错也更干净）。
+            var handler = new SocketsHttpHandler
+            {
+                SslOptions = new System.Net.Security.SslClientAuthenticationOptions
+                {
+                    EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                    RemoteCertificateValidationCallback = null,   // 保持默认严格校验
+                },
+                UseProxy = false,
+                ConnectTimeout = TimeSpan.FromSeconds(20),
+            };
+            var c = new HttpClient(handler);
+            // 说明：.NET 默认即 HTTP/1.1（不主动升级 h2），无需额外设置。
             c.DefaultRequestHeaders.UserAgent.ParseAdd("OneCore-Image-Designer");
             c.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
             c.Timeout = TimeSpan.FromMinutes(30);
             return c;
         }
 
+        /// <summary>把网络异常翻译成可操作的中文说明。</summary>
+        public static string DescribeNetworkException(Exception ex)
+        {
+            var sb = new StringBuilder();
+            for (Exception? e = ex; e != null; e = e.InnerException)
+            {
+                if (e is HttpRequestException hre)
+                {
+                    sb.Append($"HTTP: {hre.Message}");
+                    if (hre.StatusCode is { } sc) sb.Append($"（状态码 {(int)sc} {sc}）");
+                    if (hre.InnerException is AuthenticationException aex)
+                        sb.Append($" | TLS: {aex.Message}（常见原因：系统时间偏差、根证书缺失或代理拦截）");
+                    else if (hre.InnerException is SocketException sex)
+                        sb.Append($" | Socket: {sex.Message}（socket 错误 {sex.SocketErrorCode}）");
+                    else if (hre.InnerException != null)
+                        sb.Append($" | {hre.InnerException.GetType().Name}: {hre.InnerException.Message}");
+                }
+                else if (e is TaskCanceledException || e is TimeoutException)
+                    sb.Append($"超时: {e.Message}（连接或传输过慢，可稍后重试）");
+                else
+                    sb.Append($"{e.GetType().Name}: {e.Message}");
+                if (e.InnerException != null && !ReferenceEquals(e, ex)) sb.Append(" <- ");
+            }
+            return sb.ToString();
+        }
+
         /// <summary>拉取 Release 资产清单，解析为（build 号、文件名、大小、下载地址、sha256）。</summary>
         public async Task<IReadOnlyList<AdkToolReleaseAsset>> FetchAssetsAsync(CancellationToken ct = default)
         {
             var url = $"https://api.github.com/repos/{RepoOwner}/{RepoName}/releases/tags/{ReleaseTag}";
-            using var resp = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-            resp.EnsureSuccessStatusCode();
-            await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-            var release = await JsonSerializer.DeserializeAsync<GithubRelease>(stream,
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, ct).ConfigureAwait(false);
-            if (release?.Assets is null) return Array.Empty<AdkToolReleaseAsset>();
-
-            var list = new List<AdkToolReleaseAsset>();
-            foreach (var a in release.Assets)
+            HttpResponseMessage resp;
+            try
             {
-                if (!string.Equals(Path.GetExtension(a.Name), ".zip", StringComparison.OrdinalIgnoreCase)) continue;
-                if (!int.TryParse(Path.GetFileNameWithoutExtension(a.Name), out var build)) continue;
-                list.Add(new AdkToolReleaseAsset(build, a.Name, a.Size,
-                    a.BrowserDownloadUrl, ParseDigest(a.Digest)));
+                resp = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
             }
-            return list.OrderBy(x => x.Build).ToList();
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException or SocketException)
+            {
+                throw new HttpRequestException("无法连接 GitHub API：" + DescribeNetworkException(ex), ex);
+            }
+            using (resp)
+            {
+                if (!resp.IsSuccessStatusCode)
+                    throw new HttpRequestException(
+                        $"GitHub API 返回 {(int)resp.StatusCode} {resp.ReasonPhrase}（可能触发限流，稍后再试）");
+                await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+                var release = await JsonSerializer.DeserializeAsync<GithubRelease>(stream,
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, ct).ConfigureAwait(false);
+                if (release?.Assets is null) return Array.Empty<AdkToolReleaseAsset>();
+
+                var list = new List<AdkToolReleaseAsset>();
+                foreach (var a in release.Assets)
+                {
+                    if (!string.Equals(Path.GetExtension(a.Name), ".zip", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!int.TryParse(Path.GetFileNameWithoutExtension(a.Name), out var build)) continue;
+                    list.Add(new AdkToolReleaseAsset(build, a.Name, a.Size,
+                        a.BrowserDownloadUrl, ParseDigest(a.Digest)));
+                }
+                return list.OrderBy(x => x.Build).ToList();
+            }
         }
 
         /// <summary>从 digest 字符串（"sha256:xxxx…"）提取小写十六进制；缺失或格式异常返回 null（下载后仅记录实际哈希）。</summary>
@@ -146,10 +204,52 @@ namespace OneCore_Image_Designer.Services
             log?.Report($"开始下载 {asset.FileName}（{asset.SizeDisplay}）");
             try
             {
-                using (var resp = await Http.GetAsync(asset.DownloadUrl,
-                           HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false))
+                // 网络抖动重试：最多 3 次尝试，指数退避（1s/3s）。
+                // 仅对传输层失败（HttpRequestException/超时/DNS）重试；SHA 校验失败不重试。
+                HttpResponseMessage? resp = null;
+                Exception? lastError = null;
+                for (int attempt = 1; attempt <= 3; attempt++)
                 {
-                    resp.EnsureSuccessStatusCode();
+                    ct.ThrowIfCancellationRequested();
+                    try
+                    {
+                        resp = await Http.GetAsync(asset.DownloadUrl,
+                            HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+                        if (!resp.IsSuccessStatusCode)
+                        {
+                            var code = (int)resp.StatusCode;
+                            string body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                            resp.Dispose(); resp = null;
+                            lastError = new HttpRequestException(
+                                $"HTTP {code} {resp?.ReasonPhrase}", null, (HttpStatusCode)code);
+                            if (code is >= 500 and <= 599 && attempt < 3)
+                            {
+                                log?.Report($"服务器错误 {code}，第 {attempt} 次重试…");
+                                await Task.Delay(attempt * 1000, ct).ConfigureAwait(false);
+                                continue;
+                            }
+                            throw lastError;
+                        }
+                        break;  // 成功
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                    catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException or SocketException)
+                    {
+                        resp?.Dispose(); resp = null;
+                        lastError = ex;
+                        if (attempt < 3)
+                        {
+                            log?.Report($"网络异常（第 {attempt} 次）：{DescribeNetworkException(ex)}");
+                            log?.Report($"等待 {attempt * 3} 秒后重试…");
+                            await Task.Delay(attempt * 3000, ct).ConfigureAwait(false);
+                        }
+                    }
+                }
+                if (resp is null)
+                    throw lastError ?? new HttpRequestException("下载失败：未知错误");
+
+                using (resp)
+                {
                     var total = resp.Content.Headers.ContentLength ?? asset.Size;
                     await using var src = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
                     await using var dst = new FileStream(zipPath, FileMode.Create, FileAccess.Write,

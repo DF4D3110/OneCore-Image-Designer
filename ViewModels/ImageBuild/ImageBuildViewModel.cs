@@ -7,6 +7,7 @@ using System.Runtime.CompilerServices;
 using System.Windows;
 using Microsoft.Win32;
 using OneCore_Image_Designer.Services;
+using OneCore_Image_Designer.Models;
 
 namespace OneCore_Image_Designer.ViewModels.ImageBuild
 {
@@ -322,7 +323,13 @@ namespace OneCore_Image_Designer.ViewModels.ImageBuild
                         if (exitCode == 0 && File.Exists(OutputPath))
                         {
                             var fi = new FileInfo(OutputPath);
-                            MessageBox.Show($"构建完成!\n\n输出文件: {OutputPath}\n大小: {fi.Length / 1024.0 / 1024.0:F1} MB", "构建完成", MessageBoxButton.OK, MessageBoxImage.Information);
+                            var artifact = IntegrationArtifactRegistry.Shared.Register(new IntegrationArtifact(
+                                IntegrationArtifactKind.MediaImage, OutputPath, "Generated image",
+                                Architecture: SelectedArchitecture));
+                            var preflight = IntegrationArtifactRegistry.Shared.Preflight(artifact);
+                            BuildStatus = preflight.IsReady ? "构建完成；产物已登记并通过预检" :
+                                "构建完成；产物预检警告：" + string.Join("; ", preflight.Errors);
+                            MessageBox.Show($"构建完成!\n\n输出文件: {OutputPath}\n大小: {fi.Length / 1024.0 / 1024.0:F1} MB\n\n{BuildStatus}", "构建完成", MessageBoxButton.OK, MessageBoxImage.Information);
                         }
                         else if (exitCode != 0)
                         {

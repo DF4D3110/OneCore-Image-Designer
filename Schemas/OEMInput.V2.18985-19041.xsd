@@ -1,0 +1,297 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema targetNamespace="http://schemas.microsoft.com/embedded/2019/06/ImageUpdate" elementFormDefault="qualified" xmlns="http://schemas.microsoft.com/embedded/2019/06/ImageUpdate" xmlns:mstns="http://schemas.microsoft.com/embedded/2019/06/ImageUpdate" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+    <xs:element name="OEMInput" type="OEMInput" />
+
+    <xs:simpleType name="ReleaseTypeRestriction">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="Test"/>
+            <xs:enumeration value="Production"/>
+        </xs:restriction>
+    </xs:simpleType>
+
+    <xs:simpleType name="BuildTypeRestriction">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="fre"/>
+            <xs:enumeration value="chk"/>
+            <xs:enumeration value="%BUILDTYPE%"/>
+        </xs:restriction>
+    </xs:simpleType>
+
+    <xs:simpleType name="BooleanRestriction">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="true"/>
+            <xs:enumeration value="false"/>
+        </xs:restriction>
+    </xs:simpleType>
+
+    <xs:complexType name="OEMInput">
+        <xs:all>
+            <xs:element name="Product" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:simpleContent>
+                        <xs:extension base="xs:string">
+                            <xs:attribute name="Removable" type="BooleanRestriction"/>
+                        </xs:extension>
+                    </xs:simpleContent>
+                </xs:complexType>
+            </xs:element>
+            <xs:element name="Description" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:simpleContent>
+                        <xs:extension base="xs:string">
+                            <xs:attribute name="Removable" type="BooleanRestriction"/>
+                        </xs:extension>
+                    </xs:simpleContent>
+                </xs:complexType>
+            </xs:element>
+            <xs:element name="TestContent" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:simpleContent>
+                        <xs:extension base="xs:string">
+                            <xs:attribute name="Removable" type="BooleanRestriction"/>
+                        </xs:extension>
+                    </xs:simpleContent>
+                </xs:complexType>
+            </xs:element>
+            <xs:element name="UserInstallableFeatures" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="Feature" minOccurs="0" maxOccurs="unbounded">
+                            <xs:complexType>
+                                <xs:simpleContent>
+                                    <xs:extension base="xs:string">
+                                        <xs:attribute name="Removable" type="BooleanRestriction"/>
+                                    </xs:extension>
+                                </xs:simpleContent>
+                            </xs:complexType>
+                        </xs:element>
+                    </xs:sequence>
+                    <xs:attribute name="Removable" type="BooleanRestriction"/>
+                </xs:complexType>
+            </xs:element>
+            <xs:element name="SV" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:simpleContent>
+                        <xs:extension base="xs:string">
+                            <xs:attribute name="Removable" type="BooleanRestriction"/>
+                        </xs:extension>
+                    </xs:simpleContent>
+                </xs:complexType>
+            </xs:element>
+            <xs:element name="DeviceLayoutType" minOccurs="1" maxOccurs="1">
+                <xs:complexType>
+                    <xs:simpleContent>
+                        <xs:extension base="xs:string">
+                            <xs:attribute name="Removable" type="BooleanRestriction"/>
+                        </xs:extension>
+                    </xs:simpleContent>
+                </xs:complexType>
+            </xs:element>
+            <xs:element name="Device" minOccurs="1" maxOccurs="1">
+                <xs:complexType>
+                    <xs:simpleContent>
+                        <xs:extension base="xs:string">
+                            <xs:attribute name="Removable" type="BooleanRestriction"/>
+                        </xs:extension>
+                    </xs:simpleContent>
+                </xs:complexType>
+            </xs:element>
+
+            <xs:element name="ReleaseType" minOccurs="1" maxOccurs="1">
+                <xs:complexType>
+                    <xs:simpleContent>
+                        <xs:extension base="ReleaseTypeRestriction">
+                            <xs:attribute name="Removable" type="BooleanRestriction"/>
+                        </xs:extension>
+                    </xs:simpleContent>
+                </xs:complexType>
+            </xs:element>
+
+
+            <xs:element name="BuildType" minOccurs="1" maxOccurs="1">
+                <xs:complexType>
+                    <xs:simpleContent>
+                        <xs:extension base="BuildTypeRestriction">
+                            <xs:attribute name="Removable" type="BooleanRestriction"/>
+                        </xs:extension>
+                    </xs:simpleContent>
+                </xs:complexType>
+            </xs:element>
+
+            <xs:element name="FormatDPP" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:simpleContent>
+                        <xs:extension base="BooleanRestriction">
+                            <xs:attribute name="Removable" type="BooleanRestriction"/>
+                        </xs:extension>
+                    </xs:simpleContent>
+                </xs:complexType>
+            </xs:element>
+
+            <xs:element name="ExcludePrereleaseFeatures" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:simpleContent>
+                        <xs:extension base="BooleanRestriction">
+                            <xs:attribute name="Removable" type="BooleanRestriction"/>
+                        </xs:extension>
+                    </xs:simpleContent>
+                </xs:complexType>
+            </xs:element>
+
+            <xs:element name="OEMDevicePlatform" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:simpleContent>
+                        <xs:extension base="xs:string">
+                            <xs:attribute name="Removable" type="BooleanRestriction"/>
+                        </xs:extension>
+                    </xs:simpleContent>
+                </xs:complexType>
+            </xs:element>
+
+            <xs:element name="Languages" minOccurs="1" maxOccurs="1">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="Language" minOccurs="1" maxOccurs="unbounded">
+                            <xs:complexType>
+                                <xs:simpleContent>
+                                    <xs:extension base="xs:string">
+                                        <xs:attribute name="Default" type="BooleanRestriction" default="false"/>
+                                        <xs:attribute name="Removable" type="BooleanRestriction"/>
+                                    </xs:extension>
+                                </xs:simpleContent>
+                            </xs:complexType>
+                        </xs:element>
+                    </xs:sequence>
+                    <xs:attribute name="Removable" type="BooleanRestriction"/>
+                </xs:complexType>
+            </xs:element>
+
+            <xs:element name="MachineInfoFile" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:simpleContent>
+                        <xs:extension base="xs:string">
+                            <xs:attribute name="Removable" type="BooleanRestriction"/>
+                        </xs:extension>
+                    </xs:simpleContent>
+                </xs:complexType>
+            </xs:element>
+
+            <xs:element name="Features" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="Microsoft" minOccurs="0" maxOccurs="1">
+                            <xs:complexType>
+                                <xs:sequence>
+                                    <xs:element name="Feature" minOccurs="0" maxOccurs="unbounded">
+                                        <xs:complexType>
+                                            <xs:simpleContent>
+                                                <xs:extension base="xs:string">
+                                                    <xs:attribute name="Removable" type="BooleanRestriction"/>
+                                                </xs:extension>
+                                            </xs:simpleContent>
+                                        </xs:complexType>
+                                    </xs:element>
+                                </xs:sequence>
+                                <xs:attribute name="Removable" type="BooleanRestriction"/>
+                            </xs:complexType>
+                        </xs:element>
+                        <xs:element name="OEM" minOccurs="0" maxOccurs="1">
+                            <xs:complexType>
+                                <xs:sequence>
+                                    <xs:element name="Feature" minOccurs="0" maxOccurs="unbounded">
+                                        <xs:complexType>
+                                            <xs:simpleContent>
+                                                <xs:extension base="xs:string">
+                                                    <xs:attribute name="Removable" type="BooleanRestriction"/>
+                                                </xs:extension>
+                                            </xs:simpleContent>
+                                        </xs:complexType>
+                                    </xs:element>
+                                </xs:sequence>
+                                <xs:attribute name="Removable" type="BooleanRestriction"/>
+                            </xs:complexType>
+                        </xs:element>
+                    </xs:sequence>
+                    <xs:attribute name="Removable" type="BooleanRestriction"/>
+                </xs:complexType>
+            </xs:element>
+
+            <xs:element name="AppXOptionalPackages" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="AppXID" minOccurs="1" maxOccurs="unbounded">
+                            <xs:complexType>
+                                <xs:simpleContent>
+                                    <xs:extension base="xs:string">
+                                        <xs:attribute name="Removable" type="BooleanRestriction"/>
+                                    </xs:extension>
+                                </xs:simpleContent>
+                            </xs:complexType>
+                        </xs:element>
+                    </xs:sequence>
+                    <xs:attribute name="Removable" type="BooleanRestriction"/>
+                </xs:complexType>
+            </xs:element>
+
+            <xs:element name="AdditionalFMs" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="AdditionalFM" minOccurs="1" maxOccurs="unbounded">
+                            <xs:complexType>
+                                <xs:simpleContent>
+                                    <xs:extension base="xs:string">
+                                        <xs:attribute name="Removable" type="BooleanRestriction"/>
+                                    </xs:extension>
+                                </xs:simpleContent>
+                            </xs:complexType>
+                        </xs:element>
+                    </xs:sequence>
+                    <xs:attribute name="Removable" type="BooleanRestriction"/>
+                </xs:complexType>
+            </xs:element>
+
+            <xs:element name="UserStoreMapData" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:attribute name="SourceDir" type="xs:string" />
+                    <xs:attribute name="UserStoreDir" type="xs:string" />
+                    <xs:attribute name="Removable" type="BooleanRestriction"/>
+                </xs:complexType>
+            </xs:element>
+
+            <xs:element name="PackageFiles" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="PackageFile" minOccurs="0" maxOccurs="unbounded">
+                            <xs:complexType>
+                                <xs:simpleContent>
+                                    <xs:extension base="xs:string">
+                                        <xs:attribute name="Removable" type="BooleanRestriction"/>
+                                    </xs:extension>
+                                </xs:simpleContent>
+                            </xs:complexType>
+                        </xs:element>
+                    </xs:sequence>
+                    <xs:attribute name="Removable" type="BooleanRestriction"/>
+                </xs:complexType>
+            </xs:element>
+
+            <xs:element name="DevicePlatformIDs" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="DevicePlatformID" minOccurs="1" maxOccurs="unbounded">
+                            <xs:complexType>
+                                <xs:simpleContent>
+                                    <xs:extension base="xs:string">
+                                        <xs:attribute name="Removable" type="BooleanRestriction"/>
+                                    </xs:extension>
+                                </xs:simpleContent>
+                            </xs:complexType>
+                        </xs:element>
+                    </xs:sequence>
+                    <xs:attribute name="Removable" type="BooleanRestriction"/>
+                </xs:complexType>
+            </xs:element>
+
+        </xs:all>
+    </xs:complexType>
+</xs:schema>

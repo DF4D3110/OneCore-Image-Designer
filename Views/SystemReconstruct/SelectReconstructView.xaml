@@ -5,6 +5,15 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              mc:Ignorable="d"
              d:DesignHeight="700" d:DesignWidth="1000">
+    <UserControl.Resources>
+        <!-- 包列表按 GroupKey 分组（CBS/SPKG/Driver/第三方驱动/OEMInput/FM·厂商） -->
+        <CollectionViewSource x:Key="GroupedPackages" Source="{Binding FilteredPackages}"
+                              IsLiveGroupingRequested="True">
+            <CollectionViewSource.GroupDescriptions>
+                <PropertyGroupDescription PropertyName="GroupKey"/>
+            </CollectionViewSource.GroupDescriptions>
+        </CollectionViewSource>
+    </UserControl.Resources>
     <Grid Margin="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -57,6 +66,12 @@
                                 Command="{Binding SelectAllCommand}"/>
                         <Button Content="全不选" Style="{StaticResource ICDSecondaryButton}" DockPanel.Dock="Left" Padding="8,4"
                                 Command="{Binding DeselectAllCommand}"/>
+                        <CheckBox IsChecked="{Binding ScanManifestChannel}" Content="注册表补扫驱动"
+                                  DockPanel.Dock="Left" VerticalAlignment="Center" Margin="8,0,4,0" FontSize="11"
+                                  ToolTip="WCOS 镜像可能没有 *.inf 可扫：用包 manifest 的注册表节点（DriverDatabase/Services/Class）补扫驱动包"/>
+                        <Button Content="离线注册表扫描" Style="{StaticResource ICDSecondaryButton}" DockPanel.Dock="Left" Padding="8,4"
+                                Command="{Binding ScanHiveCommand}"
+                                ToolTip="读镜像内离线 SYSTEM hive，枚举 Services 内核驱动 / Control\Class InfPath / DriverDatabase（日志进独立窗口，结果落 CSV）"/>
                         <ComboBox ItemsSource="{Binding FilterTypes}" SelectedItem="{Binding SelectedFilter}"
                                   Width="80" Height="24" DockPanel.Dock="Right" VerticalAlignment="Center"/>
                         <TextBox Text="{Binding FilterText, UpdateSourceTrigger=PropertyChanged}"
@@ -64,10 +79,35 @@
                                  ToolTip="搜索包名"/>
                     </DockPanel>
 
-                    <!-- 包列表 -->
-                    <ListBox Grid.Row="1" ItemsSource="{Binding FilteredPackages}"
+                    <!-- 包列表（按类型分组：CBS/SPKG/Driver/第三方驱动/OEMInput/FM·厂商；双击条目=预览 FM/OEMInput） -->
+                    <ListBox Grid.Row="1"
                              SelectedItem="{Binding SelectedItem}"
+                             MouseDoubleClick="PackageList_DoubleClick"
+                             ItemsSource="{Binding Source={StaticResource GroupedPackages}}"
                              ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                        <ListBox.GroupStyle>
+                            <GroupStyle>
+                                <GroupStyle.ContainerStyle>
+                                    <Style TargetType="{x:Type GroupItem}">
+                                        <Setter Property="Template">
+                                            <Setter.Value>
+                                                <ControlTemplate TargetType="{x:Type GroupItem}">
+                                                    <Expander IsExpanded="True" Margin="0,0,0,4">
+                                                        <Expander.Header>
+                                                            <StackPanel Orientation="Horizontal">
+                                                                <TextBlock Text="{Binding Name}" FontWeight="Bold" FontSize="13" Foreground="{StaticResource ICDBlue}"/>
+                                                                <TextBlock Text="{Binding ItemCount, StringFormat=({0})}" FontSize="11" Foreground="{StaticResource ICDSubText}" Margin="6,2,0,0"/>
+                                                            </StackPanel>
+                                                        </Expander.Header>
+                                                        <ItemsPresenter Margin="14,2,0,0"/>
+                                                    </Expander>
+                                                </ControlTemplate>
+                                            </Setter.Value>
+                                        </Setter>
+                                    </Style>
+                                </GroupStyle.ContainerStyle>
+                            </GroupStyle>
+                        </ListBox.GroupStyle>
                         <ListBox.ItemTemplate>
                             <DataTemplate>
                                 <StackPanel Orientation="Horizontal">
@@ -132,6 +172,7 @@
                                     <TextBlock Text="涉及文件 (镜像内相对路径)" FontSize="12" FontWeight="Bold" VerticalAlignment="Center"/>
                                 </DockPanel>
                                 <TreeView Grid.Row="2" ItemsSource="{Binding PackageFileTree}"
+                                          MouseDoubleClick="FileTree_DoubleClick"
                                           FontFamily="Consolas" FontSize="11"
                                           ScrollViewer.HorizontalScrollBarVisibility="Auto"
                                           VirtualizingStackPanel.IsVirtualizing="True">
@@ -196,6 +237,9 @@
         <Border Grid.Row="3" Background="#FFF0F8FF" Padding="12,8" CornerRadius="4" Margin="0,12,0,0">
             <DockPanel>
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="外部驱动打包" Style="{StaticResource ICDSecondaryButton}" Padding="12,6" Margin="0,0,12,0"
+                            Command="{Binding ExtractDriversFromFolderCommand}"
+                            ToolTip="扫描外部目录的 INF（每个含 INF 的子目录成一个包），生成 wm.xml 源包，可选调 PkgGen 直接出 cab"/>
                     <Button Content="组件提取" FontSize="13" Padding="16,8" Margin="0,0,12,0"
                             Command="{Binding ExtractComponentsCommand}">
                         <Button.Style>

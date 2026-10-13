@@ -63,7 +63,13 @@
             <Border Style="{StaticResource StepChip}" Background="{Binding State4, Converter={StaticResource StepBrush}}">
                 <StackPanel Orientation="Horizontal">
                     <TextBlock Text="{Binding State4, Converter={StaticResource StepGlyph}}" FontWeight="Bold" Width="18"/>
-                    <TextBlock Text="4 打包"/>
+                    <TextBlock Text="4 驱动"/>
+                </StackPanel>
+            </Border>
+            <Border Style="{StaticResource StepChip}" Background="{Binding State5, Converter={StaticResource StepBrush}}">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="{Binding State5, Converter={StaticResource StepGlyph}}" FontWeight="Bold" Width="18"/>
+                    <TextBlock Text="5 打包"/>
                 </StackPanel>
             </Border>
         </StackPanel>
@@ -139,6 +145,69 @@
                         </StackPanel>
                     </WrapPanel>
                     <TextBlock Text="{Binding LastLog}" Foreground="{StaticResource ICDSubtle}" Margin="0,6,0,0" TextWrapping="Wrap"/>
+
+                    <!-- BSP 组件信息（统一表单：一次填写，自动分发到 machineinfo / DeviceInfo 注册表 / OEMDevicePlatform） -->
+                    <TextBlock Text="BSP 组件信息（选填：在④勾选组件后生效；留空处按包信息自动推导）" FontWeight="Bold" Margin="0,14,0,6"/>
+                    <WrapPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,4,0">
+                            <TextBlock Text="设备名" Style="{StaticResource Lbl}" ToolTip="QEMUArm64 → capability DEVICE_QEMUARM64 / OEMDEVICEPLATFORM_…"/>
+                            <TextBox Text="{Binding DeviceName, UpdateSourceTrigger=PropertyChanged}" Width="150" Style="{StaticResource Inp}"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,4,0">
+                            <TextBlock Text="PlatformIDs" Style="{StaticResource Lbl}" ToolTip="逗号分隔；* = 任意（现代样本默认）"/>
+                            <TextBox Text="{Binding DevicePlatformIds, UpdateSourceTrigger=PropertyChanged}" Width="220" Style="{StaticResource Inp}"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,4,0">
+                            <TextBlock Text="MinSectors" Style="{StaticResource Lbl}"/>
+                            <TextBox Text="{Binding MinSectorCount, UpdateSourceTrigger=PropertyChanged}" Width="110" Style="{StaticResource Inp}"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,4,0">
+                            <TextBlock Text="BIOS" Style="{StaticResource Lbl}"/>
+                            <ComboBox Width="100" Style="{StaticResource Inp}" SelectedIndex="{Binding BiosModeIndex}">
+                                <ComboBoxItem Content="UEFI"/>
+                                <ComboBoxItem Content="不写"/>
+                            </ComboBox>
+                        </StackPanel>
+                    </WrapPanel>
+                    <WrapPanel Margin="0,6,0,0">
+                        <StackPanel Orientation="Horizontal" Margin="0,0,4,0">
+                            <TextBlock Text="SocVersion" Style="{StaticResource Lbl}"/>
+                            <TextBox Text="{Binding SocVersion, UpdateSourceTrigger=PropertyChanged}" Width="90" Style="{StaticResource Inp}"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,4,0">
+                            <TextBlock Text="HWVersion" Style="{StaticResource Lbl}"/>
+                            <TextBox Text="{Binding HardwareVersion, UpdateSourceTrigger=PropertyChanged}" Width="90" Style="{StaticResource Inp}"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,4,0">
+                            <TextBlock Text="厂商" Style="{StaticResource Lbl}"/>
+                            <TextBox Text="{Binding DeviceManufacturer, UpdateSourceTrigger=PropertyChanged}" Width="110" Style="{StaticResource Inp}"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,4,0">
+                            <TextBlock Text="型号" Style="{StaticResource Lbl}"/>
+                            <TextBox Text="{Binding DeviceModel, UpdateSourceTrigger=PropertyChanged}" Width="150" Style="{StaticResource Inp}"/>
+                        </StackPanel>
+                    </WrapPanel>
+                    <WrapPanel Margin="0,6,0,0">
+                        <StackPanel Orientation="Horizontal" Margin="0,0,4,0">
+                            <TextBlock Text="MI 厂商" Style="{StaticResource Lbl}" ToolTip="machineinfo.xml Manufacturer（留空=包 owner）"/>
+                            <TextBox Text="{Binding MiManufacturer, UpdateSourceTrigger=PropertyChanged}" Width="100" Style="{StaticResource Inp}"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,4,0">
+                            <TextBlock Text="MI 家族" Style="{StaticResource Lbl}"/>
+                            <TextBox Text="{Binding MiFamily, UpdateSourceTrigger=PropertyChanged}" Width="100" Style="{StaticResource Inp}"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,4,0">
+                            <TextBlock Text="MI 产品名" Style="{StaticResource Lbl}"/>
+                            <TextBox Text="{Binding MiProductName, UpdateSourceTrigger=PropertyChanged}" Width="130" Style="{StaticResource Inp}"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,4,0">
+                            <TextBlock Text="MI SKU" Style="{StaticResource Lbl}"/>
+                            <TextBox Text="{Binding MiSku, UpdateSourceTrigger=PropertyChanged}" Width="60" Style="{StaticResource Inp}"/>
+                        </StackPanel>
+                    </WrapPanel>
+                    <TextBlock Text="{Binding MachineInfoEraHint}" Foreground="#FFC62828" FontSize="11" Margin="0,4,0,0"
+                               TextWrapping="Wrap"
+                               Visibility="{Binding ShowMachineInfoEraHint, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                 </StackPanel>
             </GroupBox>
 
@@ -220,6 +289,10 @@
                     <Button Content="＋ 在当前盘加分区" Click="AddPart_Click" Padding="10,4" Margin="0,0,6,0"/>
                     <Button Content="－ 删除选中分区" Click="DelPart_Click" Padding="10,4" Margin="0,0,6,0"
                             IsEnabled="{Binding HasSelection}"/>
+                    <Button Content="↑ 上移分区" Click="PartUp_Click" Padding="10,4" Margin="0,0,4,0"
+                            IsEnabled="{Binding HasSelection}" ToolTip="选中分区在当前盘内前移一位（GPT 条目顺序）"/>
+                    <Button Content="↓ 下移分区" Click="PartDown_Click" Padding="10,4" Margin="0,0,6,0"
+                            IsEnabled="{Binding HasSelection}" ToolTip="选中分区在当前盘内后移一位"/>
                     <Button Content="把选中分区移到当前盘" Click="MoveSelectedHere_Click" Padding="10,4" Margin="0,0,8,0"
                             IsEnabled="{Binding CanMove}"/>
                     <Button Content="另存为自定义模板…" Click="SaveTemplate_Click" Padding="10,4" Margin="0,0,8,0"/>
@@ -320,7 +393,49 @@
             </GroupBox>
 
             <!-- 步4：打包 -->
-            <GroupBox Header="生成 FM + CAB（已验证通过）" Padding="14" Visibility="{Binding ShowStep4}">
+            <!-- 步4：驱动 -->
+            <GroupBox Header="驱动处理（可跳过：不配驱动直接点下一步）" Padding="14" Visibility="{Binding ShowStep4}">
+                <DockPanel>
+                    <StackPanel DockPanel.Dock="Top">
+                        <CheckBox Content="随布局一并生成驱动包" IsChecked="{Binding WantDrivers}" FontWeight="Bold" Margin="0,0,0,8"
+                                  ToolTip="递归扫描所选目录下全部 *.inf，按所在目录分组，各生成 &lt;ns&gt;.&lt;InfName&gt; 源包（wm.xml 官方范式），FeatureID 自动挂入 FM"/>
+                        <WrapPanel Margin="0,0,0,8">
+                            <TextBlock Text="驱动源目录" Style="{StaticResource Lbl}"/>
+                            <TextBox Text="{Binding DriverScanRoot, UpdateSourceTrigger=PropertyChanged}" Width="380" Style="{StaticResource Inp}"/>
+                            <Button Content="浏览…" Click="BrowseDriverRoot_Click" Padding="10,4" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                            <Button x:Name="BtnScanDrv" Content="扫描预览" Click="ScanDrivers_Click" Padding="12,4" Margin="8,0,0,0" VerticalAlignment="Center"
+                                    Background="{StaticResource ICDBlue}" Foreground="White" BorderThickness="0"/>
+                            <CheckBox Content="生成源包后直接调 PkgGen 出 cab" IsChecked="{Binding DriverRunPkgGen}" Margin="14,0,0,0" VerticalAlignment="Center"
+                                      ToolTip="PkgGen.exe 从已安装的 ADK 工具里自动发现；不勾则只出 wm.xml 源包，交 addonkit buildpkg 构建"/>
+                        </WrapPanel>
+                        <WrapPanel Margin="0,0,0,8">
+                            <TextBlock Text="包命名空间" Style="{StaticResource Lbl}"/>
+                            <TextBox Text="{Binding DriverNamespace, UpdateSourceTrigger=PropertyChanged}" Width="110" Style="{StaticResource Inp}"
+                                     ToolTip="包名=&lt;ns&gt;.&lt;InfName&gt;；addonkit 默认 Drivers，厂商可自定义（如 iMX）"/>
+                            <TextBlock Text="Feature 分组" Style="{StaticResource Lbl}" Margin="12,0,0,0"/>
+                            <TextBox Text="{Binding DriverFeatureGroup, UpdateSourceTrigger=PropertyChanged}" Width="160" Style="{StaticResource Inp}"
+                                     ToolTip="NXP 范式：所有驱动共用一个 FeatureID（如 IMX_DRIVERS）；留空=每包一个 &lt;NS&gt;_&lt;INF&gt;（addonkit 范式）"/>
+                            <TextBlock Text="{Binding DriverPreviewSummary}" VerticalAlignment="Center" Margin="16,0,0,0"
+                                       Foreground="{StaticResource ICDSubtle}"/>
+                        </WrapPanel>
+                    </StackPanel>
+                    <!-- 扫描结果列表：添加了什么一目了然，可单行移除 -->
+                    <DataGrid ItemsSource="{Binding DriverPreview}" AutoGenerateColumns="False" IsReadOnly="True"
+                              HeadersVisibility="Column" GridLinesVisibility="Horizontal" MaxHeight="300"
+                              CanUserAddRows="False" SelectionMode="Single">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="驱动包名" Binding="{Binding OutputName}" Width="240"/>
+                            <DataGridTextColumn Header="FeatureID" Binding="{Binding FeatureId}" Width="200"/>
+                            <DataGridTextColumn Header="INF 数" Binding="{Binding InfCount}" Width="60"/>
+                            <DataGridTextColumn Header="INF 文件" Binding="{Binding InfList}" Width="*"/>
+                            <DataGridTextColumn Header="源目录" Binding="{Binding SourceDir}" Width="2*" Visibility="Collapsed"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </DockPanel>
+            </GroupBox>
+
+            <!-- 步5：打包 -->
+            <GroupBox Header="生成 FM + CAB（已验证通过）" Padding="14" Visibility="{Binding ShowStep5}">
                 <StackPanel>
                     <TextBlock Text="布局已通过验证，可打包。签名需要测试证书 .pfx（可选）。" Foreground="{StaticResource ICDSubtle}" Margin="0,0,0,10"/>
                     <DockPanel Margin="0,0,0,8">
@@ -329,6 +444,22 @@
                         <TextBox x:Name="TxtOutBox" Text="{Binding OutputDir, UpdateSourceTrigger=PropertyChanged}" Height="26" VerticalContentAlignment="Center"/>
                     </DockPanel>
                     <CheckBox Content="生成后签名（需 .pfx）" IsChecked="{Binding WantSign}" Margin="0,0,0,10"/>
+
+                    <TextBlock Text="BSP 组件（可单独造，不必随布局；勾选后随「生成」一并产出，或点右侧按钮单独生成）"
+                               FontWeight="Bold" Margin="0,0,0,4"/>
+                    <WrapPanel Margin="0,0,0,10">
+                        <CheckBox Content="OEMDevicePlatform 包" IsChecked="{Binding WantDevicePlatform}" Margin="0,0,14,0" VerticalAlignment="Center"/>
+                        <CheckBox Content="DeviceInfo 注册表包" IsChecked="{Binding WantDeviceInfo}" Margin="0,0,14,0" VerticalAlignment="Center"/>
+                        <CheckBox Content="machineinfo.xml" IsChecked="{Binding WantMachineInfo}" Margin="0,0,14,0" VerticalAlignment="Center"
+                                  ToolTip="17666+ 机制；OEMInput 用 &lt;MachineInfoFile&gt; 引用"/>
+                        <CheckBox Content="SMBIOS 源包（IoT）" IsChecked="{Binding WantSmbios}" Margin="0,0,14,0" VerticalAlignment="Center"
+                                  ToolTip="Custom.SMBIOS.wm.xml + SMBIOS.CFG，供 PkgGen/addonkit 出包"/>
+                        <CheckBox Content="驱动包（第 4 步配置）" IsChecked="{Binding WantDrivers}" Margin="0,0,14,0" VerticalAlignment="Center"
+                                  ToolTip="在驱动步扫描预览后，这里勾选即随布局一并生成"/>
+                        <Button x:Name="BtnBuildComponents" Content="仅生成所选组件" Click="BuildComponents_Click" Padding="12,5"
+                                Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    </WrapPanel>
+
                     <Button x:Name="BtnBuild" Content="生成 FM + CAB" Click="Build_Click" Padding="16,6" FontWeight="Bold"
                             HorizontalAlignment="Left" Background="{StaticResource ICDBlue}" Foreground="White" BorderThickness="0"/>
                     <TextBlock Text="{Binding LastLog}" Foreground="{StaticResource ICDSubtle}" Margin="0,10,0,0" TextWrapping="Wrap"/>
@@ -338,11 +469,16 @@
 
         <Border Grid.Row="3" Margin="0,12,0,0" Padding="0,10,0,0"
                 BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0">
-        <DockPanel>
-            <Button DockPanel.Dock="Right" Content="下一步 ›" Click="Next_Click" Padding="18,6" Margin="8,0,0,0"
-                    IsEnabled="{Binding CanNext}" Background="{StaticResource ICDBlue}" Foreground="White" BorderThickness="0"/>
-            <Button DockPanel.Dock="Right" Content="‹ 上一步" Click="Prev_Click" Padding="14,6" IsEnabled="{Binding CanPrev}"/>
-        </DockPanel>
+        <Grid>
+            <!-- 左：步5 才显示「生成」快捷键位说明；右：等宽等高的上一步/下一步 -->
+            <TextBlock VerticalAlignment="Center" Foreground="{StaticResource ICDSubtle}" FontSize="11"
+                       Text="{Binding StepInfoText}" TextTrimming="CharacterEllipsis" Margin="0,0,240,0"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="‹ 上一步" Click="Prev_Click" Width="110" Height="34" IsEnabled="{Binding CanPrev}"/>
+                <Button Content="下一步 ›" Click="Next_Click" Width="110" Height="34" Margin="8,0,0,0"
+                        IsEnabled="{Binding CanNext}" Background="{StaticResource ICDBlue}" Foreground="White" BorderThickness="0"/>
+            </StackPanel>
+        </Grid>
         </Border>
     </Grid>
 </UserControl>

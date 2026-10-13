@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using UnifiedUpdatePlatform.Services.WindowsUpdate;
 using UnifiedUpdatePlatform.Services.WindowsUpdate.Downloads;
+using OneCore_Image_Designer.Services;
 
 internal static class Program
 {
@@ -44,15 +45,16 @@ internal static class Program
         };
         if (!Enum.TryParse<OSSkuId>(skuName, true, out var sku))
             throw new ArgumentException($"Unknown reporting SKU: {request.ReportingSku}");
-        if (!Enum.TryParse<MachineType>(request.Architecture, true, out var architecture))
+        if (!Enum.TryParse<MachineType>(UupQueryParser.ParseArchitecture(request.Architecture), true, out var architecture))
             throw new ArgumentException($"Unknown architecture: {request.Architecture}");
 
-        var ctac = new CTAC(sku, request.ReportingVersion, architecture, request.FlightRing,
+        var ctac = new CTAC(sku, UupQueryParser.ParseVersion(request.ReportingVersion), architecture, request.FlightRing,
             request.FlightingBranchName, request.BranchReadinessLevel, request.CurrentBranch,
             request.ReleaseType, request.SyncCurrentVersionOnly, false, request.ContentType);
         var filters = request.Filters.Length == 0
             ? new[] { FileExchangeV3UpdateFilter.ProductRelease }
-            : request.Filters.Select(f => Enum.Parse<FileExchangeV3UpdateFilter>(f, true)).Distinct().ToArray();
+            : UupQueryParser.ParseFilters(request.Filters)
+                .Select(f => Enum.Parse<FileExchangeV3UpdateFilter>(f, true)).ToArray();
 
         var payloads = new Dictionary<string, UpdateData>(StringComparer.OrdinalIgnoreCase);
         var entries = new Dictionary<string, ScanEntry>(StringComparer.OrdinalIgnoreCase);
@@ -103,7 +105,7 @@ internal static class Program
 
     private static async Task<int> DownloadAsync(string payloadPath, string updateId, string outputDirectory, string archText)
     {
-        if (!Enum.TryParse<MachineType>(archText, true, out var architecture))
+        if (!Enum.TryParse<MachineType>(UupQueryParser.ParseArchitecture(archText), true, out var architecture))
             throw new ArgumentException($"Unknown architecture: {archText}");
         if (!File.Exists(payloadPath)) throw new FileNotFoundException("Scan payload file not found.", payloadPath);
 
@@ -111,8 +113,7 @@ internal static class Program
         await using var gzip = new GZipStream(file, CompressionMode.Decompress);
         var payloads = await JsonSerializer.DeserializeAsync<Dictionary<string, UpdateData>>(gzip, JsonOptions)
             ?? throw new InvalidDataException("Scan payload file is empty.");
-        if (!payloads.TryGetValue(updateId, out var update))
-            throw new KeyNotFoundException($"Update {updateId} is not present in the scan payload.");
+        var update = UupPayloadLocator.FindUpdate(payloads, updateId);
 
         Directory.CreateDirectory(outputDirectory);
         Console.WriteLine($"Downloading: {update.Xml?.LocalizedProperties?.Title ?? updateId}");

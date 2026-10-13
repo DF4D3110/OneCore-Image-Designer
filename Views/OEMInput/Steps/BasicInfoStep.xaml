@@ -29,6 +29,16 @@
                     <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="#FF0C5460" Margin="0,2,0,0"
                                Visibility="{Binding Parent.OEMInputData.IsSchemaV2, Converter={StaticResource BooleanToVisibilityConverter}}"
                                Text="V2：DeviceLayoutType 元素（值即 SOC，官方 V1→V2 直接赋值）+ 扁平 Languages(Default)，不写 BootUILanguage/BootLocale（官方为计算属性，写进去反而通不过 XSD）。对应 20274 起的 ModernPC 包。"/>
+
+                    <!-- 目标 build：XSD 校验按该 build 的官方 schema 家族执行（41 版 featureapi 实证） -->
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <TextBlock Text="目标 build（选填）:" FontSize="12" VerticalAlignment="Center" Margin="0,0,8,0"
+                                   ToolTip="填写实际构像使用的 OS build（如 15063/17763/20348），XSD 校验将按该时代官方 schema 家族执行；选包根时会自动探测。留空=20348 基线。"/>
+                        <TextBox MinWidth="90" MinHeight="30" VerticalContentAlignment="Center"
+                                 Text="{Binding Parent.TargetBuild, UpdateSourceTrigger=PropertyChanged, TargetNullValue=0}"/>
+                        <TextBlock Text="{Binding Parent.SchemaFamilyHint}" FontSize="11" VerticalAlignment="Center"
+                                   Margin="12,0,0,0" Foreground="{StaticResource ICDSubText}" TextWrapping="Wrap"/>
+                    </StackPanel>
                 </StackPanel>
             </Border>
 

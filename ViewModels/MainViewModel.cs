@@ -50,6 +50,7 @@ namespace OneCore_Image_Designer.ViewModels
         private UupViewModel? _uupVM;
         private SxsViewModel? _sxsVM;
         private AddonKitViewModel? _addonKitVM;
+        private UpdateAppViewModel? _updateAppVM;
 
         public void NavigateToUup()
         {
@@ -83,6 +84,18 @@ namespace OneCore_Image_Designer.ViewModels
         }
 
         [RelayCommand] public void OpenAddonKit() => NavigateToAddonKit();
+
+        /// <summary>打开（或激活）updateapp 更新调度标签页。</summary>
+        public void NavigateToUpdateApp()
+        {
+            OpenTab("updateapp", "updateapp 更新调度", () =>
+            {
+                _updateAppVM ??= new UpdateAppViewModel(this);
+                return ((object)_updateAppVM, null);
+            });
+        }
+
+        [RelayCommand] public void OpenUpdateApp() => NavigateToUpdateApp();
 
         /// <summary>打开（或激活）CBS 构建标签页。</summary>
         [RelayCommand] public void OpenCbsBuild() => NavigateToCbsBuild();
