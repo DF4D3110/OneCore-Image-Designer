@@ -204,6 +204,26 @@ namespace OneCore_Image_Designer.Services
                 L("");
                 L("目标输出目录: " + cfg.OutputDir);
 
+                // ── 源索引：**只建一次**并在解包过程中增量维护 ──
+                // base 可能是完整镜像（实测 8 GB / 数万文件），每个包重建一遍不可接受。
+                var index = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var d in cfg.BaseDirs.Where(Directory.Exists))
+                {
+                    L($"建立源索引: {d}");
+                    int n = 0;
+                    foreach (var f in UpdatePackageService.SafeEnumerateFiles(d))
+                    {
+                        try
+                        {
+                            string hash = Sha256OfFile(f);
+                            if (!index.ContainsKey(hash)) { index[hash] = f; n++; }
+                        }
+                        catch { }
+                    }
+                    L($"  +{n}");
+                }
+                L($"源索引共 {index.Count} 条（后续增量维护，不再重扫）");
+
                 // ── 第一阶段 ──
                 L("");
                 L("═══ 第一阶段：neutral-mergedcomponents ═══");
@@ -212,7 +232,7 @@ namespace OneCore_Image_Designer.Services
                 {
                     ct.ThrowIfCancellationRequested();
                     progress?.Invoke(++done, total, p.Name);
-                    int n = ExtractOne(p, cfg, log);
+                    int n = ExtractOne(p, cfg, index, log);
                     res.TotalFiles += n;
                 }
 
@@ -240,7 +260,7 @@ namespace OneCore_Image_Designer.Services
                 {
                     ct.ThrowIfCancellationRequested();
                     progress?.Invoke(++done, total, p.Name);
-                    int n = ExtractOne(p, cfg, log);
+                    int n = ExtractOne(p, cfg, index, log);
                     res.TotalFiles += n;
 
                     // 语言相关 .cat 截断：优先用独立语言包版本替代
@@ -261,7 +281,7 @@ namespace OneCore_Image_Designer.Services
         /// 解一个包。关键：把【输出目录】也作为源目录，使 <see cref="UpdatePackageService.Extract"/>
         /// 重新索引"当前已解出的一切"—— 这正是顺序规则起作用的地方。
         /// </summary>
-        static int ExtractOne(Package p, Config cfg, Action<string>? log)
+        static int ExtractOne(Package p, Config cfg, Dictionary<string, string> index, Action<string>? log)
         {
             try
             {
@@ -270,15 +290,36 @@ namespace OneCore_Image_Designer.Services
                     PackagePath = p.CabPath,
                     OutputDir = cfg.OutputDir,
                     ListOnly = false,
-                    BaseDirs = new List<string>(cfg.BaseDirs) { cfg.OutputDir }   // ★ 已解出内容当源
+                    // ★ 关键：把维护中的索引传进去。它既含 base 镜像的文件，也含
+                    //   此前各包已解出的文件 —— 顺序规则正是靠"当前已解出的一切"起作用。
+                    SourceIndex = index
                 };
                 var r = UpdatePackageService.Extract(sub, m => log?.Invoke("    " + m));
                 p.Extracted = r.Success;
                 p.FilesOut = r.FilesExtracted;
                 p.Error = r.Error.Length > 0 ? r.Error : null;
+
+                // 增量维护：把刚写出的文件加入索引，供后续包当 delta 源
+                int added = 0;
+                foreach (var f in r.WrittenFiles)
+                {
+                    try
+                    {
+                        string h = Sha256OfFile(f);
+                        if (!index.ContainsKey(h)) { index[h] = f; added++; }
+                    }
+                    catch { }
+                }
+                if (added > 0) log?.Invoke($"    索引 +{added}（共 {index.Count}）");
                 return r.FilesExtracted;
             }
             catch (Exception ex) { p.Error = ex.Message; return 0; }
+        }
+
+        static string Sha256OfFile(string path)
+        {
+            using var fs = File.OpenRead(path);
+            return Convert.ToHexString(SHA256.HashData(fs));
         }
 
         /// <summary>

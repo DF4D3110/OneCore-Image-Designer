@@ -92,6 +92,9 @@ namespace OneCore_Image_Designer.Services
             public int HashMismatches;
             public readonly List<string> Log = new();
 
+            /// <summary>本次实际写出的文件绝对路径 —— 供调用方增量更新源索引。</summary>
+            public readonly List<string> WrittenFiles = new();
+
             public string Summary()
                 => $"布局={Detected} 解出={FilesExtracted} 跳过={FilesSkipped} 缺源={FilesMissingSource} 校验失败={HashMismatches}";
         }
@@ -282,14 +285,34 @@ namespace OneCore_Image_Designer.Services
         // MSDelta（PA30 载荷还原）
         // ────────────────────────────────────────────────────────────────
 
-        [DllImport("msdelta.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        static extern int ApplyDeltaB(long flags, IntPtr source, IntPtr delta, out IntPtr target);
+        // ── msdelta 互操作 ──
+        // wcp.h / msdelta.h：
+        //   typedef struct _DELTA_INPUT { union {LPCVOID lpcStart; VOID* lpStart;}; SIZE_T uSize; BOOL Editable; } DELTA_INPUT;
+        //   typedef struct _DELTA_OUTPUT { VOID* lpStart; SIZE_T uSize; } DELTA_OUTPUT;
+        //   BOOL ApplyDeltaB(DELTA_FLAGS Flags, DELTA_INPUT Source, DELTA_INPUT Delta, DELTA_OUTPUT* Target);
+        //   ↑ Source 与 Delta 是【按值】传结构体；Target 是指针。
+        //   早期实现把前两者写成 IntPtr（传指针）且漏了 Editable 字段，
+        //   原生侧于是把指针当结构体内容用，直接 Fatal error 0x80131506。
+        [StructLayout(LayoutKind.Sequential)]
+        struct DeltaInput
+        {
+            public IntPtr p;        // 数据指针（无源时传 NULL）
+            public UIntPtr size;    // SIZE_T
+            public int editable;    // BOOL
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct DeltaOutput
+        {
+            public IntPtr p;
+            public UIntPtr size;
+        }
+
+        [DllImport("msdelta.dll", SetLastError = true)]
+        static extern int ApplyDeltaB(uint flags, DeltaInput source, DeltaInput delta, out DeltaOutput target);
 
         [DllImport("msdelta.dll", SetLastError = true)]
         static extern int DeltaFree(IntPtr memory);
-
-        [StructLayout(LayoutKind.Sequential)]
-        struct DeltaInput { public IntPtr p; public long size; }
 
         /// <summary>
         /// 对一份源文件应用 PSF 里的 PA30 载荷。
@@ -298,41 +321,71 @@ namespace OneCore_Image_Designer.Services
         public static byte[]? ApplyPayload(byte[]? sourceBytes, byte[] deltaBytes, out string error)
         {
             error = "";
-            IntPtr srcBuf = IntPtr.Zero, deltaBuf = IntPtr.Zero, target = IntPtr.Zero;
+            if (deltaBytes == null || deltaBytes.Length == 0) { error = "载荷为空"; return null; }
+
+            // 先带源试；失败再试无源（部分 delta 自包含，不需要源文件）
+            var first = TryApply(sourceBytes, deltaBytes, out string err1);
+            if (first != null) return first;
+            if (sourceBytes != null)
+            {
+                var second = TryApply(null, deltaBytes, out string err2);
+                if (second != null) return second;
+                error = $"带源失败({err1})；无源也失败({err2})";
+                return null;
+            }
+            error = err1;
+            return null;
+        }
+
+        static byte[]? TryApply(byte[]? sourceBytes, byte[] deltaBytes, out string error)
+        {
+            error = "";
+            IntPtr srcBuf = IntPtr.Zero, deltaBuf = IntPtr.Zero, resultBuffer = IntPtr.Zero;
             try
             {
                 deltaBuf = Marshal.AllocHGlobal(deltaBytes.Length);
                 Marshal.Copy(deltaBytes, 0, deltaBuf, deltaBytes.Length);
 
-                IntPtr srcInput = IntPtr.Zero;
                 if (sourceBytes != null && sourceBytes.Length > 0)
                 {
                     srcBuf = Marshal.AllocHGlobal(sourceBytes.Length);
                     Marshal.Copy(sourceBytes, 0, srcBuf, sourceBytes.Length);
-                    var di = new DeltaInput { p = srcBuf, size = sourceBytes.Length };
-                    srcInput = Marshal.AllocHGlobal(Marshal.SizeOf<DeltaInput>());
-                    Marshal.StructureToPtr(di, srcInput, false);
                 }
 
-                var dd = new DeltaInput { p = deltaBuf, size = deltaBytes.Length };
-                IntPtr deltaInput = Marshal.AllocHGlobal(Marshal.SizeOf<DeltaInput>());
-                Marshal.StructureToPtr(dd, deltaInput, false);
+                var src = new DeltaInput
+                {
+                    p = srcBuf,
+                    size = (UIntPtr)(sourceBytes?.Length ?? 0),
+                    editable = 0
+                };
+                var dlt = new DeltaInput
+                {
+                    p = deltaBuf,
+                    size = (UIntPtr)deltaBytes.Length,
+                    editable = 0
+                };
 
-                // flags = 0（不带源）；带源时仍需 0，源通过 DELTA_INPUT 传入
-                int hr = ApplyDeltaB(0, srcInput, deltaInput, out target);
-                if (hr < 0 || target == IntPtr.Zero) { error = $"ApplyDeltaB 失败 0x{hr:X8}"; return null; }
+                // 第 4 参数是 DELTA_OUTPUT*；用 out DeltaOutput 让封送层负责这一层指针，
+                // 避免再手工解引用造成结构体错位。
+                int hr = ApplyDeltaB(0 /* DELTA_FLAG_NONE */, src, dlt, out DeltaOutput outp);
+                if (hr == 0 || outp.p == IntPtr.Zero) { error = $"ApplyDeltaB=0x{hr:X8}"; return null; }
 
-                // 头 4 字节是大小
-                int size = Marshal.ReadInt32(target);
-                if (size <= 0) { error = "还原大小为 0"; return null; }
+                long size = (long)outp.size;
+                // 上限保护：msdelta 若因源不匹配而输出异常值，绝不能让 new byte[] 直接爆掉
+                if (size <= 0 || size > 1024L * 1024 * 1024) { error = $"输出大小异常 {size}"; return null; }
+
                 var outBytes = new byte[size];
-                Marshal.Copy(target + 4, outBytes, 0, size);
+                Marshal.Copy(outp.p, outBytes, 0, (int)size);
+                // 记住数据缓冲，交给 finally 用 DeltaFree 释放（DeltaFree 要的是缓冲指针，
+                // 不是 DELTA_OUTPUT 结构体本身 —— 释放错对象会造成堆损坏 0xC0000374）
+                resultBuffer = outp.p;
                 return outBytes;
             }
             catch (Exception ex) { error = ex.GetType().Name + ": " + ex.Message; return null; }
             finally
             {
-                if (target != IntPtr.Zero) DeltaFree(target);
+                // DeltaFree 要的是【数据缓冲】指针（DELTA_OUTPUT.lpStart）
+                if (resultBuffer != IntPtr.Zero) DeltaFree(resultBuffer);
                 if (srcBuf != IntPtr.Zero) Marshal.FreeHGlobal(srcBuf);
                 if (deltaBuf != IntPtr.Zero) Marshal.FreeHGlobal(deltaBuf);
             }
@@ -352,6 +405,14 @@ namespace OneCore_Image_Designer.Services
             public List<string> BaseDirs = new();
             /// <summary>只解析索引与列出条目，不写文件。</summary>
             public bool ListOnly = true;
+
+            /// <summary>
+            /// 调用方已建好的源索引（SHA256 十六进制 → 文件路径）。
+            /// 传了就**直接复用**，不再遍历 <see cref="BaseDirs"/>。
+            /// 原因：base 可能是完整镜像（实测 8 GB / 数万文件），每处理一个包重建一遍
+            /// 的代价不可接受（40 个包就是 40 遍）。由调用方建一次并增量维护。
+            /// </summary>
+            public Dictionary<string, string>? SourceIndex;
         }
 
         public static Result Extract(Config cfg, Action<string>? log = null)
@@ -371,17 +432,28 @@ namespace OneCore_Image_Designer.Services
                                                 .OrderBy(f => f, StringComparer.OrdinalIgnoreCase));
                 L($"待处理包: {packages.Count} 个");
 
-                // 源文件索引（SHA256 → 路径），用于 delta 还原
-                var baseIndex = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var d in cfg.BaseDirs.Where(Directory.Exists))
+                // 源文件索引（SHA256 → 路径），用于 delta 还原。
+                // 若调用方已提供（cfg.SourceIndex）则直接复用，绝不重复遍历 base ——
+                // base 可能是完整镜像（实测 8 GB / 数万文件）。
+                Dictionary<string, string> baseIndex;
+                if (cfg.SourceIndex != null)
                 {
-                    L($"建立源索引: {d}");
-                    foreach (var f in Directory.EnumerateFiles(d, "*", SearchOption.AllDirectories))
-                    {
-                        try { baseIndex[Sha256Of(f)] = f; } catch { }
-                    }
+                    baseIndex = cfg.SourceIndex;
+                    L($"源索引: 复用调用方提供的 {baseIndex.Count} 条");
                 }
-                L($"源索引条目: {baseIndex.Count}");
+                else
+                {
+                    baseIndex = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var d in cfg.BaseDirs.Where(Directory.Exists))
+                    {
+                        L($"建立源索引: {d}");
+                        foreach (var f in SafeEnumerateFiles(d))
+                        {
+                            try { baseIndex[Sha256Of(f)] = f; } catch { }
+                        }
+                    }
+                    L($"源索引条目: {baseIndex.Count}");
+                }
 
                 foreach (var cab in packages)
                 {
@@ -426,10 +498,12 @@ namespace OneCore_Image_Designer.Services
                             try { srcBytes = File.ReadAllBytes(sp); } catch { }
                         }
 
+                        // 注意：缺源也照样尝试 —— 部分 delta 自包含，ApplyPayload 会先带源、
+                        // 再退回无源。只有两者都失败才算真失败。
                         var got = ApplyPayload(srcBytes, payload, out string err);
                         if (got == null)
                         {
-                            if (srcBytes == null) { res.FilesMissingSource++; L($"    缺源: {e.Name}"); }
+                            if (srcBytes == null) { res.FilesMissingSource++; L($"    缺源且无法自包含: {e.Name} — {err}"); }
                             else { res.FilesSkipped++; L($"    失败: {e.Name} — {err}"); }
                             continue;
                         }
@@ -438,6 +512,7 @@ namespace OneCore_Image_Designer.Services
                         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                         File.WriteAllBytes(target, got);
                         res.FilesExtracted++;
+                        res.WrittenFiles.Add(target);
 
                         if (e.TargetHash.Length > 0)
                         {
@@ -454,6 +529,43 @@ namespace OneCore_Image_Designer.Services
                 return res;
             }
             catch (Exception ex) { res.Error = ex.GetType().Name + ": " + ex.Message; return res; }
+        }
+
+
+        /// <summary>
+        /// 安全递归枚举文件：逐目录 try/catch，并**跳过重解析点**（junction / symlink）。
+        /// 为什么必须这样：镜像里有 `Documents and Settings`、`Application Data` 这类
+        /// 旧式 junction，<c>EnumerateFiles(..., AllDirectories)</c> 碰到会直接抛
+        /// <c>UnauthorizedAccessException</c>，而把 try/catch 放在文件循环里是救不了的
+        /// —— 异常来自枚举器本身。
+        /// </summary>
+        public static IEnumerable<string> SafeEnumerateFiles(string root)
+        {
+            if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root)) yield break;
+            var stack = new Stack<string>();
+            stack.Push(root);
+            while (stack.Count > 0)
+            {
+                string dir = stack.Pop();
+
+                // 目录本身是可读的普通目录吗？
+                try
+                {
+                    var attr = File.GetAttributes(dir);
+                    if ((attr & FileAttributes.ReparsePoint) != 0) continue;
+                }
+                catch { continue; }
+
+                string[] files;
+                try { files = Directory.GetFiles(dir); }
+                catch { files = Array.Empty<string>(); }
+                foreach (var f in files) yield return f;
+
+                string[] subs;
+                try { subs = Directory.GetDirectories(dir); }
+                catch { subs = Array.Empty<string>(); }
+                foreach (var s in subs) stack.Push(s);
+            }
         }
 
         static string Sha256Of(string path)
