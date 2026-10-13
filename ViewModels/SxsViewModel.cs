@@ -359,5 +359,113 @@ namespace OneCore_Image_Designer.ViewModels
         };
 
         private void Log(string text) => EnsureTaskLog("SxS 操作日志").Write(text);
+
+        // ─────────────── 系统组装（组件之间的联系 → 组装顺序 → 交给 CBS）───────────────
+        // 纯增量：不动上面任何现有成员。
+        // 对应 SystemAssemblyService：建依赖图 → 算闭包与拓扑序 → 按世代选通道执行。
+
+        [ObservableProperty] private string _assemblySourceDirs = string.Empty;
+        [ObservableProperty] private string _assemblyWinDir = string.Empty;
+        [ObservableProperty] private string _assemblySeeds = string.Empty;
+        [ObservableProperty] private bool _assemblyPlanOnly = true;
+        [ObservableProperty] private bool _isAssemblyRunning;
+        [ObservableProperty] private string _assemblySummary =
+            "系统组装：从 SxS 内容出发，先算清组件之间的依赖关系，排出安装顺序，再交给 CBS 通道执行。\n"
+            + "源目录可填多个，用分号分隔（例如包目录;Manifest 目录）。目标必须是【挂载的 VHD/VHDX】上的镜像。";
+
+        [RelayCommand]
+        private void RunAssemblyGraph()
+        {
+            try
+            {
+                var dirs = SplitDirs(AssemblySourceDirs);
+                if (dirs.Count == 0)
+                {
+                    MessageBox.Show("请填写至少一个 SxS 内容目录（多个用分号分隔）。", "依赖图",
+                        MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+                var sink = EnsureTaskLog("系统组装");
+                var g = SystemAssemblyService.BuildGraph(dirs, m => sink.Write(m));
+                string graph = SystemAssemblyService.RenderGraph(g, 40);
+                AssemblySummary = graph;
+                sink.Write(graph);
+                Status = $"依赖图：{g.Nodes.Count} 个节点，缺失依赖 {g.MissingDependencies}";
+                Log(Status);
+            }
+            catch (Exception ex)
+            {
+                AssemblySummary = "建图异常：" + ex.GetType().Name + ": " + ex.Message;
+                Log(AssemblySummary);
+            }
+        }
+
+        [RelayCommand(CanExecute = nameof(CanRunAssembly))]
+        private async Task RunAssemblyAsync()
+        {
+            var dirs = SplitDirs(AssemblySourceDirs);
+            if (dirs.Count == 0)
+            {
+                MessageBox.Show("请填写至少一个 SxS 内容目录（多个用分号分隔）。", "系统组装",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var cfg = new SystemAssemblyService.Config
+            {
+                SourceDirs = dirs,
+                WinDir = AssemblyWinDir?.Trim() ?? string.Empty,
+                SkuAssemblyFile = NativeSkuAssemblyFile?.Trim() ?? string.Empty,
+                UnattendXml = string.Empty,
+                PlanOnly = AssemblyPlanOnly,
+                Seeds = SplitDirs(AssemblySeeds)
+            };
+
+            IsAssemblyRunning = true;
+            RunAssemblyCommand.NotifyCanExecuteChanged();
+            RunAssemblyGraphCommand.NotifyCanExecuteChanged();
+            AssemblySummary = AssemblyPlanOnly ? "计算组装计划中…" : "执行组装中…（不要关闭程序）";
+            var sink = EnsureTaskLog("系统组装");
+            try
+            {
+                var res = await SystemAssemblyService.AssembleAsync(cfg, m => sink.Write(m));
+                var sb = new System.Text.StringBuilder();
+                if (res.Plan != null)
+                {
+                    sb.AppendLine(res.Plan.Summary());
+                    sb.AppendLine();
+                    sb.AppendLine("安装顺序（前 20）：");
+                    foreach (var k in res.Plan.Order.Take(20)) sb.AppendLine("  " + k);
+                    if (res.Plan.Missing.Count > 0)
+                        sb.AppendLine("缺失依赖：" + string.Join(", ", res.Plan.Missing.Take(10)));
+                }
+                if (res.Channel != null) sb.AppendLine().AppendLine(res.Channel.Reason);
+                if (res.Error.Length > 0) sb.AppendLine("错误：" + res.Error);
+                AssemblySummary = sb.ToString().TrimEnd();
+                Status = res.Success ? "组装流程完成。" : "组装失败：" + res.Error;
+                Log(Status);
+            }
+            catch (Exception ex)
+            {
+                AssemblySummary = "异常：" + ex.GetType().Name + ": " + ex.Message;
+                Log(AssemblySummary);
+            }
+            finally
+            {
+                sink.MarkFinished();
+                IsAssemblyRunning = false;
+                RunAssemblyCommand.NotifyCanExecuteChanged();
+                RunAssemblyGraphCommand.NotifyCanExecuteChanged();
+            }
+        }
+
+        bool CanRunAssembly() => !IsAssemblyRunning && !IsExploding && !IsPureExporting && !IsNativeRunning;
+
+        static List<string> SplitDirs(string? text)
+            => (text ?? string.Empty)
+               .Split(new[] { ';', '|' }, StringSplitOptions.RemoveEmptyEntries)
+               .Select(s => s.Trim().Trim('"'))
+               .Where(s => s.Length > 0)
+               .ToList();
     }
 }

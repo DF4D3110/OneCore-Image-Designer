@@ -2,7 +2,7 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <Grid Background="{StaticResource IcdStartBackground}" Margin="28">
-        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <StackPanel>
             <TextBlock Text="SxS / CBS 工具" FontSize="26" FontWeight="Light" Foreground="{StaticResource ICDTitleForeground}"/>
             <TextBlock Text="独立管理 pureSxS 与 explodeSxS，不与 UUP 下载流程混用。" Margin="0,6,0,18" Foreground="{StaticResource ICDSubtle}"/>
@@ -87,6 +87,31 @@
                             Style="{StaticResource ICDToolbarPrimaryButton}"/>
                 </StackPanel>
                 <TextBlock Text="{Binding NativeSummary}" TextWrapping="Wrap" Margin="0,10,0,0"
+                           Foreground="{StaticResource ICDAccentDark}"/>
+            </StackPanel>
+        </Expander>
+
+        <!-- 系统组装（纯增量新增）：组件依赖图 → 组装顺序 → 交给 CBS 通道 -->
+        <Expander Grid.Row="5" Margin="0,12,0,0" IsExpanded="False"
+                  Header="系统组装（依赖图 → 安装顺序 → CBS 通道）">
+            <StackPanel Margin="4,8,4,4">
+                <TextBlock TextWrapping="Wrap" Foreground="{StaticResource ICDSubtle}"
+                           Text="从 SxS 内容出发：先算清组件之间的依赖关系，排出安装顺序，再按镜像世代自动选 CBS 通道执行。目标镜像必须位于【挂载的 VHD/VHDX】上。"/>
+                <TextBlock Text="SxS 内容目录（多个用分号分隔，例如 包目录;Manifest 目录）" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <TextBox Text="{Binding AssemblySourceDirs, UpdateSourceTrigger=PropertyChanged}"/>
+                <TextBlock Text="目标镜像的 Windows 目录（执行时需要；只算计划可留空）" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <TextBox Text="{Binding AssemblyWinDir, UpdateSourceTrigger=PropertyChanged}"/>
+                <TextBlock Text="种子包（可留空 = 用全部包节点；多个用分号分隔）" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <TextBox Text="{Binding AssemblySeeds, UpdateSourceTrigger=PropertyChanged}"/>
+                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                    <CheckBox Content="只算计划（不修改镜像）" IsChecked="{Binding AssemblyPlanOnly}"
+                              VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    <Button Content="查看依赖图" Command="{Binding RunAssemblyGraphCommand}"
+                            Style="{StaticResource ICDToolbarButton}" Margin="0,0,8,0"/>
+                    <Button Content="计算并执行组装" Command="{Binding RunAssemblyCommand}"
+                            Style="{StaticResource ICDToolbarPrimaryButton}"/>
+                </StackPanel>
+                <TextBlock Text="{Binding AssemblySummary}" TextWrapping="Wrap" Margin="0,10,0,0"
                            Foreground="{StaticResource ICDAccentDark}"/>
             </StackPanel>
         </Expander>

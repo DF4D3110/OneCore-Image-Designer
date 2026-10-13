@@ -400,37 +400,59 @@ namespace OneCore_Image_Designer.Services
         }
 
         /// <summary>
-        /// 设置值（path 在前，valueName 在后）
+        /// 设置值（path 在前，valueName 在后）。
         /// </summary>
+        /// <remarks>
+        /// ⚠ 这里**不能**复用 <see cref="OpenKey"/>：它用 <c>OpenSubKey</c> 只读打开，
+        /// 且键不存在时返回 null。用它写值有两个叠加后果：
+        ///   ① 只读句柄上的写入不生效；
+        ///   ② 干净镜像里本就不存在的键（例如 imagestate 的
+        ///      <c>Microsoft\Windows\CurrentVersion\Setup\ImageServicingData</c>）
+        ///      直接失败。
+        /// 实测现象：E2E 组装流程里 <c>imagestate 写入 0 处</c>，而 hive 本身挂载成功。
+        /// 因此改用 <c>CreateSubKey(writable: true)</c> —— 既可写，又能按需建键。
+        /// </remarks>
         public bool SetValue(string keyPath, string valueName, object? value, RegistryValueKind valueKind)
         {
             if (_rootKey == null || !_writable) return false;
+
+            RegistryKey? key = null;
+            bool shouldDispose = false;
             try
             {
                 Log($"SetValue: path='{keyPath}', name='{valueName}', kind={valueKind}");
-                var key = OpenKey(keyPath, out bool shouldDispose);
-                try
+
+                if (string.IsNullOrEmpty(keyPath))
                 {
-                    if (key == null)
-                    {
-                        Log($"SetValue: 键打开失败 path='{keyPath}'");
-                        return false;
-                    }
-                    key.SetValue(valueName, value, valueKind);
-                    key.Flush();
-                    _hasChanges = true;
-                    Log($"SetValue: 成功，已标记为有修改");
-                    return true;
+                    key = _rootKey;                 // 根键不 Dispose
                 }
-                finally
+                else
                 {
-                    if (shouldDispose) key?.Dispose();
+                    // CreateSubKey 在键已存在时等价于可写打开，不存在时创建
+                    key = _rootKey.CreateSubKey(keyPath, writable: true);
+                    shouldDispose = true;
                 }
+
+                if (key == null)
+                {
+                    Log($"SetValue: 无法创建/打开键 path='{keyPath}'");
+                    return false;
+                }
+
+                key.SetValue(valueName, value, valueKind);
+                key.Flush();
+                _hasChanges = true;
+                Log($"SetValue: 成功，已标记为有修改");
+                return true;
             }
             catch (Exception ex)
             {
                 Log($"SetValue 异常: {ex.Message}");
                 return false;
+            }
+            finally
+            {
+                if (shouldDispose) key?.Dispose();
             }
         }
 
