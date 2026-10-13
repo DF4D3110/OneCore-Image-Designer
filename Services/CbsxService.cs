@@ -309,6 +309,9 @@ namespace OneCore_Image_Designer.Services
             _ => CbsInstallState.Unknown
         };
 
+        // 记录实际加载的 cbscore.dll 路径 —— InitializeEx 的 externalDir 需要栈所在目录
+        static string? _lastStackDll;
+
         /// <summary>
         /// 确保 cbscore.dll 可被 LoadLibraryA 找到。
         ///
@@ -357,6 +360,7 @@ namespace OneCore_Image_Designer.Services
                     SetDllDirectory(dir);
                     if (LoadLibraryA("cbscore.dll") != IntPtr.Zero)
                     {
+                        _lastStackDll = dll;
                         detail = "已从 " + dir + " 加载 cbscore.dll";
                         return true;
                     }
@@ -429,9 +433,42 @@ namespace OneCore_Image_Designer.Services
 
                 string bootDrive = DeriveBootDrive(winDir);
                 hr = session.Initialize(CbsSessionOption.None, clientId, bootDrive, winDir);
+
+                if (hr < 0 && hr == unchecked((int)0x800F0823))
+                {
+                    // CBS_E_NEW_SERVICING_STACK_REQUIRED：
+                    // CBS 把「已加载栈自称的版本」与「镜像声明的栈版本」比较，
+                    // 加载的栈一律自称 6.2.<build>，而较新的镜像声明 10.0.<build>，
+                    // 于是判"栈太低"。
+                    //
+                    // DISM 能服务这类镜像，说明它走了另一条入口：InitializeEx 的
+                    // externalDir（外部服务目录）。这里先原样重试一次，把 externalDir
+                    // 指向已加载栈所在目录，看 CBS 是否改用它声明的版本。
+                    string? stackDir = Path.GetDirectoryName(_lastStackDll!);
+                    if (!string.IsNullOrEmpty(stackDir))
+                    {
+                        log?.Invoke($"Initialize 返回 0x800F0823，改用 InitializeEx 并把 externalDir 指向 {stackDir}");
+                        hr = session.InitializeEx((uint)CbsSessionOption.None, clientId, bootDrive, winDir, stackDir);
+                        if (hr >= 0)
+                        {
+                            log?.Invoke($"InitializeEx（externalDir）成功 (bootDrive=\"{bootDrive}\", winDir=\"{winDir}\")");
+                            return session;
+                        }
+                        log?.Invoke($"InitializeEx 也失败 0x{hr:X8}");
+                    }
+                    else
+                    {
+                        log?.Invoke("Initialize 返回 0x800F0823，但拿不到栈目录，无法尝试 InitializeEx");
+                    }
+                }
+
                 if (hr < 0)
                 {
-                    error = $"ICbsSession::Initialize 失败 0x{hr:X8}（bootDrive=\"{bootDrive}\", winDir=\"{winDir}\"）";
+                    error = $"ICbsSession::Initialize 失败 0x{hr:X8}（bootDrive=\"{bootDrive}\", winDir=\"{winDir}\"）"
+                          + (hr == unchecked((int)0x800F0823)
+                             ? " —— CBS_E_NEW_SERVICING_STACK_REQUIRED：镜像声明的 servicing stack 版本高于已加载栈自称的版本。"
+                             + "跨代场景（镜像 10.0.x + 可加载栈 6.2.y）会触发它；可改用 DismServicingService 走 DISM 兜底。"
+                             : "");
                     return null;
                 }
                 log?.Invoke($"会话已初始化 (bootDrive=\"{bootDrive}\", winDir=\"{winDir}\")");
