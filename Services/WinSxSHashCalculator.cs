@@ -197,8 +197,9 @@ namespace OneCore_Image_Designer.Services
         /// </summary>
         /// <remarks>
         /// ⚠ 局限：文件夹名里的 name 段是【清理过】的，与内部真实 name 可能不同
-        /// （实测 19% 的组件如此），且文件名不携带 versionScope。因此本方法仅对
-        /// "name 未被清理且 scope 为 nonSxS" 的组件有效，且对 .inf 类必然失败。
+        /// （实测 19% 的组件如此）；文件名不携带 versionScope，也【不携带 type】，
+        /// 因此对带 type 的 .inf 驱动组件无法判定（返回 false 会被误读为"校验失败"，
+        /// 故这里直接返回 false 表示"不可判定"）。
         /// 要精确校验请用 <see cref="VerifyAgainstIdentity"/> 传入 manifest 内部字段。
         /// </remarks>
         public static bool VerifyWinSxFolderHash(string folderName)
@@ -206,7 +207,8 @@ namespace OneCore_Image_Designer.Services
             WinSxSFolderInfo? info = ParseWinSxFolderName(folderName);
             if (info is null) return false;
 
-            if (info.IsInfComponent) return false;   // .inf 类无法复现，不做强行判定
+            // .inf 类不可判定：文件夹名不含 type，无法复现哈希
+            if (info.IsInfComponent) return false;
 
             string calculated = CalculateWinSxSHash(
                 info.Name, info.PublicKeyToken, info.Architecture, info.Version, info.Culture, DefaultVersionScope);
@@ -219,6 +221,10 @@ namespace OneCore_Image_Designer.Services
         /// </summary>
         /// <param name="expectedHash">文件夹名/文件名末尾的 16 位哈希</param>
         /// <param name="versionScope">manifest 内部 versionScope 属性值；无该属性时传 null</param>
+        /// <param name="type">
+        /// manifest 内部 type 属性值；.inf 驱动类组件必须传（典型值 dualModeDriver），
+        /// 否则哈希必错。无该属性时传 null。
+        /// </param>
         public static bool VerifyAgainstIdentity(
             string expectedHash,
             string name,
@@ -226,18 +232,24 @@ namespace OneCore_Image_Designer.Services
             string architecture,
             string version,
             string culture,
-            string? versionScope)
+            string? versionScope,
+            string? type = null)
         {
             if (string.IsNullOrWhiteSpace(expectedHash)) return false;
 
-            string calculated = CalculateWinSxSHash(name, publicKeyToken, architecture, version, culture, versionScope);
+            string calculated = CalculateWinSxSHash(name, publicKeyToken, architecture, version, culture, versionScope, type);
             return string.Equals(calculated, expectedHash.Trim(), StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>
-        /// 判断是否为 .inf 驱动类组件 —— 这类组件的哈希【无法】用本算法复现，
-        /// 调用方应跳过，避免把正确的名字误判为错误。
+        /// 判断组件名是否是 .inf 驱动类（以 .inf 结尾）。
         /// </summary>
+        /// <remarks>
+        /// 【2026-10-13 更新】这类组件的哈希**现在可以复现**了 —— 只要把 identity 的
+        /// <c>type</c> 属性（插在 culture 与 version 之间）一起传入 <see cref="CalculateWinSxSHash"/>。
+        /// 实测 663/663 命中。本方法保留仅用于"识别名称形态"，
+        /// **不再**意味着哈希不可算，调用方不应再据此跳过。
+        /// </remarks>
         public static bool IsInfComponent(string? name)
             => !string.IsNullOrEmpty(name) && name.EndsWith(".inf", StringComparison.OrdinalIgnoreCase);
 
