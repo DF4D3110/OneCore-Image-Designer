@@ -289,23 +289,51 @@ namespace OneCore_Image_Designer.Services
         }
 
         /// <summary>
-        /// 让 wcp.dll 可被 LoadLibraryA 找到。
-        /// wcp.dll 来自 servicing stack（<c>WinSxS\*\servicingstack*</c>）；
-        /// 优先目标镜像自带的（版本匹配），回退宿主。
+        /// 让 wcp.dll 可被 LoadLibraryA 找到，**并确认它带有铺底所需的全部导出**。
+        ///
+        /// 这一步很关键：镜像自带的 wcp.dll 可能是很老的版本（例如 Win8 Beta 的
+        /// 6.2.8220 就没有 CreateNewOfflineStore）。只按目录优先级挑会选到它，
+        /// 然后在导出检查处失败。所以这里的策略是**逐个候选加载 + 校验导出**，
+        /// 不合格就释放并换下一个（镜像栈 → 宿主栈）。
         /// </summary>
+        static readonly string[] RequiredWcpExports =
+        {
+            "WcpInitialize", "SetIsolationIMalloc", "CreateNewWindows",
+            "CreateNewOfflineStore", "DismountRegistryHives"
+        };
+
+        static bool HasAllExports(IntPtr module)
+        {
+            if (module == IntPtr.Zero) return false;
+            foreach (var name in RequiredWcpExports)
+                if (GetProcAddress(module, name) == IntPtr.Zero) return false;
+            return true;
+        }
+
+        [DllImport("kernel32", SetLastError = true)]
+        static extern bool FreeLibrary(IntPtr hModule);
+
         static bool TryResolveWcp(string imageRoot, Action<string> log)
         {
-            if (LoadLibraryA("wcp.dll") != IntPtr.Zero) { log("wcp.dll 已在默认搜索路径"); return true; }
+            // 默认搜索路径里已有一个可用的就用
+            IntPtr alreadyLoaded = LoadLibraryA("wcp.dll");
+            if (alreadyLoaded != IntPtr.Zero)
+            {
+                if (HasAllExports(alreadyLoaded)) { log("wcp.dll 已在默认搜索路径且导出完整"); return true; }
+                log("默认搜索路径的 wcp.dll 缺少所需导出，改从 servicing stack 里找");
+                FreeLibrary(alreadyLoaded);
+            }
 
             var roots = new List<string>
             {
-                Path.Combine(imageRoot, "Windows", "WinSxS"),
+                Path.Combine(imageRoot, "Windows", "WinSxS"),   // 镜像自带（版本匹配，但可能太旧）
                 Path.Combine(imageRoot, "WinSxS"),
                 imageRoot
             };
             string sysRoot = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-            if (!string.IsNullOrEmpty(sysRoot)) roots.Add(Path.Combine(sysRoot, "WinSxS"));
+            if (!string.IsNullOrEmpty(sysRoot)) roots.Add(Path.Combine(sysRoot, "WinSxS"));   // 宿主（通常更新）
 
+            var tried = new List<string>();
             foreach (var root in roots)
             {
                 if (!Directory.Exists(root)) continue;
@@ -315,13 +343,21 @@ namespace OneCore_Image_Designer.Services
                 {
                     if (!File.Exists(Path.Combine(dir, "wcp.dll"))) continue;
                     SetDllDirectory(dir);
-                    if (LoadLibraryA("wcp.dll") != IntPtr.Zero)
+                    IntPtr h = LoadLibraryA("wcp.dll");
+                    if (h == IntPtr.Zero) { tried.Add(Path.GetFileName(dir) + "（加载失败）"); continue; }
+                    if (!HasAllExports(h))
                     {
-                        log("wcp.dll 已从 " + dir + " 加载");
-                        return true;
+                        tried.Add(Path.GetFileName(dir) + "（导出不全，太旧）");
+                        FreeLibrary(h);
+                        continue;
                     }
+                    log("wcp.dll 已从 " + dir + " 加载，导出完整");
+                    return true;
                 }
             }
+
+            log("没有找到导出完整的 wcp.dll。已尝试：");
+            foreach (var t in tried) log("    " + t);
             return false;
         }
 

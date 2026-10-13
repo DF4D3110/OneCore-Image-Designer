@@ -103,6 +103,12 @@ namespace OneCore_Image_Designer.ViewModels
                 "explodeSxS：通过 prepare/captureimg/cbss/finishimg 流程处理镜像中的 CBS/SxS。\n\n" +
                 "源码随应用集成；运行 pureSxS 需要 Python。explodeSxS 还依赖 DISM 和已获许可的 CBS 工具。\n\n" +
                 "注意：prepare.cmd 会快速格式化 X:。当前应用不会自动运行这些上游脚本；执行前请审阅脚本、确认目标磁盘与备份。",
+                                "原生流程（新增）：全部由 C# 完成，不需要 cbsx.exe / sxsfounder.exe。\n" +
+                "  1) WCP 铺底（等价 sxsfounder）；2) CBS 装 SKU（等价 cbsx /b:）；\n" +
+                "  3) DISM 加语言包 / apply-unattend / set-allintl / 清理；4) 收尾写 State.ini 与 imagestate。\n" +
+                "  目标必须是【挂载的 VHD/VHDX】上的镜像 —— 这是强制约束，用于保护宿主系统。\n" +
+                "  建议先用「原生流程预检」与「试运行」确认，再执行真实操作。\n" +
+                "  命令行等价物：CbsxCli.exe（cbsx 替代）与 SxSFounderCli.exe（sxsfounder 替代）。\n\n" +
                 "SxS 工具说明", MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
