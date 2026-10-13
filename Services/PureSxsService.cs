@@ -88,9 +88,14 @@ namespace OneCore_Image_Designer.Services
             string ptk = id.GetAttribute("publicKeyToken");
             string name = id.GetAttribute("name");
             string vscope = id.GetAttribute("versionScope");
+            // .inf 驱动类组件带 type（典型值 dualModeDriver），它插在 culture 与 version 之间
+            // 参与哈希。此前漏传会让全部驱动组件的 SxS 名算错。
+            string type = id.GetAttribute("type");
+            if (type.Length == 0) type = id.GetAttribute("typeName");
 
             return WinSxSHashCalculator.GenerateWinSxFolderName(name, ptk, arch, version, culture,
-                string.IsNullOrEmpty(vscope) ? null : vscope);
+                string.IsNullOrEmpty(vscope) ? null : vscope,
+                string.IsNullOrEmpty(type) ? null : type);
         }
 
         /// <summary>

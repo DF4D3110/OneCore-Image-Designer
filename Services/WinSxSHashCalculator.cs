@@ -81,18 +81,28 @@ namespace OneCore_Image_Designer.Services
         /// 组件【没有】该属性时传 null 或空串，此时不加入哈希字段。
         /// </param>
         /// <returns>16 位十六进制哈希</returns>
+        /// <param name="type">
+        /// 组件 identity 的 <c>type</c> 属性（仅 .inf 驱动类组件有，典型值 <c>dualModeDriver</c>）。
+        /// **它插在 culture 与 version 之间参与哈希** —— 这是 2026-10-13 实测确认的：
+        /// 驱动组件的字段顺序是
+        ///   name → culture → type → version → publicKeyToken → processorArchitecture → versionScope
+        /// 与 havesxs.py 一致。缺了 type 会让全部 .inf 驱动组件的哈希算错（实测 0/663 命中），
+        /// 但非驱动组件（无 type）不受影响，所以此前只表现出"驱动类全部失败"。
+        /// 传 null/空 表示该组件没有 type 属性，此时不加入哈希。
+        /// </param>
         public static string CalculateWinSxSHash(
             string name,
             string publicKeyToken,
             string architecture,
             string version,
             string culture = "neutral",
-            string? versionScope = DefaultVersionScope)
+            string? versionScope = DefaultVersionScope,
+            string? type = null)
         {
             ArgumentNullException.ThrowIfNull(name);
 
             // 字段顺序经 3000 个真实样本实测确认，不可调换
-            var attributes = new List<(string Key, string Value)>(6)
+            var attributes = new List<(string Key, string Value)>(7)
             {
                 ("name", name),
             };
@@ -100,6 +110,10 @@ namespace OneCore_Image_Designer.Services
             // culture 仅在中性以外时参与 —— 这是原实现最关键的错误之一
             if (!IsNeutralCulture(culture))
                 attributes.Add(("culture", culture.Trim()));
+
+            // type 插在 culture 与 version 之间（.inf 驱动组件）
+            if (!string.IsNullOrWhiteSpace(type))
+                attributes.Add(("type", type.Trim()));
 
             attributes.Add(("version", version));
             attributes.Add(("publicKeyToken", publicKeyToken));
@@ -125,9 +139,10 @@ namespace OneCore_Image_Designer.Services
             string architecture,
             string version,
             string culture = "neutral",
-            string? versionScope = DefaultVersionScope)
+            string? versionScope = DefaultVersionScope,
+            string? type = null)
         {
-            string hash = CalculateWinSxSHash(name, publicKeyToken, architecture, version, culture, versionScope);
+            string hash = CalculateWinSxSHash(name, publicKeyToken, architecture, version, culture, versionScope, type);
             string folderNamePart = NormalizeNameForFolder(name);
             string cult = IsNeutralCulture(culture) ? "none" : culture.Trim().ToLowerInvariant();
 
@@ -273,6 +288,33 @@ namespace OneCore_Image_Designer.Services
         }
 
         // ───────────────── 内部实现（X65599Variant） ─────────────────
+
+        /// <summary>
+        /// 把 (属性名, 值) 序列按 X65599Variant 组合成伪键。
+        /// 公开出来供**算法调查**使用（例如穷举 .inf 驱动组件的字段集），
+        /// 正常业务代码请用 <see cref="CalculateWinSxSHash"/>。
+        /// 值为 null/空 的项会被跳过（等价于属性不存在）。
+        /// </summary>
+        public static ulong GeneratePseudoKey(IEnumerable<(string Key, string? Value)> attributes)
+        {
+            ulong pseudoKey = 0UL;
+
+            foreach (var (key, value) in attributes)
+            {
+                if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(value)) continue;
+
+                ulong nameHash = GetPrecalculatedNameHash(key);
+                ulong valueHash = HashStringX65599Variant(value!);
+                ulong nameValueHash = nameHash * HashMultiplierLonghorn + valueHash;
+
+                pseudoKey = pseudoKey * HashMultiplierLonghorn + nameValueHash;
+            }
+
+            return pseudoKey;
+        }
+
+        /// <summary>单个字符串的 X65599Variant 哈希（公开供算法调查）。</summary>
+        public static ulong HashString(string value) => HashStringX65599Variant(value);
 
         private static ulong GeneratePseudoKey(List<(string Key, string Value)> attributes)
         {
