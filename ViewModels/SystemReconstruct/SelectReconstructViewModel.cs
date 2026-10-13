@@ -1371,5 +1371,107 @@ namespace OneCore_Image_Designer.ViewModels.SystemReconstruct
         /// <summary>存在真实写入风险时置位，供界面显示警示。</summary>
         public bool WillWriteImage =>
             TargetAction != "仅展开（不写镜像）" && ExecutionMode.StartsWith("真实执行");
+
+        // ════════════════════════════════════════════════════════════════════
+        //        三选一 → 执行分发（纯增量新增）
+        // ════════════════════════════════════════════════════════════════════
+        // 按 SourceShape / TargetAction / ExecutionMode 分发到对应服务。
+        // 惰性创建命令，避免改动构造函数。
+
+        private RelayCommand? _dispatchCommand;
+        /// <summary>统一分发：按三选一决定跑哪个服务。</summary>
+        public RelayCommand DispatchCommand => _dispatchCommand ??= new RelayCommand(Dispatch);
+
+        private string _dispatchResult = "";
+        public string DispatchResult
+        {
+            get => _dispatchResult;
+            set { _dispatchResult = value; OnPropertyChanged(); OnPropertyChanged(nameof(HasDispatchResult)); }
+        }
+
+        public bool HasDispatchResult => !string.IsNullOrEmpty(_dispatchResult);
+
+        async void Dispatch()
+        {
+            var sb = new System.Text.StringBuilder();
+            void L(string t) { sb.AppendLine(t); BuildStatus = t; }
+
+            bool real = ExecutionMode.StartsWith("真实执行");
+            try
+            {
+                // ── 目标动作：仅展开 ──
+                if (TargetAction == "仅展开（不写镜像）")
+                {
+                    switch (SourceShape)
+                    {
+                        case "包 CAB 集":
+                            L("仅展开 · 包 CAB 集 → 走页面上原有的『构建』按钮（CbsBuildService）");
+                            L("  该路径纯展开目录树，不接触镜像。请用上面的包列表与构建按钮。");
+                            break;
+
+                        case "更新包（PSF+CAB）":
+                            if (string.IsNullOrWhiteSpace(OutputPath)) { L("✗ 请先指定输出目录"); break; }
+                            var ucfg = new Services.UpdatePackageService.Config
+                            {
+                                PackagePath = ImagePath,
+                                OutputDir = OutputPath,
+                                ListOnly = !real
+                            };
+                            L($"更新包解包：{System.IO.Path.GetFileName(ImagePath)}（{(real ? "真实" : "只解析索引")}）");
+                            var ur = await Task.Run(() => Services.UpdatePackageService.Extract(ucfg, m => sb.AppendLine("  " + m)));
+                            L($"  → 布局={ur.Detected} 解出={ur.FilesExtracted} 跳过={ur.FilesSkipped} 缺源={ur.FilesMissingSource} 校验失败={ur.HashMismatches}");
+                            if (ur.Error.Length > 0) L("  ✗ " + ur.Error);
+                            break;
+
+                        case "Repair Content":
+                            if (string.IsNullOrWhiteSpace(OutputPath)) { L("✗ 请先指定输出目录"); break; }
+                            var rcfg = new Services.RepairContentService.Config
+                            {
+                                SourceDir = ImagePath,
+                                OutputDir = OutputPath,
+                                ClassifyOnly = !real
+                            };
+                            L($"Repair Content：{ImagePath}（{(real ? "真实两阶段解包" : "只分类")}）");
+                            var rr = await Task.Run(() => Services.RepairContentService.Extract(rcfg, m => sb.AppendLine("  " + m)));
+                            L("  " + rr.Summary());
+                            if (rr.Error.Length > 0) L("  ✗ " + rr.Error);
+                            break;
+
+                        case "完整镜像":
+                            L("仅展开 · 完整镜像：无意义组合 —— 镜像本身不需要展开。");
+                            L("  若想查看镜像内容，请用『服务既有镜像』。");
+                            break;
+                    }
+                }
+                // ── 目标动作：组装 / 服务既有镜像 ──
+                else
+                {
+                    if (string.IsNullOrWhiteSpace(ImagePath)) { L("✗ 请先指定目标镜像（必须是挂载的 VHD/VHDX 上的 Windows 目录）"); }
+                    else
+                    {
+                        // 先做门禁与世代判定，绝不盲目动手
+                        var decision = Services.ServicingRouter.Decide(ImagePath);
+                        L($"世代判定：【{decision.Channel}】{decision.Reason}");
+                        if (real) L("⚠ 真实执行模式：会写入目标镜像。");
+
+                        var cfg = new Services.ExplodeSxSNativeService.Config
+                        {
+                            WinDir = ImagePath,
+                            ImageRoot = Services.ExplodeSxSNativeService.DeriveImageRoot(ImagePath),
+                            DryRun = !real
+                        };
+                        L($"开始执行原生 staging（{(real ? "真实" : "试运行")}）…");
+                        var res = await Services.ExplodeSxSNativeService.RunAsync(cfg, m => sb.AppendLine("  " + m));
+                        foreach (var (step, ok, detail) in res.Steps)
+                            L($"  {(ok ? "OK  " : "FAIL")} {step}：{detail}");
+                        if (res.Error.Length > 0) L("  ✗ " + res.Error);
+                        if (res.RebootRequired) L("  CBS 提示需要重启。");
+                        L(res.Success ? "== 完成 ==" : "== 未成功 ==");
+                    }
+                }
+            }
+            catch (Exception ex) { L("异常：" + ex.GetType().Name + ": " + ex.Message); }
+            finally { DispatchResult = sb.ToString().TrimEnd(); }
+        }
     }
 }
