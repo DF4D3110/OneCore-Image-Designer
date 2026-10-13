@@ -73,6 +73,13 @@ namespace OneCore_Image_Designer.Services
             /// 而且实测在已有镜像上会以 CreateNewOfflineStore 0x8007051A（权限不足）失败。
             /// </summary>
             public bool SkipFounder;
+
+            /// <summary>
+            /// servicing stack 来源目录。**非空时会执行"把服务栈装进镜像"这一步** ——
+            /// 这是"从头组装"的关键：铺底只造空骨架（没有 WinSxS / 组件存储 / 服务栈），
+            /// CBS 在其上起不来，必须先把服务栈与同版本 mum 放进去。
+            /// </summary>
+            public List<string> StackSourceDirs = new();
         }
 
         public sealed class Result
@@ -197,6 +204,23 @@ namespace OneCore_Image_Designer.Services
                                   + "若目标镜像已经存在，请改用 SkipFounder / --skip-founder。";
                         return res;
                     }
+                }
+
+                // ── 步骤 1.5：把 servicing stack 装进镜像（"从头组装"的关键一步） ──
+                if (cfg.StackSourceDirs.Count > 0)
+                {
+                    L("=== 步骤 1.5：安装 servicing stack（铺底骨架是空壳，CBS 需要它才能起来） ===");
+                    var scfg = new FounderStackInstaller.Config
+                    {
+                        ImageRoot = root,
+                        Arch = cfg.Arch,
+                        StackSourceDirs = cfg.StackSourceDirs,
+                        CopyMum = true,
+                        DryRun = cfg.DryRun
+                    };
+                    var sr = FounderStackInstaller.Install(scfg, log);
+                    Step("安装 servicing stack", sr.Success, sr.Success ? sr.Summary() : sr.Error);
+                    if (!sr.Success) { res.Error = "服务栈安装失败：" + sr.Error; return res; }
                 }
 
                 // ── 步骤 2：SKU assembly（替代 cbsx.exe /b:） ──
