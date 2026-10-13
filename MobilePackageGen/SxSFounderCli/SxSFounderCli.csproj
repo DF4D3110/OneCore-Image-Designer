@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    SxSFounderCli: command-line replacement for sxsfounder.exe.
+      sxsfounder <offline image path> <architecture>
+    Semantics kept compatible; the only additions are /dry and /?.
+
+    Links the same service sources the app uses, so CLI and GUI cannot diverge.
+    CBS/WCP targets are hard-gated to mounted VHD/VHDX (see CbsSafety).
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>SxSFounderCli</AssemblyName>
+    <RootNamespace>OneCore_Image_Designer.Services</RootNamespace>
+    <Platforms>x86;x64;ARM64;ARM32</Platforms>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WPMT.Core\WPMT.Core.csproj" />
+    <ProjectReference Include="..\LibSxS\LibSxS.csproj" />
+    <ProjectReference Include="..\MobilePackageGen.Common\MobilePackageGen.Common.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Services\WinSxSHashCalculator.cs" />
+    <Compile Include="..\..\Services\ManifestDecompressor.cs" />
+    <Compile Include="..\..\Services\CbsSafety.cs" />
+    <Compile Include="..\..\Services\ElevationHelper.cs" />
+    <Compile Include="..\..\Services\SxSFounderService.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\Tools\wcpex\wcpex.exe">
+      <Link>Tools\wcpex\wcpex.exe</Link>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\Tools\wcpex\wcp.dll">
+      <Link>Tools\wcpex\wcp.dll</Link>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>

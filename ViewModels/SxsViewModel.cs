@@ -256,6 +256,102 @@ namespace OneCore_Image_Designer.ViewModels
         }
         bool CanExplode() => !IsExploding && !IsPureExporting;
 
+        // ─────────────── 原生流程（纯 C#，不使用 cbsx.exe / sxsfounder.exe）───────────────
+        // 纯增量：不改动上面任何现有字段与命令，避免影响既有 UI 行为。
+        // 对应 ExplodeSxSNativeService：WCP 铺底 → CBS 装 SKU → DISM 收尾 → 可选捕获。
+
+        [ObservableProperty] private string _nativeWinDir = string.Empty;
+        [ObservableProperty] private string _nativeSkuAssemblyFile = string.Empty;
+        [ObservableProperty] private bool _nativeDryRun = true;
+        [ObservableProperty] private bool _nativeCaptureWim;
+        [ObservableProperty] private bool _isNativeRunning;
+        [ObservableProperty] private string _nativeSummary =
+            "原生流程：全部由 C# 完成（WCP 铺底 + CBS 装 SKU + DISM 收尾），不需要 cbsx.exe / sxsfounder.exe。\n"
+            + "目标必须是【挂载的 VHD/VHDX】上的镜像（例如 G:\\Windows）——这是强制约束，用于保护宿主系统。";
+
+        [RelayCommand]
+        private void RunNativePreflight()
+        {
+            try
+            {
+                var cfg = MakeNativeConfig(dryRun: true);
+                var (ready, checks, blockers) = ExplodeSxSNativeService.Preflight(cfg);
+                var sb = new System.Text.StringBuilder();
+                foreach (var c in checks) sb.AppendLine("✓ " + c);
+                foreach (var b in blockers) sb.AppendLine("✗ " + b);
+                NativeSummary = sb.ToString().TrimEnd();
+                Status = ready ? "原生流程预检通过，可执行。" : "原生流程预检存在阻断项。";
+                Log(Status);
+            }
+            catch (Exception ex)
+            {
+                NativeSummary = "预检异常：" + ex.Message;
+                Log(NativeSummary);
+            }
+        }
+
+        [RelayCommand(CanExecute = nameof(CanRunNative))]
+        private async Task RunNativeAsync()
+        {
+            if (string.IsNullOrWhiteSpace(NativeWinDir))
+            {
+                MessageBox.Show("请填写镜像的 Windows 目录（例如 G:\\Windows）。", "原生流程",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var cfg = MakeNativeConfig(dryRun: NativeDryRun);
+            NativeSummary = NativeDryRun ? "试运行中…" : "执行中…（不要关闭程序）";
+            IsNativeRunning = true;
+            RunNativeCommand.NotifyCanExecuteChanged();
+            RunNativePreflightCommand.NotifyCanExecuteChanged();
+            var sink = EnsureTaskLog("原生流程");
+            try
+            {
+                var res = await ExplodeSxSNativeService.RunAsync(cfg, m => sink.Write(m));
+                var sb = new System.Text.StringBuilder();
+                foreach (var (step, ok, detail) in res.Steps)
+                    sb.AppendLine((ok ? "✓ " : "✗ ") + step + "：" + detail);
+                if (res.Error.Length > 0) sb.AppendLine("错误：" + res.Error);
+                if (res.RebootRequired) sb.AppendLine("CBS 提示需要重启。");
+                NativeSummary = sb.ToString().TrimEnd();
+                Status = res.Success ? "原生流程完成。" : "原生流程失败：" + res.Error;
+                Log(Status);
+            }
+            catch (Exception ex)
+            {
+                NativeSummary = "异常：" + ex.GetType().Name + ": " + ex.Message;
+                Log(NativeSummary);
+            }
+            finally
+            {
+                sink.MarkFinished();
+                IsNativeRunning = false;
+                RunNativeCommand.NotifyCanExecuteChanged();
+                RunNativePreflightCommand.NotifyCanExecuteChanged();
+            }
+        }
+
+        bool CanRunNative() => !IsNativeRunning && !IsExploding && !IsPureExporting;
+
+        ExplodeSxSNativeService.Config MakeNativeConfig(bool dryRun) => new()
+        {
+            WinDir = NativeWinDir?.Trim() ?? string.Empty,
+            ImageRoot = string.IsNullOrWhiteSpace(NativeWinDir)
+                ? string.Empty
+                : ExplodeSxSNativeService.DeriveImageRoot(NativeWinDir.Trim()),
+            Arch = string.IsNullOrWhiteSpace(ExplodeArch) ? "amd64" : ExplodeArch.Trim(),
+            SkuAssemblyFile = NativeSkuAssemblyFile?.Trim() ?? string.Empty,
+            LanguagePackMum = ExplodeLanguagePack?.Trim() ?? string.Empty,
+            Lang = string.IsNullOrWhiteSpace(ExplodeLang) ? "en-US" : ExplodeLang.Trim(),
+            CaptureWim = NativeCaptureWim,
+            WimPath = string.IsNullOrWhiteSpace(OutputDirectory)
+                ? string.Empty
+                : System.IO.Path.Combine(OutputDirectory, "install.wim"),
+            WimName = "Windows",
+            DryRun = dryRun
+        };
+
         private void Log(string text) => EnsureTaskLog("SxS 操作日志").Write(text);
     }
 }
