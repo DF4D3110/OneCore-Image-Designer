@@ -1,0 +1,60 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    CbsxCli: command-line replacement for cbsx.exe, built on CbsxService.
+
+    Option semantics are compatible with cbsexploder (which is what cbsx.exe is):
+      /sp  /ip  /up     package intent (Staged / Installed / Absent)
+      /ep               enumerate packages (read-only)
+      /m:<mum>          package manifest
+      /o:<winDir>       offline image Windows directory   (required)
+      /log:<path>       log file
+      /b:<file>         batch file, one operation per line
+    Extra options we add (not in the original):
+      /dry              evaluate only; never call InitiateChanges
+      /?                usage
+
+    CBS operations are hard-gated to mounted VHD/VHDX targets (see CbsSafety).
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>CbsxCli</AssemblyName>
+    <RootNamespace>OneCore_Image_Designer.Services</RootNamespace>
+    <Platforms>x86;x64;ARM64;ARM32</Platforms>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WPMT.Core\WPMT.Core.csproj" />
+    <ProjectReference Include="..\LibSxS\LibSxS.csproj" />
+    <ProjectReference Include="..\MobilePackageGen.Common\MobilePackageGen.Common.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- reuse the exact service sources the app uses, so CLI and GUI never diverge -->
+    <Compile Include="..\..\Services\WinSxSHashCalculator.cs" />
+    <Compile Include="..\..\Services\ManifestDecompressor.cs" />
+    <Compile Include="..\..\Services\SkuAssemblyService.cs" />
+    <Compile Include="..\..\Services\CbsxService.cs" />
+    <Compile Include="..\..\Services\CbsSafety.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\Tools\wcpex\wcpex.exe">
+      <Link>Tools\wcpex\wcpex.exe</Link>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\Tools\wcpex\wcp.dll">
+      <Link>Tools\wcpex\wcp.dll</Link>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>

@@ -381,6 +381,20 @@ namespace OneCore_Image_Designer.Services
             error = null;
             try
             {
+                // 先确保 cbscore.dll 可见：优先目标镜像自带的 servicing stack（版本恰好匹配），
+                // 回退宿主栈。放在这里而不是交给调用方，避免每个入口都要记得做一次。
+                if (!TryAddServicingStackToSearchPath(
+                        Path.GetDirectoryName(Path.GetFullPath(winDir).TrimEnd('\\')) is string parent
+                            && Path.GetFileName(Path.GetFullPath(winDir).TrimEnd('\\'))
+                                 .Equals("Windows", StringComparison.OrdinalIgnoreCase)
+                            ? parent : winDir,
+                        out string stackDetail))
+                {
+                    error = "servicing stack 不可用: " + stackDetail;
+                    return null;
+                }
+                log?.Invoke("servicing stack: " + stackDetail);
+
                 IntPtr cbscore = LoadLibraryA("cbscore.dll");
                 if (cbscore == IntPtr.Zero)
                 {
@@ -498,13 +512,19 @@ namespace OneCore_Image_Designer.Services
         /// 每包都先 EvaluateApplicability 并做与 cbsexploder 相同的两项断言，
         /// 全部成功后才 FinalizeEx（CBS 的事务语义）。
         /// </summary>
-        public static Result ApplyPlan(string winDir, SkuAssemblyService.Plan plan, Action<string>? log = null)
+        /// <param name="dryRun">
+        /// true 时执行到 EvaluateApplicability 为止就停下 —— 打开包、读身份、判适用性，
+        /// **不调用 InitiateChanges**，因此镜像完全不变。用于上线前的可执行性预检。
+        /// </param>
+        public static Result ApplyPlan(string winDir, SkuAssemblyService.Plan plan,
+            Action<string>? log = null, bool dryRun = false)
         {
             var res = new Result();
             try
             {
                 if (!plan.Success) { res.Error = "计划无效: " + plan.Error; return res; }
                 if (plan.Operations.Count == 0) { res.Error = "计划为空"; return res; }
+                if (dryRun) log?.Invoke("== 试运行（dry-run）：只做适用性判定，不修改镜像 ==");
 
                 // ── 强制门禁：CBS 只能在挂载的 VHD/VHDX 上操作（保护宿主系统）──
                 var gate = CbsSafety.CheckTarget(winDir);
@@ -549,6 +569,7 @@ namespace OneCore_Image_Designer.Services
                         if (hr < 0) { rec.Error = $"EvaluateApplicability 失败 0x{hr:X8}"; res.Error = rec.Error; return res; }
                         rec.Applicability = app;
                         rec.CurrentState = cur;
+                        log?.Invoke($"  当前状态={cur}  适用性={app}  目标={rec.TargetState}");
 
                         // 与 cbsexploder 相同的两项断言
                         if (cur == rec.TargetState) { rec.Error = $"包已经是目标状态 {cur}"; res.Error = rec.Error; return res; }
@@ -557,6 +578,13 @@ namespace OneCore_Image_Designer.Services
                             rec.Error = $"包不适用于当前镜像（applicability={app}）";
                             res.Error = rec.Error;
                             return res;
+                        }
+
+                        if (dryRun)
+                        {
+                            log?.Invoke("  [dry-run] 跳过 InitiateChanges");
+                            rec.Ok = true;
+                            continue;
                         }
 
                         log?.Invoke($"  设置 {rec.Identity}: {cur} -> {rec.TargetState}");
