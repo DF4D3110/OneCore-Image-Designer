@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    CbsTools: net8.0 library holding the Applications tools ported from the
+    standalone MobilePackageGen line (CabSorter / CbsCatVerifier / CbsManVerifier /
+    EzCab / MobilePackageGen CLI / Playground / SecWim2Wim / WPBuildInfo).
+
+    Why a separate project instead of dropping the files into MobilePackageGen.Common:
+      * keeps the ported tool code visually isolated from our own libs;
+      * the apps are all net9.0 upstream, here they simply inherit net8.0;
+      * each app keeps its own namespace, so no collision with MobilePackageGen.
+
+    Duplicated model folders (XmlMum / XmlDsm / UpdateHistory) were NOT copied.
+    Those apps carried private copies declaring namespaces identical to Common's
+    (MobilePackageGen.XmlMum / .XmlDsm / .UpdateHistory) and therefore could not
+    reference Common. Because this project DOES reference Common, every one of those
+    namespaces resolves to the single Common implementation. The skipped copies were
+    verified content-identical (byte deltas were CRLF vs LF only).
+
+    Program.cs files are kept (they are just static Main methods); OutputType is
+    Library so having several of them is fine. They serve as behavioural references.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <Platforms>x86;x64;ARM64;ARM32</Platforms>
+    <NoWarn>$(NoWarn);CS0168;CS0219;CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625;CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- WPBuildInfo\DetectionHandler.cs uses DiscUtils.Registry (hive reading).
+         Version aligned with the other LTRData.DiscUtils.* packages already in use. -->
+    <PackageReference Include="LTRData.DiscUtils.Registry" Version="1.0.85" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Cabinet\Cabinet.Net.csproj" />
+    <ProjectReference Include="..\LibSxS\LibSxS.csproj" />
+    <ProjectReference Include="..\Microsoft.Deployment.Compression.Cab\Microsoft.Deployment.Compression.Cab.csproj" />
+    <ProjectReference Include="..\MobilePackageGen.Common\MobilePackageGen.Common.csproj" />
+  </ItemGroup>
+
+</Project>
