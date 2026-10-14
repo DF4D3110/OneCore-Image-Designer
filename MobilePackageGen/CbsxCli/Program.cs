@@ -23,6 +23,11 @@ internal static class Program
         public bool Dry;
         public bool Finish;
         public int WaitForPid;
+        public bool PostInstall;
+        public string Lang = "en-US";
+        public string Scratch = "";
+        public string SkuFile = "";
+        public string ResultFile = "";
         public bool Help;
         public SkuAssemblyService.PackageIntent Intent = SkuAssemblyService.PackageIntent.Unknown;
         public string? Manifest;
@@ -42,6 +47,39 @@ internal static class Program
         if (o.Help) { PrintUsage(); return 0; }
 
         if (string.IsNullOrWhiteSpace(o.WinDir)) { Console.Error.WriteLine("缺少 /o:<winDir>"); PrintUsage(); return 2; }
+
+            // /postinstall：CBS 装包【之后】的全部步骤，整体在独立进程里跑。
+            // 【为什么】CBS 服务在会话结束后仍独占目标镜像的 hive，而 apply-unattend
+            //   需要独占 → 同进程内实测 dism 退出码 5 (ERROR_ACCESS_DENIED)；
+            //   换到【父进程退出之后】的独立进程里跑同一条命令 → exit 0 成功。
+            if (o.PostInstall)
+            {
+                Console.WriteLine("=== CbsxCli /postinstall（后置阶段，独立进程） ===");
+                var po = new OneCore_Image_Designer.Services.PostInstallService.Options
+                {
+                    WinDir = o.WinDir!,
+                    Lang = o.Lang,
+                    ScratchDir = o.Scratch,
+                    SkuAssemblyFile = o.SkuFile,
+                    ResultFile = o.ResultFile,
+                };
+                // 从 skuassembly 推导 edition
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(o.SkuFile) && System.IO.File.Exists(o.SkuFile))
+                    {
+                        var mm = System.Text.RegularExpressions.Regex.Match(System.IO.File.ReadAllText(o.SkuFile),
+                            @"microsoft-windows-editions-([a-z0-9]+)-package",
+                            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                        if (mm.Success) po.Edition = char.ToUpperInvariant(mm.Groups[1].Value[0]) + mm.Groups[1].Value.Substring(1);
+                    }
+                }
+                catch { }
+                var (pok, psum) = OneCore_Image_Designer.Services.PostInstallService.Run(po, m => Console.WriteLine("  " + m));
+                Console.WriteLine();
+                Console.WriteLine(pok ? "  OK  后置阶段完成" : "  FAIL  后置阶段有失败项");
+                return pok ? 0 : 1;
+            }
 
             // /finish：以【独立进程】执行收尾（写 State.ini + imagestate）。
             // 必须独立成进程 —— CBS 服务会持有目标镜像的 hive 直到调用方进程退出，
@@ -181,6 +219,11 @@ internal static class Program
             if (a.StartsWith("/ep", StringComparison.OrdinalIgnoreCase)) { o.Enumerate = true; continue; }
             if (a.StartsWith("/dry", StringComparison.OrdinalIgnoreCase)) { o.Dry = true; continue; }
             if (a.StartsWith("/finish", StringComparison.OrdinalIgnoreCase)) { o.Finish = true; continue; }
+            if (a.StartsWith("/postinstall", StringComparison.OrdinalIgnoreCase)) { o.PostInstall = true; continue; }
+            if (a.StartsWith("/lang:", StringComparison.OrdinalIgnoreCase)) { o.Lang = a.Substring(6); continue; }
+            if (a.StartsWith("/scratch:", StringComparison.OrdinalIgnoreCase)) { o.Scratch = a.Substring(9).Trim('"'); continue; }
+            if (a.StartsWith("/sku:", StringComparison.OrdinalIgnoreCase)) { o.SkuFile = a.Substring(5).Trim('"'); continue; }
+            if (a.StartsWith("/result:", StringComparison.OrdinalIgnoreCase)) { o.ResultFile = a.Substring(8).Trim('"'); continue; }
             if (a.StartsWith("/waitfor:", StringComparison.OrdinalIgnoreCase))
             { int.TryParse(a.Substring("/waitfor:".Length), out o.WaitForPid); continue; }
 
@@ -197,7 +240,7 @@ internal static class Program
         if (o.Enumerate && !string.IsNullOrWhiteSpace(o.Batch)) error = "/ep 不能与 /b 同用";
         if (!string.IsNullOrWhiteSpace(o.Batch) && (o.Intent != SkuAssemblyService.PackageIntent.Unknown || o.Manifest != null))
             error = "/b 不能与 /ip /sp /up /m 同用";
-        if (!o.Enumerate && !o.Finish && string.IsNullOrWhiteSpace(o.Batch))
+        if (!o.Enumerate && !o.Finish && !o.PostInstall && string.IsNullOrWhiteSpace(o.Batch))
         {
             if (o.Intent == SkuAssemblyService.PackageIntent.Unknown) error = "缺少包操作（/ip | /sp | /up）";
             else if (string.IsNullOrWhiteSpace(o.Manifest)) error = "缺少 /m:<mum>";
@@ -225,6 +268,7 @@ internal static class Program
         Console.WriteLine(@"
 用法:
   CbsxCli /ep /o:<winDir> [/log:<path>]
+  CbsxCli /postinstall /o:<winDir> [/lang:..] [/scratch:..] [/sku:..] [/waitfor:<pid>]
   CbsxCli /finish /o:<winDir> [/waitfor:<pid>]   独立进程执行收尾（等 pid 退出后再做）
   CbsxCli /ip|/sp|/up /m:<mum> /o:<winDir> [/dry] [/log:<path>]
   CbsxCli /b:<batch> /o:<winDir> [/dry] [/log:<path>]

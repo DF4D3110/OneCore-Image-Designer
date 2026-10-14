@@ -43,6 +43,8 @@
     <Compile Include="..\..\Services\CbsxService.cs" />
     <Compile Include="..\..\Services\CbsSafety.cs" />
     <Compile Include="..\..\Services\FinishImageService.cs" />
+    <Compile Include="..\..\Services\PostInstallService.cs" />
+    <Compile Include="..\..\Services\DismServicingService.cs" />
     <Compile Include="..\..\Services\ArchRelay.cs" />
     <Compile Include="..\..\Services\PrivilegeHelper.cs" />
     <Compile Include="..\..\Services\OfflineRegistryService.cs" />

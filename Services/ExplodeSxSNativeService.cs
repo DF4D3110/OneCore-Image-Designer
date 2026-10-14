@@ -94,6 +94,10 @@ namespace OneCore_Image_Designer.Services
             public bool Success;
             public string Error = "";
             public bool RebootRequired;
+        /// <summary>后置阶段的独立进程 PID（非 0 表示已移交）。</summary>
+        public int PostInstallProcessId;
+        /// <summary>后置阶段结果文件路径。</summary>
+        public string PostInstallResultFile = "";
             public readonly List<string> Log = new();
             public readonly List<(string Step, bool Ok, string Detail)> Steps = new();
         }
@@ -362,6 +366,27 @@ namespace OneCore_Image_Designer.Services
 
             afterSku:;
 
+                // ── 步骤 2.5：把 CBS 持有的 hive 放掉，否则后面的 DISM 写操作全部报 E_ACCESSDENIED ──
+                // 实测依据（DISM 日志）：
+                //   CBS  Failed to unload offline registry: {bf1a281b-…}G:/Windows/System32/config/SOFTWARE,
+                //        the client may still need it open.  [HRESULT = 0x80070005 - E_ACCESSDENIED]
+                // 那个 "client" 就是我们自己 —— 本进程的 cbscore.dll 持有目标镜像的 hive，
+                // 而 DISM.EXE 是独立进程，抢不到。这与“收尾必须跨进程”是同一个根因。
+                {
+                    L("=== 步骤 2.5：释放本进程持有的服务栈模块与离线 hive（供 DISM 使用）===");
+                    try
+                    {
+                        CbsxService.ReleaseServicingStack(L);
+                        string drv = (Path.GetPathRoot(win) ?? "").TrimEnd('\\');
+                        if (drv.Length > 0)
+                        {
+                            int left = CbsSafety.ReleaseResidualHives(drv, L);
+                            L($"  {drv} 残留 hive: {left}");
+                        }
+                    }
+                    catch (Exception ex) { L("  释放异常: " + ex.Message); }
+                }
+
                 // ── 步骤 3：语言包 ──
                 if (!string.IsNullOrWhiteSpace(cfg.LanguagePackMum))
                 {
@@ -372,6 +397,65 @@ namespace OneCore_Image_Designer.Services
                     if (!r.Success) { res.Error = r.Error; return res; }
                 }
                 else L("=== 步骤 3/7：语言包已跳过 ===");
+
+                // ── 步骤 3.5：把后置阶段交给《独立进程》──
+                // 实测：apply-unattend 在本进程内报 dism 退出码 5（ERROR_ACCESS_DENIED），
+                // 而在《父进程退出后》的独立进程里跑同一条命令 exit 0成功 ——
+                // CBS 服务在会话结束后仍独占目标镜像的 hive，而 apply-unattend 需要独占。
+                {
+                    L("=== 步骤 3.5：后置阶段交给独立进程（apply-unattend / intl / cleanup / 收尾）===");
+                    string? cli = null;
+                    foreach (var cand in new[]
+                    {
+                        Path.Combine(AppContext.BaseDirectory, "CbsxCli.exe"),
+                        Path.Combine(AppContext.BaseDirectory, "tools", "CbsxCli.exe"),
+                        Path.Combine(AppContext.BaseDirectory, "..", "CbsxCli", "CbsxCli.exe"),
+                    }) if (File.Exists(cand)) { cli = Path.GetFullPath(cand); break; }
+                
+                    if (cli == null)
+                    {
+                        L("  未找到 CbsxCli.exe —— 后置阶段无法执行（同进程跑会报 ERROR_ACCESS_DENIED）");
+                        Step("后置阶段交独立进程", false, "找不到 CbsxCli.exe");
+                    }
+                    else
+                    {
+                        string resultFile = Path.Combine(Path.GetTempPath(), "ocid_postinstall_" + DateTime.Now.ToString("HHmmss") + ".log");
+                        var psi = new System.Diagnostics.ProcessStartInfo(cli)
+                        {
+                            UseShellExecute = false, CreateNoWindow = true,
+                            RedirectStandardOutput = true, RedirectStandardError = true
+                        };
+                        psi.ArgumentList.Add("/postinstall");
+                        psi.ArgumentList.Add("/o:" + win);
+                        if (!string.IsNullOrWhiteSpace(cfg.Lang)) psi.ArgumentList.Add("/lang:" + cfg.Lang);
+                        if (!string.IsNullOrWhiteSpace(cfg.ScratchDir)) psi.ArgumentList.Add("/scratch:" + cfg.ScratchDir);
+                        if (!string.IsNullOrWhiteSpace(cfg.SkuAssemblyFile)) psi.ArgumentList.Add("/sku:" + cfg.SkuAssemblyFile);
+                        psi.ArgumentList.Add("/result:" + resultFile);
+                        // 等本进程退出再做 —— 本进程持有 hive，不退出子进程也抢不到
+                        psi.ArgumentList.Add("/waitfor:" + Environment.ProcessId);
+                        try
+                        {
+                            var p = System.Diagnostics.Process.Start(psi);
+                            if (p != null)
+                            {
+                                L($"  已交给独立进程 PID {p.Id}。它会等本进程退出后自动完成；");
+                                L($"  结果将写入: {resultFile}");
+                                Step("后置阶段交独立进程", true,
+                                     $"PID {p.Id}，结果: {Path.GetFileName(resultFile)}");
+                                res.PostInstallProcessId = p.Id;
+                                res.PostInstallResultFile = resultFile;
+                            }
+                            else Step("后置阶段交独立进程", false, "进程启动返回 null");
+                        }
+                        catch (Exception ex) { L("  启动后置进程异常: " + ex.Message); }
+                    }
+                }
+
+                // ── 步骤 4-7 现在由独立进程执行，本进程到此结束 ──
+                res.Success = res.Steps.All(x => x.Ok);
+                res.RebootRequired = false;
+                L("后置阶段已移交：apply-unattend / get-editions / set-allintl / cleanup / 收尾，结果见上面的结果文件。");
+                return res;
 
                 // ── 步骤 4：edition unattend + 校验 ──
                 // ── 步骤 4：SKU 配置（照 explodeSxS 的两步）──
