@@ -32,6 +32,8 @@ namespace OneCore_Image_Designer.Services
             public string Identity = "";    // 完整 CBS 包名
             public string Architecture = "";
             public string Version = "";
+            /// <summary>语言段；空 = 语言中性（~~）。中性变体才是"这个 SKU 本身"。</summary>
+            public string Language = "";
             public string MumPath = "";
             /// <summary>原始文件名里的 edition 段（小写）。</summary>
             public string RawName => Name;
@@ -97,12 +99,22 @@ namespace OneCore_Image_Designer.Services
                         Identity = stem,
                         Architecture = arch,
                         Version = mm.Groups["ver"].Value,
+                        Language = mm.Groups["lang"].Value,
                         MumPath = m
                     };
-                    // 同名的保留版本最高的
-                    if (!found.TryGetValue(name, out var prev)
-                        || CompareVersion(e.Version, prev.Version) > 0)
+                    // 同名的挑选顺序：**语言中性优先**（那才是这个 SKU 本身，而不是某个语言的
+                    // 本地化变体），其次版本更高的。
+                    // 早前只比版本，结果从 36 个候选中挑中了 ar-sa 变体 —— 错的。
+                    if (!found.TryGetValue(name, out var prev))
                         found[name] = e;
+                    else
+                    {
+                        bool eNeutral = string.IsNullOrWhiteSpace(e.Language);
+                        bool pNeutral = string.IsNullOrWhiteSpace(prev.Language);
+                        if (eNeutral && !pNeutral) found[name] = e;
+                        else if (eNeutral == pNeutral && CompareVersion(e.Version, prev.Version) > 0)
+                            found[name] = e;
+                    }
                 }
             }
             log?.Invoke($"扫描 {scanned} 个 mum，发现 {found.Count} 个可用 SKU");
@@ -166,7 +178,18 @@ namespace OneCore_Image_Designer.Services
             var plan = new Plan();
             try
             {
-                var dirs = sourceDirs.Where(d => !string.IsNullOrWhiteSpace(d)).ToList();
+                // ⚠ BuildGraph 只扫【顶层】（外加 Manifests 子目录）。而实际拿到的
+                // "SxS 存储根"（例 E:\rc_store）下面是一层包目录，mum 在包目录里 ——
+                // 直接传根目录会得到 0 个节点。所以这里把每个来源展开成
+                // 「自身 + 其一级子目录」。
+                var dirs = new List<string>();
+                foreach (var d in sourceDirs.Where(d => !string.IsNullOrWhiteSpace(d) && Directory.Exists(d)))
+                {
+                    dirs.Add(d);
+                    try { dirs.AddRange(Directory.GetDirectories(d)); } catch { }
+                }
+                dirs = dirs.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
                 string want = NormalizeEdition(edition);
                 if (want.Length == 0) { plan.Error = "未指定目标 SKU（edition）"; return plan; }
 
