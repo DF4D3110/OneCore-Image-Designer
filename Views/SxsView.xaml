@@ -50,7 +50,7 @@
 
         <!-- ═══════════ 路由条（常驻） ═══════════ -->
         <Border Grid.Row="1" Margin="0,12,0,0" Padding="12,8" CornerRadius="4"
-                Background="{StaticResource ICDCard}">
+                Style="{StaticResource ICDCard}">
             <TextBlock Text="{Binding RoutingStrip}" TextWrapping="Wrap"
                        Foreground="{StaticResource ICDAccentDark}" FontWeight="SemiBold"/>
         </Border>

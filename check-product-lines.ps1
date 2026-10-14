@@ -122,18 +122,50 @@ foreach ($d in $DesktopDirs) {
     }
 }
 
-Write-Host "产品线边界检查（$RepoRoot）" -ForegroundColor Cyan
+# ══════════════════════════════════════════════════════════════════════════
+#  附加检查：XAML 资源【类型】是否用对
+#
+#  教训（真实崩溃）：资源键存在 ≠ 类型正确。
+#  把 Style 赋给 Background 会在**运行时**抛
+#      ArgumentException: "System.Windows.Style" 不是属性 "Background" 的有效值
+#  编译期完全不查（与产品线无关，但同样会炸）。
+#  这里只做一类高价值检查：Background 引用的键不能是 Style。
+# ══════════════════════════════════════════════════════════════════════════
+
+$appXaml = Join-Path $RepoRoot 'App.xaml'
+if (Test-Path -LiteralPath $appXaml) {
+    $appText = Get-Content -LiteralPath $appXaml -Raw -Encoding UTF8
+    $styleKeys = [regex]::Matches($appText, 'x:Key="(\w+)"[^>]*?TargetType=') |
+        ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+
+    $xamlFiles = Get-ChildItem -LiteralPath $RepoRoot -Recurse -File -Include '*.xaml' -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch '\\obj\\|\\bin\\|\\ThirdParty\\|\\MobilePackageGen\\' }
+
+    foreach ($xf in $xamlFiles) {
+        $xt = Get-Content -LiteralPath $xf.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        if (-not $xt) { continue }
+        foreach ($m in [regex]::Matches($xt, 'Background="\{StaticResource (\w+)\}?"?')) {
+            $k = $m.Groups[1].Value
+            if ($styleKeys -contains $k) {
+                $rel = $xf.FullName.Substring($RepoRoot.Length).TrimStart('\')
+                $violations.Add("XAML 类型错误：Background 引用了 Style 键 [$k] -> $rel（应为 Brush；Border 请用 Style= 而不是 Background=）")
+            }
+        }
+    }
+}
+
+Write-Host "项目守卫检查（产品线边界 + XAML 资源类型）（$RepoRoot）" -ForegroundColor Cyan
 Write-Host ("  WCOS 文件集合 : {0} 个文件/前缀" -f $WcosDirs.Count)
 Write-Host ("  desktop 页面  : {0} 个文件/前缀" -f $DesktopDirs.Count)
 Write-Host ("  共用组件      : {0} 个（{1}）" -f $Shared.Count, ($Shared -join ", "))
 Write-Host ""
 
 if ($violations.Count -eq 0) {
-    Write-Host "  ✅ 未发现跨产品线引用" -ForegroundColor Green
+    Write-Host "  ✅ 产品线边界与 XAML 资源类型均无问题" -ForegroundColor Green
     exit 0
 }
 
-Write-Host ("  ❌ 发现 {0} 处跨产品线引用：" -f $violations.Count) -ForegroundColor Red
+Write-Host ("  ❌ 发现 {0} 处问题：" -f $violations.Count) -ForegroundColor Red
 foreach ($v in $violations) { Write-Host "     $v" -ForegroundColor Red }
 Write-Host ""
 Write-Host "  处理方式：把该能力移到它所属那一侧的页面/服务；" -ForegroundColor Yellow

@@ -35,7 +35,7 @@
                    Text="CBS 构建：把一组包 CAB 按其 update.mum 声明的目标路径展开为目录树（含 Windows\WinSxS 存储、servicing\Packages、System32\catroot 等）。"/>
 
             <Border Margin="0,0,0,10" Padding="10,8" CornerRadius="4"
-                    Background="{StaticResource ICDCard}">
+                    Style="{StaticResource ICDCard}">
                 <TextBlock Text="{Binding RoutingStrip}" TextWrapping="Wrap"
                            Foreground="{StaticResource ICDAccentDark}" FontWeight="SemiBold"/>
             </Border>
@@ -121,7 +121,7 @@
                     <CheckBox Content="试运行（不修改镜像）" IsChecked="{Binding ServicingDryRun}" VerticalAlignment="Center"/>
                 </StackPanel>
 
-                <Border Margin="0,8,0,0" Padding="10,8" Background="{StaticResource ICDCard}" CornerRadius="4">
+                <Border Margin="0,8,0,0" Padding="10,8" Style="{StaticResource ICDCard}" CornerRadius="4">
                     <TextBlock Text="{Binding ChannelBanner}" TextWrapping="Wrap" Foreground="{StaticResource ICDAccentDark}"/>
                 </Border>
 
