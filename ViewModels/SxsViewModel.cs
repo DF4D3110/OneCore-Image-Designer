@@ -1,419 +1,575 @@
 using System;
-using System.ComponentModel;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using OneCore_Image_Designer.Models;
+using Microsoft.Win32;
 using OneCore_Image_Designer.Services;
 
 namespace OneCore_Image_Designer.ViewModels
 {
+    /// <summary>
+    /// SxS / CBS 工具页（desktop 线）。
+    ///
+    /// 【设计原则】本页**不依赖任何外部可执行文件或脚本**。
+    /// 原来随应用分发的 `ThirdParty\SxS`（cbsx.exe / sxsfounder.exe / puresxs.py /
+    /// havesxs.py / cbss.cmd / prepare.cmd / captureimg.cmd / finishimg.cmd /
+    /// imagestate.reg / skuassembly.txt）**已全部删除**，能力逐项由本程序内的 C# 实现承担：
+    ///
+    ///   cbsx.exe          → <see cref="CbsxService"/>
+    ///   sxsfounder.exe    → <see cref="SxSFounderService"/>
+    ///   puresxs/havesxs   → <see cref="PureSxsService"/> + <see cref="WinSxSHashCalculator"/>
+    ///   cbss/prepare/captureimg/finishimg → <see cref="ExplodeSxSNativeService"/>
+    ///   imagestate.reg    → <see cref="ExplodeSxSNativeService.FinishImageStep"/>
+    ///   skuassembly.txt   → <see cref="SkuPlanBuilder"/>
+    ///   base.manifest     → <see cref="ManifestDecompressor"/>
+    ///
+    /// 【强制约束】凡会写镜像的操作，目标必须是【挂载的 VHD/VHDX】上的镜像
+    /// （<see cref="CbsSafety"/> 门禁），且所有写入操作默认「试运行」。
+    ///
+    /// 【产品线】本页属 **desktop**。DeviceLayout / FeatureManifest / OEMInput / FFU
+    /// 均属 WCOS 侧，不在此页出现。见 PRODUCT_LINES.md。
+    /// </summary>
     public partial class SxsViewModel : ObservableObject
     {
-        private readonly IntegrationToolService _service = new();
-        private readonly SxsWorkflowPreflightService _preflight = new();
-        // 原先这里指向随应用分发的 ThirdParty\SxS（内含 GPL 的 cbsx.exe / sxsfounder.exe
-        // 与 puresxs.py / havesxs.py / *.cmd）。**该目录已删除** —— 那些能力现在全部由
-        // 本程序自己的 C# 实现提供，不再需要任何外部工具或脚本。
-        private static readonly string SxsRoot = AppDomain.CurrentDomain.BaseDirectory;
+        TaskLogSink? _taskSink;
+        Views.TaskLogWindow? _taskWin;
 
-        [ObservableProperty] private string _status = "正在检查随应用集成的 SxS 源码";
-        [ObservableProperty] private string _imagePath = string.Empty;
-        [ObservableProperty] private string _outputDirectory = string.Empty;
-        [ObservableProperty] private string _previewSummary = "选择输入镜像和输出目录后运行安全预检。";
-        [ObservableProperty] private bool _previewReady;
+        [ObservableProperty] private string _status = "就绪。";
 
-        public ObservableCollection<ToolProbeResult> Tools { get; } = new();
         public ObservableCollection<string> LogLines { get; } = new();
-        public ObservableCollection<string> PreviewInputs { get; } = new();
-        public ObservableCollection<string> PreviewOutputs { get; } = new();
-        public ObservableCollection<string> PreflightChecks { get; } = new();
-        public string BundledSourceDirectory => SxsRoot;
 
-        // ── pureSxS 导出（C# 重写，无需 Python）──
-        [ObservableProperty] private string _pureSourceMum = string.Empty;
-        [ObservableProperty] private string _pureOutputDir = string.Empty;
-        [ObservableProperty] private bool _isPureExporting;
+        // ════════════════════════════════════════════════════════════════
+        //  一、目标镜像与路由判定
+        // ════════════════════════════════════════════════════════════════
 
-        // ── 供原生流程复用的输入（架构 / 语言 / 语言包）；旧 explodeSxS 命令已移除，字段保留 ──
-        [ObservableProperty] private string _explodeWorkDrive = "X:\\";
-        [ObservableProperty] private string _explodeEdition = "Core";
-        [ObservableProperty] private string _explodeArch = "amd64";
-        [ObservableProperty] private string _explodeLang = "en-US";
-        [ObservableProperty] private string _explodeServicingStack = string.Empty;
-        [ObservableProperty] private string _explodeLanguagePack = string.Empty;
-        [ObservableProperty] private bool _explodeFormatDrive;
-        [ObservableProperty] private bool _explodeCaptureWim;
-        [ObservableProperty] private bool _isExploding;
-        [ObservableProperty] private string _explodeSummary = "预检后显示就绪状态。CBS 工具（cbsx/sxsfounder）自动从仓库 bin 或 D:\\sxs 发现。";
+        [ObservableProperty] private string _targetWinDir = string.Empty;
 
-        private Services.TaskLogSink? _taskSink;
-        private Views.TaskLogWindow? _taskWin;
+        [ObservableProperty] private string _routingStrip =
+            "填写目标镜像的 Windows 目录后点『判定路由』。";
 
-        private Services.TaskLogSink EnsureTaskLog(string title)
-        {
-            if (_taskSink == null || _taskWin is { IsLoaded: false })
-            {
-                _taskSink = new Services.TaskLogSink(title);
-                _taskWin = new Views.TaskLogWindow(_taskSink) { Owner = Application.Current?.MainWindow };
-                _taskWin.Show();
-            }
-            return _taskSink;
-        }
-
-        public SxsViewModel() => DiscoverTools();
+        [ObservableProperty] private bool _isBusy;
 
         [RelayCommand]
-        private void DiscoverTools()
+        private void BrowseTargetWinDir()
         {
-            Tools.Clear();
-            foreach (var tool in _service.DiscoverSxs(SxsRoot)) Tools.Add(tool);
-            Status = $"已发现 {Tools.Count(t => t.IsAvailable)} / {Tools.Count} 个 SxS 工具";
-            Log(Status);
+            var dlg = new OpenFolderDialog { Title = "选择目标镜像根（其下应有 Windows 目录；必须在挂载的 VHD/VHDX 上）" };
+            if (dlg.ShowDialog() != true) return;
+            string root = dlg.FolderName;
+            TargetWinDir = Directory.Exists(Path.Combine(root, "Windows"))
+                ? Path.Combine(root, "Windows")
+                : root;
         }
 
+        /// <summary>判定架构、世代与通道；结论一句话呈现。</summary>
         [RelayCommand]
-        private void OpenSourceDirectory()
+        private async Task CheckRouteAsync()
         {
+            if (string.IsNullOrWhiteSpace(TargetWinDir)) { RoutingStrip = "请先填写目标镜像的 Windows 目录。"; return; }
+            IsBusy = true;
             try
             {
-                if (!Directory.Exists(SxsRoot))
-                    throw new DirectoryNotFoundException($"随应用集成的 SxS 源码目录不存在：{SxsRoot}");
-                Process.Start(new ProcessStartInfo
+                var result = await Task.Run(() =>
                 {
-                    FileName = SxsRoot,
-                    UseShellExecute = true
+                    var d = ServicingRouter.Decide(TargetWinDir);
+                    var (imgArch, archEv) = ArchRelay.DetectImageArchitecture(TargetWinDir);
+                    var me = ArchRelay.CurrentProcessArch();
+                    bool relay = imgArch != ArchRelay.Arch.Unknown && imgArch != me;
+                    string strip = $"镜像架构 {ArchRelay.ToToken(imgArch)} · 进程 {ArchRelay.ToToken(me)}"
+                                 + $" · 世代 {(d.Scheme ?? "未知")} · 通道 【{d.Channel}】"
+                                 + (relay ? "（架构不符 → 由 DISM 代劳）" : "");
+                    string detail = strip + "\n" + d.Reason + "\n镜像架构判定依据：" + archEv;
+                    return (strip, detail);
                 });
+                RoutingStrip = result.strip;
+                Status = "路由判定完成。";
+                Log(RoutingStrip);
+                Log("  " + result.detail.Replace("\n", "\n  "));
             }
-            catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or DirectoryNotFoundException)
-            {
-                MessageBox.Show(ex.Message, "无法打开 SxS 源码目录",
-                    MessageBoxButton.OK, MessageBoxImage.Warning);
-            }
+            catch (Exception ex) { RoutingStrip = "判定失败：" + ex.Message; }
+            finally { IsBusy = false; }
         }
 
-        [RelayCommand]
-        private void ShowUsage()
-        {
-            MessageBox.Show(
-                "SxS / CBS 功能独立于 UUP。\n\n" +
-                "【pureSxS】处理组件来源与纯 SxS 目录；已用 C# 重写，不需要 Python。\n" +
-                "【explodeSxS】把镜像的 CBS/SxS 存储展开或组装；已用 C# 重写，不需要外部脚本。\n\n" +
-                "── 现在全部由本程序自己完成，不再依赖任何外部工具 ──\n" +
-                "  1) 铺底          ：WCP 铺底（等价原 sxsfounder.exe）\n" +
-                "  2) 装 SKU/组件   ：CBS 组件安装（等价原 cbsx.exe /b:）\n" +
-                "     镜像属 6.x 体系 → 走原生 CBS 通道；10.0 及以后 → 自动改走 DISM\n" +
-                "  3) 语言包/无人值守/语言配置/组件清理：DISM\n" +
-                "  4) 收尾          ：写 State.ini 与 imagestate\n\n" +
-                "── 强制约束 ──\n" +
-                "  目标镜像必须位于【挂载的 VHD/VHDX】上。CBS 会挂载并改写目标镜像的注册表 hive，\n" +
-                "  对物理盘或宿主系统盘执行会破坏系统，因此程序会直接拒绝。\n" +
-                "  建议先用『原生流程预检』与『试运行』确认，再执行真实操作。\n\n" +
-                "── 系统组装（新增）──\n" +
-                "  从 SxS 内容出发，先算清组件之间的依赖关系，排出安装顺序，再交给 CBS 通道执行。\n\n" +
-                "── 命令行等价物 ──\n" +
-                "  CbsxCli.exe（原 cbsx 替代）· SxSFounderCli.exe（原 sxsfounder 替代）",
-                "SxS / CBS 工具说明", MessageBoxButton.OK, MessageBoxImage.Information);
-        }
+        // ════════════════════════════════════════════════════════════════
+        //  二、原生流程（铺底 → 装 SKU → DISM → 收尾）
+        // ════════════════════════════════════════════════════════════════
 
-        [RelayCommand]
-        private void BrowseImage()
-        {
-            var dialog = new Microsoft.Win32.OpenFileDialog
-            {
-                Title = "选择待处理的 Windows 镜像",
-                Filter = "Windows images (*.wim;*.esd;*.ffu)|*.wim;*.esd;*.ffu|All files (*.*)|*.*"
-            };
-            if (dialog.ShowDialog() == true) ImagePath = dialog.FileName;
-        }
-
-        [RelayCommand]
-        private void BrowseOutput()
-        {
-            var dialog = new Microsoft.Win32.OpenFolderDialog { Title = "选择预览的输出目录" };
-            if (dialog.ShowDialog() == true) OutputDirectory = dialog.FolderName;
-        }
-
-        [RelayCommand]
-        private void RunPreflight()
-        {
-            var preview = _preflight.Preview(ImagePath, OutputDirectory, SxsRoot);
-            PreviewInputs.Clear();
-            foreach (var input in preview.Inputs) PreviewInputs.Add(input);
-            PreviewOutputs.Clear();
-            foreach (var output in preview.PlannedOutputs) PreviewOutputs.Add(output);
-            PreflightChecks.Clear();
-            foreach (var check in preview.Checks) PreflightChecks.Add(check);
-            PreviewSummary = preview.Summary;
-            PreviewReady = preview.Ready;
-            Status = preview.Ready ? "预检通过；此页面仍不会自动运行 SxS 操作。" : "安全预览完成；存在阻断项，未执行任何镜像操作。";
-            Log(Status);
-        }
-
-        [RelayCommand]
-        private void BrowsePureSource()
-        {
-            var dlg = new Microsoft.Win32.OpenFileDialog
-            { Title = "选择 CBS 包 .mum（WinSxS\\Manifests 或已 stage 包目录）", Filter = "包清单 (*.mum)|*.mum|所有文件 (*.*)|*.*" };
-            if (dlg.ShowDialog() == true) PureSourceMum = dlg.FileName;
-        }
-
-        [RelayCommand]
-        private void BrowsePureOutput()
-        {
-            var dlg = new Microsoft.Win32.OpenFolderDialog { Title = "选择 pureSxS 输出目录" };
-            if (dlg.ShowDialog() == true) PureOutputDir = dlg.FolderName;
-        }
-
-        [RelayCommand(CanExecute = nameof(CanPureExport))]
-        private async Task RunPureExportAsync()
-        {
-            if (string.IsNullOrWhiteSpace(PureSourceMum) || !File.Exists(PureSourceMum)
-                || string.IsNullOrWhiteSpace(PureOutputDir))
-            {
-                MessageBox.Show("请选择有效的源 .mum 与输出目录。", "pureSxS", MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
-            }
-            IsPureExporting = true;
-            var sink = EnsureTaskLog("pureSxS 导出");
-            try
-            {
-                var res = await PureSxsService.ExportAsync(PureSourceMum, PureOutputDir, m => sink.Write(m));
-                sink.Write(res.Success
-                    ? $"✅ pureSxS 完成：包 {res.PackagesCopied}、组件 {res.ComponentsCopied}、程序集 {res.AssembliesCopied}、缺失 {res.Missing} → {PureOutputDir}"
-                    : "❌ pureSxS 失败：" + res.Error);
-                Status = res.Success ? "pureSxS 导出完成（日志见独立窗口）" : "pureSxS 导出失败";
-            }
-            finally
-            {
-                sink.MarkFinished();
-                IsPureExporting = false;
-            }
-        }
-        bool CanPureExport() => !IsPureExporting;
-
-        // ─── 旧 explodeSxS 路线已整体移除 ───
-        // 原实现拼 PowerShell 序列、把 cbsx.exe / sxsfounder.exe 拷到工作盘再运行（外部 exe 调度）。
-        // 现已由 ExplodeSxSNativeService（全 C#）取代，见下方"原生流程"。
-        // · servicing stack 改为自动解析，不再需要手选 .mum（故移除 BrowseExplodeStack）
-        // · 语言包仍需指定，保留 BrowseExplodeLangPack
-        // · _explodeArch / _explodeLang / _explodeLanguagePack 被原生流程复用，字段保留
-
-        [RelayCommand]
-        private void BrowseExplodeLangPack()
-        {
-            var dlg = new Microsoft.Win32.OpenFileDialog { Title = "选择语言包 .mum", Filter = "包清单 (*.mum)|*.mum" };
-            if (dlg.ShowDialog() == true) ExplodeLanguagePack = dlg.FileName;
-        }
-
-        // ─────────────── 原生流程（纯 C#，不使用 cbsx.exe / sxsfounder.exe）───────────────
-        // 纯增量：不改动上面任何现有字段与命令，避免影响既有 UI 行为。
-        // 对应 ExplodeSxSNativeService：WCP 铺底 → CBS 装 SKU → DISM 收尾 → 可选捕获。
-
-        [ObservableProperty] private string _nativeWinDir = string.Empty;
+        [ObservableProperty] private string _nativeArch = "amd64";
+        [ObservableProperty] private string _nativeLang = "en-US";
+        [ObservableProperty] private string _nativeLanguagePack = string.Empty;
         [ObservableProperty] private string _nativeSkuAssemblyFile = string.Empty;
         [ObservableProperty] private bool _nativeDryRun = true;
-        [ObservableProperty] private bool _nativeCaptureWim;
-        [ObservableProperty] private bool _isNativeRunning;
         [ObservableProperty] private string _nativeSummary =
-            "原生流程：全部由 C# 完成（WCP 铺底 + CBS 装 SKU + DISM 收尾），不需要 cbsx.exe / sxsfounder.exe。\n"
-            + "目标必须是【挂载的 VHD/VHDX】上的镜像（例如 G:\\Windows）——这是强制约束，用于保护宿主系统。";
+            "全流程由本程序完成：WCP 铺底 → CBS 装 SKU → DISM 步骤 → 收尾写 State.ini 与 imagestate。\n"
+            + "目标必须是【挂载的 VHD/VHDX】上的镜像；默认『试运行』，不改动任何东西。";
 
         [RelayCommand]
-        private void RunNativePreflight()
+        private void BrowseNativeLanguagePack()
         {
-            try
-            {
-                var cfg = MakeNativeConfig(dryRun: true);
-                var (ready, checks, blockers) = ExplodeSxSNativeService.Preflight(cfg);
-                var sb = new System.Text.StringBuilder();
-                foreach (var c in checks) sb.AppendLine("✓ " + c);
-                foreach (var b in blockers) sb.AppendLine("✗ " + b);
-                NativeSummary = sb.ToString().TrimEnd();
-                Status = ready ? "原生流程预检通过，可执行。" : "原生流程预检存在阻断项。";
-                Log(Status);
-            }
-            catch (Exception ex)
-            {
-                NativeSummary = "预检异常：" + ex.Message;
-                Log(NativeSummary);
-            }
+            var dlg = new OpenFileDialog { Title = "选择语言包 .mum", Filter = "包清单 (*.mum)|*.mum|所有文件 (*.*)|*.*" };
+            if (dlg.ShowDialog() == true) NativeLanguagePack = dlg.FileName;
         }
 
-        [RelayCommand(CanExecute = nameof(CanRunNative))]
-        private async Task RunNativeAsync()
+        [RelayCommand]
+        private void BrowseNativeSkuFile()
         {
-            if (string.IsNullOrWhiteSpace(NativeWinDir))
-            {
-                MessageBox.Show("请填写镜像的 Windows 目录（例如 G:\\Windows）。", "原生流程",
-                    MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
-            }
+            var dlg = new OpenFileDialog { Title = "选择 SKU 组装清单（skuassembly.txt）", Filter = "清单 (*.txt)|*.txt|所有文件 (*.*)|*.*" };
+            if (dlg.ShowDialog() == true) NativeSkuAssemblyFile = dlg.FileName;
+        }
 
-            var cfg = MakeNativeConfig(dryRun: NativeDryRun);
-            NativeSummary = NativeDryRun ? "试运行中…" : "执行中…（不要关闭程序）";
-            IsNativeRunning = true;
-            RunNativeCommand.NotifyCanExecuteChanged();
-            RunNativePreflightCommand.NotifyCanExecuteChanged();
-            var sink = EnsureTaskLog("原生流程");
+        [RelayCommand]
+        private async Task RunNativePreflightAsync()
+        {
+            if (string.IsNullOrWhiteSpace(TargetWinDir)) { NativeSummary = "请先填写目标镜像的 Windows 目录。"; return; }
+            IsBusy = true;
             try
             {
-                var res = await ExplodeSxSNativeService.RunAsync(cfg, m => sink.Write(m));
+                var pf = await Task.Run(() => ExplodeSxSNativeService.Preflight(MakeNativeConfig(dryRun: true)));
                 var sb = new System.Text.StringBuilder();
-                foreach (var (step, ok, detail) in res.Steps)
-                    sb.AppendLine((ok ? "✓ " : "✗ ") + step + "：" + detail);
+                foreach (var c in pf.checks) sb.AppendLine("✓ " + c);
+                foreach (var b in pf.blockers) sb.AppendLine("✗ " + b);
+                NativeSummary = sb.ToString().TrimEnd();
+                Status = pf.ready ? "预检通过，可执行。" : "预检存在阻断项。";
+                Log(Status);
+                foreach (var c in pf.checks) Log("  ✓ " + c);
+                foreach (var b in pf.blockers) Log("  ✗ " + b);
+            }
+            catch (Exception ex) { NativeSummary = "预检异常：" + ex.Message; }
+            finally { IsBusy = false; }
+        }
+
+        [RelayCommand]
+        private async Task RunNativeAsync()
+        {
+            if (string.IsNullOrWhiteSpace(TargetWinDir)) { Status = "请先填写目标镜像的 Windows 目录。"; return; }
+            if (!NativeDryRun &&
+                MessageBox.Show("将以真实模式执行，**会写入目标镜像**。\n\n确认目标位于挂载的 VHD/VHDX 上？",
+                    "原生流程确认", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                return;
+
+            IsBusy = true;
+            NativeSummary = NativeDryRun ? "试运行中…" : "执行中…（不要关闭程序）";
+            var sink = EnsureTaskLog("SxS / CBS 原生流程");
+            try
+            {
+                var res = await ExplodeSxSNativeService.RunAsync(MakeNativeConfig(NativeDryRun), m => sink.Write(m));
+                var sb = new System.Text.StringBuilder();
+                foreach (var st in res.Steps)
+                    sb.AppendLine((st.Ok ? "✓ " : "✗ ") + st.Step + "：" + st.Detail);
                 if (res.Error.Length > 0) sb.AppendLine("错误：" + res.Error);
                 if (res.RebootRequired) sb.AppendLine("CBS 提示需要重启。");
                 NativeSummary = sb.ToString().TrimEnd();
                 Status = res.Success ? "原生流程完成。" : "原生流程失败：" + res.Error;
                 Log(Status);
             }
-            catch (Exception ex)
-            {
-                NativeSummary = "异常：" + ex.GetType().Name + ": " + ex.Message;
-                Log(NativeSummary);
-            }
-            finally
-            {
-                sink.MarkFinished();
-                IsNativeRunning = false;
-                RunNativeCommand.NotifyCanExecuteChanged();
-                RunNativePreflightCommand.NotifyCanExecuteChanged();
-            }
+            catch (Exception ex) { NativeSummary = "异常：" + ex.Message; }
+            finally { sink.MarkFinished(); IsBusy = false; }
         }
-
-        bool CanRunNative() => !IsNativeRunning && !IsExploding && !IsPureExporting;
 
         ExplodeSxSNativeService.Config MakeNativeConfig(bool dryRun) => new()
         {
-            WinDir = NativeWinDir?.Trim() ?? string.Empty,
-            ImageRoot = string.IsNullOrWhiteSpace(NativeWinDir)
-                ? string.Empty
-                : ExplodeSxSNativeService.DeriveImageRoot(NativeWinDir.Trim()),
-            Arch = string.IsNullOrWhiteSpace(ExplodeArch) ? "amd64" : ExplodeArch.Trim(),
+            WinDir = TargetWinDir.Trim(),
+            ImageRoot = string.IsNullOrWhiteSpace(TargetWinDir) ? string.Empty
+                      : ExplodeSxSNativeService.DeriveImageRoot(TargetWinDir.Trim()),
+            Arch = string.IsNullOrWhiteSpace(NativeArch) ? "amd64" : NativeArch.Trim(),
+            Lang = string.IsNullOrWhiteSpace(NativeLang) ? "en-US" : NativeLang.Trim(),
+            LanguagePackMum = NativeLanguagePack?.Trim() ?? string.Empty,
             SkuAssemblyFile = NativeSkuAssemblyFile?.Trim() ?? string.Empty,
-            LanguagePackMum = ExplodeLanguagePack?.Trim() ?? string.Empty,
-            Lang = string.IsNullOrWhiteSpace(ExplodeLang) ? "en-US" : ExplodeLang.Trim(),
-            CaptureWim = NativeCaptureWim,
-            WimPath = string.IsNullOrWhiteSpace(OutputDirectory)
-                ? string.Empty
-                : System.IO.Path.Combine(OutputDirectory, "install.wim"),
-            WimName = "Windows",
             DryRun = dryRun
         };
 
-        private void Log(string text) => EnsureTaskLog("SxS 操作日志").Write(text);
+        // ════════════════════════════════════════════════════════════════
+        //  三、目标 SKU（edition）—— 只装这一个
+        // ════════════════════════════════════════════════════════════════
 
-        // ─────────────── 系统组装（组件之间的联系 → 组装顺序 → 交给 CBS）───────────────
-        // 纯增量：不动上面任何现有成员。
-        // 对应 SystemAssemblyService：建依赖图 → 算闭包与拓扑序 → 按世代选通道执行。
-
-        [ObservableProperty] private string _assemblySourceDirs = string.Empty;
-        [ObservableProperty] private string _assemblyWinDir = string.Empty;
-        [ObservableProperty] private string _assemblySeeds = string.Empty;
-        [ObservableProperty] private bool _assemblyPlanOnly = true;
-        [ObservableProperty] private bool _isAssemblyRunning;
-        [ObservableProperty] private string _assemblySummary =
-            "系统组装：从 SxS 内容出发，先算清组件之间的依赖关系，排出安装顺序，再交给 CBS 通道执行。\n"
-            + "源目录可填多个，用分号分隔（例如包目录;Manifest 目录）。目标必须是【挂载的 VHD/VHDX】上的镜像。";
+        [ObservableProperty] private string _targetSku = string.Empty;
+        [ObservableProperty] private string _skuArchFilter = string.Empty;
+        [ObservableProperty] private string _availableSkus = string.Empty;
+        [ObservableProperty] private string _skuSummary =
+            "SKU 由装哪个 Microsoft-Windows-Editions-* 决定，**只装一个**。"
+            + "本页以该 edition 为唯一种子算依赖闭包并生成组装清单。";
 
         [RelayCommand]
-        private void RunAssemblyGraph()
+        private async Task DiscoverSkusAsync()
         {
             try
             {
-                var dirs = SplitDirs(AssemblySourceDirs);
-                if (dirs.Count == 0)
+                var dirs = SplitPaths(SkuSourceDirs);
+                if (dirs.Count == 0) { AvailableSkus = "请先在『系统组装』区填写 SxS 内容目录。"; return; }
+                IsBusy = true;
+                var eds = await Task.Run(() => SkuPlanBuilder.DiscoverEditions(dirs,
+                    string.IsNullOrWhiteSpace(SkuArchFilter) ? null : SkuArchFilter.Trim()));
+                AvailableSkus = SkuPlanBuilder.RenderEditions(eds);
+                if (string.IsNullOrWhiteSpace(TargetSku) && eds.Count > 0)
+                    TargetSku = (eds.FirstOrDefault(e => e.Name.Equals("professional", StringComparison.OrdinalIgnoreCase))
+                                 ?? eds[0]).Name;
+                Status = $"发现 {eds.Count} 个可用 SKU";
+            }
+            catch (Exception ex) { AvailableSkus = "扫描异常：" + ex.Message; }
+            finally { IsBusy = false; }
+        }
+
+        [RelayCommand]
+        private async Task BuildSkuPlanAsync()
+        {
+            var dirs = SplitPaths(SkuSourceDirs);
+            if (dirs.Count == 0) { SkuSummary = "请先在『系统组装』区填写 SxS 内容目录。"; return; }
+            if (string.IsNullOrWhiteSpace(TargetSku)) { SkuSummary = "请先指定目标 SKU（或点『扫描可用 SKU』）。"; return; }
+
+            IsBusy = true;
+            try
+            {
+                var plan = await Task.Run(() => SkuPlanBuilder.Build(dirs, TargetSku,
+                    string.IsNullOrWhiteSpace(SkuArchFilter) ? null : SkuArchFilter.Trim()));
+                var sb = new System.Text.StringBuilder();
+                if (!plan.Success) { sb.AppendLine("✗ " + plan.Error); SkuSummary = sb.ToString().TrimEnd(); return; }
+
+                string outPath = Path.Combine(Path.GetTempPath(),
+                    "ocid_sku_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".txt");
+                File.WriteAllText(outPath, plan.ToSkuAssemblyText());
+                NativeSkuAssemblyFile = outPath;      // 直接接到原生流程
+
+                sb.AppendLine(plan.Summary());
+                sb.AppendLine($"已写出组装清单：{outPath}");
+                sb.AppendLine("（已自动填入『原生流程』的 SKU 清单，可直接执行）");
+                sb.AppendLine();
+                sb.AppendLine("安装顺序（前 30）：");
+                int i = 0;
+                foreach (var k in plan.Order)
                 {
-                    MessageBox.Show("请填写至少一个 SxS 内容目录（多个用分号分隔）。", "依赖图",
-                        MessageBoxButton.OK, MessageBoxImage.Information);
-                    return;
+                    if (++i > 30) { sb.AppendLine($"  …（还有 {plan.Order.Count - 30} 项）"); break; }
+                    sb.AppendLine($"  {i,4}. {k}");
                 }
-                var sink = EnsureTaskLog("系统组装");
-                var g = SystemAssemblyService.BuildGraph(dirs, m => sink.Write(m));
-                string graph = SystemAssemblyService.RenderGraph(g, 40);
-                AssemblySummary = graph;
-                sink.Write(graph);
+                if (plan.Missing.Count > 0) sb.AppendLine().AppendLine("缺失依赖：" + string.Join(", ", plan.Missing.Take(15)));
+                if (plan.Cycles.Count > 0) sb.AppendLine().AppendLine("检测到环：" + string.Join(" | ", plan.Cycles.Take(5)));
+                SkuSummary = sb.ToString().TrimEnd();
+                Status = plan.Summary();
+                Log(Status);
+            }
+            catch (Exception ex) { SkuSummary = "异常：" + ex.Message; }
+            finally { IsBusy = false; }
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  四、系统组装（依赖图 → 计划 → 执行）
+        // ════════════════════════════════════════════════════════════════
+
+        [ObservableProperty] private string _skuSourceDirs = string.Empty;
+        [ObservableProperty] private bool _assemblyPlanOnly = true;
+        [ObservableProperty] private string _assemblySummary =
+            "从 SxS 内容出发：算清组件之间的依赖关系，排出安装顺序，再交给 CBS 通道执行。\n"
+            + "源目录可填多个，用分号分隔。目标镜像由上方『目标镜像』提供。";
+
+        [RelayCommand]
+        private async Task ShowGraphAsync()
+        {
+            var dirs = SplitPaths(SkuSourceDirs);
+            if (dirs.Count == 0) { AssemblySummary = "请填写至少一个 SxS 内容目录。"; return; }
+            IsBusy = true;
+            try
+            {
+                var g = await Task.Run(() => SystemAssemblyService.BuildGraph(dirs));
+                AssemblySummary = SystemAssemblyService.RenderGraph(g, 60);
                 Status = $"依赖图：{g.Nodes.Count} 个节点，缺失依赖 {g.MissingDependencies}";
                 Log(Status);
             }
-            catch (Exception ex)
-            {
-                AssemblySummary = "建图异常：" + ex.GetType().Name + ": " + ex.Message;
-                Log(AssemblySummary);
-            }
+            catch (Exception ex) { AssemblySummary = "建图异常：" + ex.Message; }
+            finally { IsBusy = false; }
         }
 
-        [RelayCommand(CanExecute = nameof(CanRunAssembly))]
-        private async Task RunAssemblyAsync()
+        [RelayCommand]
+        private async Task ShowAssemblyPlanAsync()
         {
-            var dirs = SplitDirs(AssemblySourceDirs);
-            if (dirs.Count == 0)
-            {
-                MessageBox.Show("请填写至少一个 SxS 内容目录（多个用分号分隔）。", "系统组装",
-                    MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
-            }
-
-            var cfg = new SystemAssemblyService.Config
-            {
-                SourceDirs = dirs,
-                WinDir = AssemblyWinDir?.Trim() ?? string.Empty,
-                SkuAssemblyFile = NativeSkuAssemblyFile?.Trim() ?? string.Empty,
-                UnattendXml = string.Empty,
-                PlanOnly = AssemblyPlanOnly,
-                Seeds = SplitDirs(AssemblySeeds)
-            };
-
-            IsAssemblyRunning = true;
-            RunAssemblyCommand.NotifyCanExecuteChanged();
-            RunAssemblyGraphCommand.NotifyCanExecuteChanged();
-            AssemblySummary = AssemblyPlanOnly ? "计算组装计划中…" : "执行组装中…（不要关闭程序）";
-            var sink = EnsureTaskLog("系统组装");
+            var dirs = SplitPaths(SkuSourceDirs);
+            if (dirs.Count == 0) { AssemblySummary = "请填写至少一个 SxS 内容目录。"; return; }
+            IsBusy = true;
             try
             {
+                var plan = await Task.Run(() =>
+                {
+                    var graph = SystemAssemblyService.BuildGraph(dirs);
+                    var seeds = graph.Nodes.Values
+                        .Where(n => n.Kind == SystemAssemblyService.NodeKind.Package)
+                        .Select(n => n.Key).ToList();
+                    return SystemAssemblyService.PlanFrom(graph, seeds);
+                });
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine("组装计划：" + plan.Summary()).AppendLine();
+                sb.AppendLine("安装顺序（前 40）：");
+                int i = 0;
+                foreach (var k in plan.Order)
+                {
+                    if (++i > 40) { sb.AppendLine($"  …（还有 {plan.Order.Count - 40} 项）"); break; }
+                    sb.AppendLine($"  {i,4}. {k}");
+                }
+                if (plan.Missing.Count > 0) sb.AppendLine().AppendLine("缺失依赖：" + string.Join(", ", plan.Missing.Take(20)));
+                if (plan.Cycles.Count > 0) sb.AppendLine().AppendLine("检测到环：" + string.Join(" | ", plan.Cycles.Take(5)));
+                AssemblySummary = sb.ToString().TrimEnd();
+                Status = "组装计划：" + plan.Summary();
+                Log(Status);
+            }
+            catch (Exception ex) { AssemblySummary = "计划异常：" + ex.Message; }
+            finally { IsBusy = false; }
+        }
+
+        [RelayCommand]
+        private async Task RunAssemblyAsync()
+        {
+            var dirs = SplitPaths(SkuSourceDirs);
+            if (dirs.Count == 0) { AssemblySummary = "请填写至少一个 SxS 内容目录。"; return; }
+            if (string.IsNullOrWhiteSpace(TargetWinDir)) { AssemblySummary = "请先填写目标镜像的 Windows 目录。"; return; }
+            if (!AssemblyPlanOnly &&
+                MessageBox.Show("将真实写入目标镜像。\n\n确认目标位于挂载的 VHD/VHDX 上？",
+                    "组装确认", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                return;
+
+            IsBusy = true;
+            var sink = EnsureTaskLog("SxS 系统组装");
+            try
+            {
+                var cfg = new SystemAssemblyService.Config
+                {
+                    SourceDirs = dirs,
+                    WinDir = TargetWinDir.Trim(),
+                    SkuAssemblyFile = NativeSkuAssemblyFile?.Trim() ?? string.Empty,
+                    PlanOnly = AssemblyPlanOnly
+                };
                 var res = await SystemAssemblyService.AssembleAsync(cfg, m => sink.Write(m));
                 var sb = new System.Text.StringBuilder();
-                if (res.Plan != null)
-                {
-                    sb.AppendLine(res.Plan.Summary());
-                    sb.AppendLine();
-                    sb.AppendLine("安装顺序（前 20）：");
-                    foreach (var k in res.Plan.Order.Take(20)) sb.AppendLine("  " + k);
-                    if (res.Plan.Missing.Count > 0)
-                        sb.AppendLine("缺失依赖：" + string.Join(", ", res.Plan.Missing.Take(10)));
-                }
-                if (res.Channel != null) sb.AppendLine().AppendLine(res.Channel.Reason);
+                if (res.Plan != null) sb.AppendLine(res.Plan.Summary());
+                if (res.Channel != null) sb.AppendLine(res.Channel.Reason);
                 if (res.Error.Length > 0) sb.AppendLine("错误：" + res.Error);
                 AssemblySummary = sb.ToString().TrimEnd();
                 Status = res.Success ? "组装流程完成。" : "组装失败：" + res.Error;
                 Log(Status);
             }
-            catch (Exception ex)
-            {
-                AssemblySummary = "异常：" + ex.GetType().Name + ": " + ex.Message;
-                Log(AssemblySummary);
-            }
-            finally
-            {
-                sink.MarkFinished();
-                IsAssemblyRunning = false;
-                RunAssemblyCommand.NotifyCanExecuteChanged();
-                RunAssemblyGraphCommand.NotifyCanExecuteChanged();
-            }
+            catch (Exception ex) { AssemblySummary = "异常：" + ex.Message; }
+            finally { sink.MarkFinished(); IsBusy = false; }
         }
 
-        bool CanRunAssembly() => !IsAssemblyRunning && !IsExploding && !IsPureExporting && !IsNativeRunning;
+        // ════════════════════════════════════════════════════════════════
+        //  五、pureSxS 导出（C# 重写，不需要 Python）
+        // ════════════════════════════════════════════════════════════════
 
-        static List<string> SplitDirs(string? text)
+        [ObservableProperty] private string _pureSourceMum = string.Empty;
+        [ObservableProperty] private string _pureOutputDir = string.Empty;
+        [ObservableProperty] private string _pureSummary = "从一个 .mum 出发，导出它的依赖闭包（包 / 组件 / 程序集）。";
+
+        [RelayCommand]
+        private void BrowsePureSource()
+        {
+            var dlg = new OpenFileDialog { Title = "选择源 .mum", Filter = "包清单 (*.mum)|*.mum|所有文件 (*.*)|*.*" };
+            if (dlg.ShowDialog() == true) PureSourceMum = dlg.FileName;
+        }
+
+        [RelayCommand]
+        private void BrowsePureOutput()
+        {
+            var dlg = new OpenFolderDialog { Title = "选择 pureSxS 导出目录" };
+            if (dlg.ShowDialog() == true) PureOutputDir = dlg.FolderName;
+        }
+
+        [RelayCommand]
+        private async Task RunPureExportAsync()
+        {
+            if (string.IsNullOrWhiteSpace(PureSourceMum) || !File.Exists(PureSourceMum)
+                || string.IsNullOrWhiteSpace(PureOutputDir))
+            {
+                MessageBox.Show("请选择有效的源 .mum 与输出目录。", "pureSxS",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            IsBusy = true;
+            var sink = EnsureTaskLog("pureSxS 导出");
+            try
+            {
+                var res = await PureSxsService.ExportAsync(PureSourceMum, PureOutputDir, m => sink.Write(m));
+                PureSummary = res.Success
+                    ? $"✓ 完成：包 {res.PackagesCopied}、组件 {res.ComponentsCopied}、程序集 {res.AssembliesCopied}、缺失 {res.Missing} → {PureOutputDir}"
+                    : "✗ 失败：" + res.Error;
+                Status = res.Success ? "pureSxS 导出完成。" : "pureSxS 导出失败。";
+                Log(PureSummary);
+            }
+            catch (Exception ex) { PureSummary = "异常：" + ex.Message; }
+            finally { sink.MarkFinished(); IsBusy = false; }
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  六、更新包 / Repair Content 解包
+        // ════════════════════════════════════════════════════════════════
+
+        [ObservableProperty] private string _updatePackagePaths = string.Empty;
+        [ObservableProperty] private string _unpackOutDir = string.Empty;
+        [ObservableProperty] private string _unpackBaseDir = string.Empty;
+        [ObservableProperty] private string _repairContentDir = string.Empty;
+        [ObservableProperty] private bool _unpackListOnly = true;
+        [ObservableProperty] private string _unpackSummary =
+            "更新包 = 配对 CAB（描述）+ PSF（PA30 载荷）；还原需要 delta 源(base)目录。\n"
+            + "Repair Content 有硬性顺序：含 neutral-mergedcomponents 的包必须先单独解包，解完删除其 PSF/CAB，再解其余。";
+
+        [RelayCommand]
+        private void PickUpdatePackages()
+        {
+            var dlg = new OpenFileDialog
+            {
+                Title = "选择更新包（.cab / .psm / .wim，可多选）",
+                Filter = "更新包 (*.cab;*.psm;*.wim)|*.cab;*.psm;*.wim|所有文件 (*.*)|*.*",
+                Multiselect = true
+            };
+            if (dlg.ShowDialog() == true) UpdatePackagePaths = string.Join(";", dlg.FileNames);
+        }
+
+        [RelayCommand]
+        private void PickUnpackOutDir()
+        {
+            var dlg = new OpenFolderDialog { Title = "选择解包输出目录" };
+            if (dlg.ShowDialog() == true) UnpackOutDir = dlg.FolderName;
+        }
+
+        [RelayCommand]
+        private void PickUnpackBaseDir()
+        {
+            var dlg = new OpenFolderDialog { Title = "选择 delta 源(base)目录（例：已挂载的同版本镜像的 Windows 目录）" };
+            if (dlg.ShowDialog() == true) UnpackBaseDir = dlg.FolderName;
+        }
+
+        [RelayCommand]
+        private void PickRepairContentDir()
+        {
+            var dlg = new OpenFolderDialog { Title = "选择 Repair Content 目录（含 cab/psf）" };
+            if (dlg.ShowDialog() == true) RepairContentDir = dlg.FolderName;
+        }
+
+        [RelayCommand]
+        private async Task UnpackUpdatePackagesAsync()
+        {
+            var paths = SplitPaths(UpdatePackagePaths);
+            if (paths.Count == 0) { UnpackSummary = "请先选择要解包的更新包。"; return; }
+            if (string.IsNullOrWhiteSpace(UnpackOutDir)) { UnpackSummary = "请先指定输出目录。"; return; }
+            IsBusy = true;
+            var sink = EnsureTaskLog("更新包解压");
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                foreach (var p in paths)
+                {
+                    var cfg = new UpdatePackageService.Config
+                    {
+                        PackagePath = p,
+                        OutputDir = UnpackOutDir,
+                        ListOnly = UnpackListOnly
+                    };
+                    if (!string.IsNullOrWhiteSpace(UnpackBaseDir)) cfg.BaseDirs.Add(UnpackBaseDir.Trim());
+                    var r = await Task.Run(() => UpdatePackageService.Extract(cfg, m => sink.Write(m)));
+                    sb.AppendLine($"{Path.GetFileName(p)}：布局={r.Detected} 解出={r.FilesExtracted} 跳过={r.FilesSkipped} "
+                                + $"缺源={r.FilesMissingSource} 校验失败={r.HashMismatches}");
+                }
+                if (UnpackListOnly) sb.AppendLine("（当前为『只解析索引』，未写出文件）");
+                UnpackSummary = sb.ToString().TrimEnd();
+                Status = "更新包处理完成。";
+                Log(Status);
+            }
+            catch (Exception ex) { UnpackSummary = "异常：" + ex.Message; }
+            finally { sink.MarkFinished(); IsBusy = false; }
+        }
+
+        [RelayCommand]
+        private async Task UnpackRepairContentAsync()
+        {
+            if (!Directory.Exists(RepairContentDir)) { UnpackSummary = "请先选择有效的 Repair Content 目录。"; return; }
+            if (string.IsNullOrWhiteSpace(UnpackOutDir)) { UnpackSummary = "请先指定输出目录。"; return; }
+            IsBusy = true;
+            var sink = EnsureTaskLog("Repair Content 解包");
+            try
+            {
+                var cfg = new RepairContentService.Config
+                {
+                    SourceDir = RepairContentDir,
+                    OutputDir = UnpackOutDir,
+                    ClassifyOnly = UnpackListOnly
+                };
+                if (!string.IsNullOrWhiteSpace(UnpackBaseDir)) cfg.BaseDirs.Add(UnpackBaseDir.Trim());
+                var r = await Task.Run(() => RepairContentService.Extract(cfg, m => sink.Write(m)));
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine(r.Summary());
+                if (r.LanguageCatNotes.Count > 0)
+                {
+                    sb.AppendLine().AppendLine("语言安全目录检查：");
+                    foreach (var n in r.LanguageCatNotes) sb.AppendLine("  " + n);
+                }
+                if (r.Error.Length > 0) sb.AppendLine("错误：" + r.Error);
+                if (!UnpackListOnly && Directory.Exists(UnpackOutDir))
+                { sb.AppendLine(); sb.AppendLine(RepairContentService.InspectOutput(UnpackOutDir)); }
+                UnpackSummary = sb.ToString().TrimEnd();
+                Status = r.Success ? "Repair Content 解包完成。" : "Repair Content 解包失败：" + r.Error;
+                Log(Status);
+            }
+            catch (Exception ex) { UnpackSummary = "异常：" + ex.Message; }
+            finally { sink.MarkFinished(); IsBusy = false; }
+        }
+
+        [RelayCommand]
+        private void InspectStore()
+        {
+            string dir = !string.IsNullOrWhiteSpace(UnpackOutDir) ? UnpackOutDir : PureOutputDir;
+            UnpackSummary = RepairContentService.InspectOutput(dir);
+            Status = "存储检验完成。";
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  七、说明与日志
+        // ════════════════════════════════════════════════════════════════
+
+        [RelayCommand]
+        private void ShowUsage()
+        {
+            MessageBox.Show(
+                "SxS / CBS 工具（desktop 线）\n\n" +
+                "本页全部功能由本程序自带实现完成，**不需要任何外部可执行文件或脚本**。\n" +
+                "原来的 cbsx.exe / sxsfounder.exe / puresxs.py / havesxs.py / *.cmd 已全部移除：\n" +
+                "  铺底 → SxSFounderService（WCP）\n" +
+                "  装包 → CbsxService（原生 CBS 通道）\n" +
+                "  跨代/跨架构 → 自动改走 DISM（dism /image 离线调度）\n" +
+                "  收尾 → State.ini 与 imagestate 直接写入\n" +
+                "  纯 SxS 导出 → PureSxsService\n\n" +
+                "── 强制约束 ──\n" +
+                "目标镜像必须位于【挂载的 VHD/VHDX】上。CBS 会挂载并改写目标镜像的注册表 hive，\n" +
+                "对物理盘或宿主系统盘执行会破坏系统，程序会直接拒绝。\n" +
+                "所有写入操作默认『试运行』，确认无误后再关闭。\n\n" +
+                "── 建议顺序 ──\n" +
+                "① 填目标镜像 → 判定路由（看清走原生还是 DISM）\n" +
+                "② 填 SxS 内容目录 → 查看依赖图 / 组装计划\n" +
+                "③ 选目标 SKU → 生成组装清单（只装这一个 edition）\n" +
+                "④ 预检 → 试运行 → 真实执行",
+                "SxS / CBS 工具说明", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        TaskLogSink EnsureTaskLog(string title)
+        {
+            if (_taskSink == null || _taskWin is { IsLoaded: false })
+            {
+                _taskSink = new TaskLogSink(title);
+                _taskWin = new Views.TaskLogWindow(_taskSink) { Owner = Application.Current?.MainWindow };
+                _taskWin.Show();
+            }
+            return _taskSink;
+        }
+
+        private void Log(string text)
+        {
+            LogLines.Add(text);
+            if (LogLines.Count > 500) LogLines.RemoveAt(0);
+        }
+
+        static List<string> SplitPaths(string? text)
             => (text ?? string.Empty)
                .Split(new[] { ';', '|' }, StringSplitOptions.RemoveEmptyEntries)
-               .Select(s => s.Trim().Trim('"'))
-               .Where(s => s.Length > 0)
+               .Select(x => x.Trim().Trim('"'))
+               .Where(x => x.Length > 0)
                .ToList();
     }
 }

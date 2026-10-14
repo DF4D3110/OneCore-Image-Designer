@@ -90,7 +90,7 @@ $violations = New-Object System.Collections.Generic.List[string]
 # ① WCOS 文件不得引用 desktop 独有服务
 foreach ($d in $WcosDirs) {
     foreach ($f in Get-SourceFiles $d) {
-        $text = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction SilentlyContinue
+        $text = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
         if (-not $text) { continue }
         foreach ($svc in $DesktopOnly) {
             if ($text -match [regex]::Escape($svc)) {
@@ -104,16 +104,19 @@ foreach ($d in $WcosDirs) {
 # ② desktop 页面不得引用 WCOS 独有词汇
 foreach ($d in $DesktopDirs) {
     foreach ($f in Get-SourceFiles $d) {
-        $text = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction SilentlyContinue
+        $text = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
         if (-not $text) { continue }
         foreach ($w in $WcosOnly) {
             # 允许出现在"说明为什么没有它"的注释里：要求该行同时含"WCOS"或"不在此"或"属 WCOS"
-            foreach ($line in ($text -split "`r?`n")) {
-                if ($line -match [regex]::Escape($w)) {
-                    if ($line -match 'WCOS|不在此|已撤|不在本页|停用|注释') { continue }
-                    $rel = $f.FullName.Substring($RepoRoot.Length).TrimStart('\')
-                    $violations.Add("desktop 侧引用了 WCOS 词汇 [$w] -> ${rel}: $($line.Trim())")
-                }
+            # 注意：注释会换行，豁免词常常落在下一行（例："本页属 desktop。DeviceLayout / ...
+            # 均属 WCOS 侧，不在此页出现。"）。所以按【行 + 后两行】的窗口判定，而不是逐行。
+            $lines = $text -split "`r?`n"
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -notmatch [regex]::Escape($w)) { continue }
+                $window = ($lines[$i..([Math]::Min($i + 2, $lines.Count - 1))] -join ' ')
+                if ($window -match 'WCOS|不在此|已撤|不在本页|停用|注释|不属于') { continue }
+                $rel = $f.FullName.Substring($RepoRoot.Length).TrimStart('\')
+                $violations.Add("desktop 侧引用了 WCOS 词汇 [$w] -> ${rel}: $($lines[$i].Trim())")
             }
         }
     }
