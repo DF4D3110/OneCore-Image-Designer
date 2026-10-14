@@ -280,6 +280,10 @@ namespace OneCore_Image_Designer.Services
                 L($"cbSize = {p.cbSize}");
 
                 // ── CreateNewWindows：建目录骨架 + 挂载离线注册表 hive ──
+                // ⚠ 硬编码 L"X:\\" 是【对的】—— 我曾改成目标镜像所在盘，结果：
+                //   "X:\\"  → ERROR_NOT_FOUND (0x80070490)
+                //   "目标盘\\" → ERROR_SXS_COMPONENT_STORE_CORRUPT (0x80073712)
+                // 对照实验证明硬编码值更好，故回退。
                 hr = CreateNewWindows(0, "X:\\", ref p, out regKeys, out uint wDisp);
                 res.WindowsDisposition = wDisp;
                 if (hr < 0)

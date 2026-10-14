@@ -259,7 +259,10 @@ namespace OneCore_Image_Designer.Services
                 doc.Load(mumPath);
                 var ns = new XmlNamespaceManager(doc.NameTable);
                 ns.AddNamespace("a", "urn:schemas-microsoft-com:asm.v3");
-                foreach (XmlNode n in doc.SelectNodes("//a:package//a:assemblyIdentity/@name", ns))
+                // ⚠ 只取【package 里嵌套的 package】里的 assemblyIdentity：
+                //   //a:package//a:assemblyIdentity  会把 <component> 里的组件名也抓进来，
+                //   导致「完整镜像对自己」只有 23.5%（必须是 100%）。
+                foreach (XmlNode n in doc.SelectNodes("//a:package//a:package/a:assemblyIdentity/@name", ns))
                     if (n?.Value != null) outp.Add(n.Value.ToLowerInvariant());
             }
             catch { }
