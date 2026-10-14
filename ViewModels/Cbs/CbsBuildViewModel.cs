@@ -14,9 +14,9 @@ namespace OneCore_Image_Designer.ViewModels.Cbs
 {
     /// <summary>
     /// CBS 构建（标签页内嵌）：把一组包 CAB（手选 / 扫包根 / 解析 FM 得到）按每个包
-    /// update.mum 声明的目标路径展开为目录树（含 WinSxS 存储）。传 DeviceLayout（XML 或布局 CAB）
-    /// 时按 diskX\PartitionN-名 组织多盘/多分区，否则平铺。落位规则全部真实包实证。
-    /// </summary>
+        /// update.mum 声明的目标路径展开为目录树（含 WinSxS 存储、servicing\Packages、System32\catroot）。
+        /// 【产品线】本页属 **desktop**；DeviceLayout 分区映射是 WCOS 专用，不在此提供
+        /// （CbsBuildService.LayoutXmlPath 的能力保留，供 WCOS 侧使用）。落位规则全部真实包实证。
     public partial class CbsBuildViewModel : ObservableObject
     {
         readonly MainViewModel _main;
@@ -37,9 +37,6 @@ namespace OneCore_Image_Designer.ViewModels.Cbs
         [ObservableProperty]
         bool _isBusy;
 
-        [ObservableProperty]
-        string _layoutCabPath = "";
-
         /// <summary>待构建的包 CAB（去重、有序）。</summary>
         public ObservableCollection<string> Cabs { get; } = new();
 
@@ -49,22 +46,6 @@ namespace OneCore_Image_Designer.ViewModels.Cbs
 
         [ObservableProperty]
         bool _hasResult;
-
-        string? ResolvedLayoutXml()
-        {
-            if (string.IsNullOrWhiteSpace(LayoutCabPath)) return null;
-            string p = LayoutCabPath;
-            if (p.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) && File.Exists(p)) return p;
-            if (p.EndsWith(".cab", StringComparison.OrdinalIgnoreCase) && File.Exists(p))
-            {
-                // 从布局 CAB 解出 DeviceLayout(.MS).xml 到临时目录
-                string tmp = Path.Combine(Path.GetTempPath(), "cbsdl_" + Guid.NewGuid().ToString("N").Substring(0, 6));
-                Directory.CreateDirectory(tmp);
-                ExpandCab(p, tmp);
-                return Directory.GetFiles(tmp, "DeviceLayout*.xml", SearchOption.AllDirectories).FirstOrDefault();
-            }
-            return null;
-        }
 
         // ════════ 包来源 ════════
 
@@ -120,12 +101,6 @@ namespace OneCore_Image_Designer.ViewModels.Cbs
                 if (cabs.Count == 0) { Status = "FM 未解析到可定位的包 CAB（检查包根是否正确）"; return; }
                 int n = 0; foreach (var c in cabs) if (AddCab(c)) n++;
                 if (!_fms.Contains(fmd.FileName)) _fms.Add(fmd.FileName);
-                // FM 自带的设备布局包也顺带填进布局框（若为空）
-                if (string.IsNullOrWhiteSpace(LayoutCabPath))
-                {
-                    var lay = cabs.FirstOrDefault(c => c.IndexOf("devicelay", StringComparison.OrdinalIgnoreCase) >= 0);
-                    if (lay != null) LayoutCabPath = lay;
-                }
                 Status = $"FM 引用 {cabs.Count} 个包，新增 {n}（当前共 {Cabs.Count}）";
             }
             finally { IsBusy = false; }
@@ -147,16 +122,6 @@ namespace OneCore_Image_Designer.ViewModels.Cbs
         // ════════ 布局来源 ════════
 
         [RelayCommand]
-        void PickLayout()
-        {
-            var dlg = new OpenFileDialog { Title = "选择 DeviceLayout（.xml 或布局 .cab）", Filter = "布局 (*.xml;*.cab)|*.xml;*.cab|所有 (*.*)|*.*" };
-            if (dlg.ShowDialog() == true) LayoutCabPath = dlg.FileName;
-        }
-
-        [RelayCommand]
-        void ClearLayout() => LayoutCabPath = "";
-
-        [RelayCommand]
         void BrowseOutput()
         {
             var dlg = new OpenFolderDialog { Title = "选择输出目录" };
@@ -174,12 +139,12 @@ namespace OneCore_Image_Designer.ViewModels.Cbs
             BuildCommand.NotifyCanExecuteChanged();
             try
             {
-                string? layoutXml = ResolvedLayoutXml();
+                // 注意：本页是 **desktop** 的 CBS 包展开；DeviceLayout 分区映射属 WCOS，
+                // 不在本页提供（CbsBuildService.LayoutXmlPath 的能力保留，供 WCOS 侧使用）。
                 var req = new CbsBuildRequest
                 {
                     PackageCabs = Cabs.ToList(),
                     OutputDirectory = OutputDir,
-                    LayoutXmlPath = layoutXml,
                 };
                 var res = await Task.Run(() => CbsBuildService.Build(req));
 

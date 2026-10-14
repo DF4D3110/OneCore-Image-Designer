@@ -20,7 +20,6 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>   <!-- 三选一模型（纯增量新增） -->
         </Grid.RowDefinitions>
 
         <!-- 标题栏 -->
@@ -290,48 +289,6 @@
                 </StackPanel>
             </DockPanel>
         </Border>
-
-        <!-- ═══════════ 选择重构：三选一（纯增量新增）═══════════ -->
-        <Expander Grid.Row="4" Margin="0,12,0,0" IsExpanded="True"
-                  Header="先定三件事 —— 输入形态 · 目标动作 · 执行方式">
-            <StackPanel Margin="6,8,6,6">
-                <TextBlock TextWrapping="Wrap" Foreground="{StaticResource SubtleBrush}"
-                           Text="页面上原来的许多开关，真正需要你决定的只有下面三件。其余选项要么能由这三项推导出来，要么属于高级参数，按需展开即可。"/>
-
-                <Grid Margin="0,10,0,0">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-
-                    <TextBlock Grid.Column="0" Text="① 输入形态" VerticalAlignment="Center" Margin="0,0,8,0" FontWeight="SemiBold"/>
-                    <ComboBox Grid.Column="1" ItemsSource="{Binding SourceShapes}" SelectedItem="{Binding SourceShape}" Height="26" Margin="0,0,16,0"/>
-
-                    <TextBlock Grid.Column="2" Text="② 目标动作" VerticalAlignment="Center" Margin="0,0,8,0" FontWeight="SemiBold"/>
-                    <ComboBox Grid.Column="3" ItemsSource="{Binding TargetActions}" SelectedItem="{Binding TargetAction}" Height="26" Margin="0,0,16,0"/>
-
-                    <TextBlock Grid.Column="4" Text="③ 执行方式" VerticalAlignment="Center" Margin="0,0,8,0" FontWeight="SemiBold"/>
-                    <ComboBox Grid.Column="5" ItemsSource="{Binding ExecutionModes}" SelectedItem="{Binding ExecutionMode}" Height="26"/>
-                </Grid>
-
-                <Border Margin="0,10,0,0" Padding="10,8" CornerRadius="4"
-                        Background="{StaticResource CardBrush}">
-                    <TextBlock Text="{Binding CapabilitySummary}" TextWrapping="Wrap" FontFamily="Consolas" FontSize="12"/>
-                </Border>
-
-                <Button Content="按上面三项执行" Command="{Binding DispatchCommand}"
-                        Style="{StaticResource ICDButton}" HorizontalAlignment="Left" Margin="0,10,0,0"/>
-
-                <TextBox Text="{Binding DispatchResult}" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
-                         FontFamily="Consolas" FontSize="12" Height="180" Margin="0,10,0,0"
-                         VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
-                         Visibility="{Binding HasDispatchResult, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-            </StackPanel>
-        </Expander>
 
     </Grid>
 </UserControl>

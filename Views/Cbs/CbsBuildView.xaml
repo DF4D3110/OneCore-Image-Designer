@@ -31,7 +31,7 @@
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0" Margin="0,0,0,10" TextWrapping="Wrap" Foreground="{StaticResource ICDSubtle}"
-                   Text="CBS 构建：把一组包 CAB 按其 update.mum 声明的目标路径展开为目录树（含 Windows\WinSxS 存储、servicing\Packages、System32\catroot 等）。提供 DeviceLayout（XML 或布局 CAB）时按 diskX\PartitionN-分区名 组织多盘/多分区，否则平铺。"/>
+                   Text="CBS 构建：把一组包 CAB 按其 update.mum 声明的目标路径展开为目录树（含 Windows\WinSxS 存储、servicing\Packages、System32\catroot 等）。"/>
 
         <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
@@ -67,15 +67,7 @@
                     </StackPanel>
                 </GroupBox>
 
-                <GroupBox DockPanel.Dock="Top" Header="设备布局（可选：启用 disk/分区 分层）" Padding="8" Margin="0,8,0,0">
-                    <DockPanel>
-                        <Button DockPanel.Dock="Right" Content="清除" Command="{Binding ClearLayoutCommand}" Style="{StaticResource Tool}" Margin="0,0,0,0"/>
-                        <Button DockPanel.Dock="Right" Content="选择…" Command="{Binding PickLayoutCommand}" Style="{StaticResource Tool}" Margin="0,0,8,0"/>
-                        <TextBox Text="{Binding LayoutCabPath, UpdateSourceTrigger=PropertyChanged}" Height="26" VerticalContentAlignment="Center"
-                                 ToolTip="DeviceLayout.xml 或布局 .cab（可被『从 FM 解析』自动填入）"/>
-                    </DockPanel>
-                </GroupBox>
-            </DockPanel>
+                            </DockPanel>
 
             <!-- 右：结果树 -->
             <GroupBox Grid.Column="1" Header="输出目录树（构建后）" Padding="6">
