@@ -10,6 +10,7 @@
 
   两者的词汇与机制完全不同，混用会写出语义错误的代码：
     · desktop 是 ICbsSession / DISM / WinSxS / servicing\Packages / Microsoft-Windows-Editions-*
+  · 实测技术要点另见 CBS_TECHNICAL_NOTES.md
     · WCOS 是 imageapp / Img2Ffu / FFU / FeatureManifest(OEMInput) / DeviceLayout / 分区映像
 
   本脚本按文件集合做**引用方向**检查，违规即非零退出，便于接进 CI 或提交前钩子。

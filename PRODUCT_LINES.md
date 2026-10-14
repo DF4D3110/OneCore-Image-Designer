@@ -1,5 +1,9 @@
 # 产品线边界（Desktop / WCOS-Phone）
 
+> **desktop CBS 的实测技术要点见 [`CBS_TECHNICAL_NOTES.md`](CBS_TECHNICAL_NOTES.md)** ——
+> 架构为何决定成败、`0x8007051A` 的真实含义、骨架 ACL、最小系统文件集、
+> 服务栈版本体系、PSF/PA30 细节等，都在那里。
+
 本仓库同时承载两条**互不通用**的产品线。二者的词汇、机制与产物都不同，
 **不要互相引用**。
 
