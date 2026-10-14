@@ -201,11 +201,6 @@
                     </StackPanel>
                 </Expander>
 
-                <!-- ── ⑦ 日志 ── -->
-                <Expander Margin="0,10,0,0" Header="⑦ 操作日志">
-                    <ListBox ItemsSource="{Binding LogLines}" Height="180" Margin="8,8,8,4"
-                             FontFamily="Consolas" FontSize="12"/>
-                </Expander>
 
             </StackPanel>
         </ScrollViewer>

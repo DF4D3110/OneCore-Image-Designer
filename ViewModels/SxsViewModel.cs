@@ -41,8 +41,6 @@ namespace OneCore_Image_Designer.ViewModels
 
         [ObservableProperty] private string _status = "就绪。";
 
-        public ObservableCollection<string> LogLines { get; } = new();
-
         // ════════════════════════════════════════════════════════════════
         //  一、目标镜像与路由判定
         // ════════════════════════════════════════════════════════════════
@@ -87,8 +85,6 @@ namespace OneCore_Image_Designer.ViewModels
                 });
                 RoutingStrip = result.strip;
                 Status = "路由判定完成。";
-                Log(RoutingStrip);
-                Log("  " + result.detail.Replace("\n", "\n  "));
             }
             catch (Exception ex) { RoutingStrip = "判定失败：" + ex.Message; }
             finally { IsBusy = false; }
@@ -134,9 +130,6 @@ namespace OneCore_Image_Designer.ViewModels
                 foreach (var b in pf.blockers) sb.AppendLine("✗ " + b);
                 NativeSummary = sb.ToString().TrimEnd();
                 Status = pf.ready ? "预检通过，可执行。" : "预检存在阻断项。";
-                Log(Status);
-                foreach (var c in pf.checks) Log("  ✓ " + c);
-                foreach (var b in pf.blockers) Log("  ✗ " + b);
             }
             catch (Exception ex) { NativeSummary = "预检异常：" + ex.Message; }
             finally { IsBusy = false; }
@@ -164,7 +157,6 @@ namespace OneCore_Image_Designer.ViewModels
                 if (res.RebootRequired) sb.AppendLine("CBS 提示需要重启。");
                 NativeSummary = sb.ToString().TrimEnd();
                 Status = res.Success ? "原生流程完成。" : "原生流程失败：" + res.Error;
-                Log(Status);
             }
             catch (Exception ex) { NativeSummary = "异常：" + ex.Message; }
             finally { sink.MarkFinished(); IsBusy = false; }
@@ -248,7 +240,6 @@ namespace OneCore_Image_Designer.ViewModels
                 if (plan.Cycles.Count > 0) sb.AppendLine().AppendLine("检测到环：" + string.Join(" | ", plan.Cycles.Take(5)));
                 SkuSummary = sb.ToString().TrimEnd();
                 Status = plan.Summary();
-                Log(Status);
             }
             catch (Exception ex) { SkuSummary = "异常：" + ex.Message; }
             finally { IsBusy = false; }
@@ -275,7 +266,6 @@ namespace OneCore_Image_Designer.ViewModels
                 var g = await Task.Run(() => SystemAssemblyService.BuildGraph(dirs));
                 AssemblySummary = SystemAssemblyService.RenderGraph(g, 60);
                 Status = $"依赖图：{g.Nodes.Count} 个节点，缺失依赖 {g.MissingDependencies}";
-                Log(Status);
             }
             catch (Exception ex) { AssemblySummary = "建图异常：" + ex.Message; }
             finally { IsBusy = false; }
@@ -310,7 +300,6 @@ namespace OneCore_Image_Designer.ViewModels
                 if (plan.Cycles.Count > 0) sb.AppendLine().AppendLine("检测到环：" + string.Join(" | ", plan.Cycles.Take(5)));
                 AssemblySummary = sb.ToString().TrimEnd();
                 Status = "组装计划：" + plan.Summary();
-                Log(Status);
             }
             catch (Exception ex) { AssemblySummary = "计划异常：" + ex.Message; }
             finally { IsBusy = false; }
@@ -345,7 +334,6 @@ namespace OneCore_Image_Designer.ViewModels
                 if (res.Error.Length > 0) sb.AppendLine("错误：" + res.Error);
                 AssemblySummary = sb.ToString().TrimEnd();
                 Status = res.Success ? "组装流程完成。" : "组装失败：" + res.Error;
-                Log(Status);
             }
             catch (Exception ex) { AssemblySummary = "异常：" + ex.Message; }
             finally { sink.MarkFinished(); IsBusy = false; }
@@ -392,7 +380,6 @@ namespace OneCore_Image_Designer.ViewModels
                     ? $"✓ 完成：包 {res.PackagesCopied}、组件 {res.ComponentsCopied}、程序集 {res.AssembliesCopied}、缺失 {res.Missing} → {PureOutputDir}"
                     : "✗ 失败：" + res.Error;
                 Status = res.Success ? "pureSxS 导出完成。" : "pureSxS 导出失败。";
-                Log(PureSummary);
             }
             catch (Exception ex) { PureSummary = "异常：" + ex.Message; }
             finally { sink.MarkFinished(); IsBusy = false; }
@@ -471,7 +458,6 @@ namespace OneCore_Image_Designer.ViewModels
                 if (UnpackListOnly) sb.AppendLine("（当前为『只解析索引』，未写出文件）");
                 UnpackSummary = sb.ToString().TrimEnd();
                 Status = "更新包处理完成。";
-                Log(Status);
             }
             catch (Exception ex) { UnpackSummary = "异常：" + ex.Message; }
             finally { sink.MarkFinished(); IsBusy = false; }
@@ -506,7 +492,6 @@ namespace OneCore_Image_Designer.ViewModels
                 { sb.AppendLine(); sb.AppendLine(RepairContentService.InspectOutput(UnpackOutDir)); }
                 UnpackSummary = sb.ToString().TrimEnd();
                 Status = r.Success ? "Repair Content 解包完成。" : "Repair Content 解包失败：" + r.Error;
-                Log(Status);
             }
             catch (Exception ex) { UnpackSummary = "异常：" + ex.Message; }
             finally { sink.MarkFinished(); IsBusy = false; }
@@ -559,11 +544,6 @@ namespace OneCore_Image_Designer.ViewModels
             return _taskSink;
         }
 
-        private void Log(string text)
-        {
-            LogLines.Add(text);
-            if (LogLines.Count > 500) LogLines.RemoveAt(0);
-        }
 
         static List<string> SplitPaths(string? text)
             => (text ?? string.Empty)
