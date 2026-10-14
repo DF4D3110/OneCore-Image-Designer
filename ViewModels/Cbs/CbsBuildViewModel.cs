@@ -184,8 +184,21 @@ namespace OneCore_Image_Designer.ViewModels.Cbs
         /// <summary>目标镜像的 Windows 目录（例：G:\Windows）。必须位于挂载的 VHD/VHDX 上。</summary>
         [ObservableProperty] string _targetWinDir = "";
 
+        partial void OnTargetWinDirChanged(string value)
+        {
+            // 目标变了，之前的结论就过期了 —— 明确标出来，避免看着旧结论动手
+            if (!string.IsNullOrWhiteSpace(value))
+                RoutingStrip = "路由：目标已变更，请重新点『判定世代与通道』";
+        }
+
         /// <summary>世代与通道横幅：打开页面就知道这个镜像走哪条路、为什么。</summary>
         [ObservableProperty] string _channelBanner = "填写目标镜像的 Windows 目录后点『判定世代与通道』。";
+
+        /// <summary>
+        /// 常驻"路由条"（显示在页面顶部）：一句话给出
+        /// 【镜像架构 · 进程架构 · 世代 · 通道】，让"这个镜像走哪条路、为什么"一眼可见。
+        /// </summary>
+        [ObservableProperty] string _routingStrip = "路由：尚未判定（填写目标镜像后点『判定世代与通道』）";
 
         /// <summary>依赖图/组装计划的 SxS 内容目录（多个用分号分隔）。</summary>
         [ObservableProperty] string _assemblySourceDirs = "";
@@ -225,9 +238,21 @@ namespace OneCore_Image_Designer.ViewModels.Cbs
             {
                 if (string.IsNullOrWhiteSpace(TargetWinDir)) { ChannelBanner = "请先填写目标镜像的 Windows 目录。"; return; }
                 var d = ServicingRouter.Decide(TargetWinDir);
+                var (imgArch, archEv) = ArchRelay.DetectImageArchitecture(TargetWinDir);
+                var meArch = ArchRelay.CurrentProcessArch();
+                string archNote = imgArch != ArchRelay.Arch.Unknown && imgArch != meArch
+                    ? "（架构不符 → 由 DISM 代劳）" : "";
+
                 ChannelBanner = $"【{d.Channel}】{d.Reason}"
-                              + (d.ImageStackVersion != null ? $"\n镜像 servicing stack 版本：{d.ImageStackVersion}（{d.Scheme} 体系）" : "");
-                Status = "世代判定完成：" + d.Channel;
+                              + (d.ImageStackVersion != null ? $"\n镜像 servicing stack 版本：{d.ImageStackVersion}（{d.Scheme} 体系）" : "")
+                              + $"\n镜像架构：{ArchRelay.ToToken(imgArch)} —— {archEv}"
+                              + $"\n进程架构：{ArchRelay.ToToken(meArch)}";
+
+                RoutingStrip = $"镜像架构 {ArchRelay.ToToken(imgArch)}"
+                             + $" · 进程 {ArchRelay.ToToken(meArch)}"
+                             + $" · 世代 {(d.Scheme ?? "未知")}"
+                             + $" · 通道 【{d.Channel}】{archNote}";
+                Status = "路由判定完成：" + d.Channel;
             }
             catch (Exception ex) { ChannelBanner = "判定失败：" + ex.Message; }
         }

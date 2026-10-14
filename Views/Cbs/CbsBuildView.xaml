@@ -30,8 +30,16 @@
         <RowDefinition Height="Auto"/>   <!-- 报告 -->
         </Grid.RowDefinitions>
 
-        <TextBlock Grid.Row="0" Margin="0,0,0,10" TextWrapping="Wrap" Foreground="{StaticResource ICDSubtle}"
+        <StackPanel Grid.Row="0">
+            <TextBlock Margin="0,0,0,10" TextWrapping="Wrap" Foreground="{StaticResource ICDSubtle}"
                    Text="CBS 构建：把一组包 CAB 按其 update.mum 声明的目标路径展开为目录树（含 Windows\WinSxS 存储、servicing\Packages、System32\catroot 等）。"/>
+
+            <Border Margin="0,0,0,10" Padding="10,8" CornerRadius="4"
+                    Background="{StaticResource ICDCard}">
+                <TextBlock Text="{Binding RoutingStrip}" TextWrapping="Wrap"
+                           Foreground="{StaticResource ICDAccentDark}" FontWeight="SemiBold"/>
+            </Border>
+        </StackPanel>
 
         <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
