@@ -325,12 +325,38 @@ If the operating system is supported check that SSShim.DLL is present.
 - **arm32 内容确实带 1 个 x86 `cbscore.dll`**（和 arm64 一样有跨架构栈），但**没有 x64 版本**，
   所以 x64 宿主 DISM 用不上。
 
-### 结论
+### 结论（**已更正**）
 
-**从 x64 宿主给 arm32 镜像装包，当前不可行**，原因在平台侧而非本程序：
-- 原生 CBS 通路不可能 —— x86 进程加载不了 ARM 的 `cbscore.dll`；
-- DISM 通路要求 shim 与宿主架构匹配，而 arm32 内容只提供 ARM 与 x86 两种 shim，
-  x86 DISM 同样报 Error 50（具体原因待查，怀疑与骨架缺少 DISM 判版本所需的注册表内容有关）。
+> ⚠ **上一版这里写的是"需要 ARM32 宿主、平台不可行"—— 那是错的。**
+> 找到 `E:\ARM\8419.0..._CLIENT_COREARM_...wim`（ARM32 的 Windows RT 完整镜像）后重测，
+> 结论完全反过来。
 
-**要装 arm32 的包，需要一个 ARM32 的 Windows 宿主**（或等价的执行环境）。
-在那之前，arm32 这条线能交付的是：**完整的存储还原 + 铺好的骨架 + 装好的服务栈与核心文件**。
+**在【真实完整的 arm32 镜像】上，DISM 从 x64 宿主完全可用：**
+
+```
+dism /image:H:\ /get-packages                    -> 成功，列出 Foundation-Package~...~arm~~6.2.8419.0
+SysWOW64\Dism.exe /image:H:\ /get-packages       -> 同样成功
+dism /image:H:\ /add-package /packagepath:<8400 arm 包>  -> 跑到 100%，"completed successfully"，exit=0
+```
+
+**⇒ arm32 装包是可行的**，通过 DISM（原生 CBS 仍不可能：x86 进程加载不了 ARM 的 `cbscore.dll`）。
+
+**真正的障碍是"目标镜像要足够完整"。** 我们铺的裸骨架 DISM 报：
+```
+Error: 50   DISM does not support servicing a Windows Vista RTM or earlier operating system.
+            check that SSShim.DLL is present.
+```
+而 `ssshim.dll` 其实已经就位 —— 这不是 shim 缺失，而是 **DISM/SSShim 判不出镜像的 OS 版本**，
+于是按"太老"处理。
+
+### 裸骨架缺的到底是什么（实测对比）
+
+| 位置 | 真实 arm32 镜像 | 我们的裸骨架 |
+|---|---|---|
+| `COMPONENTS` 根值 | `StoreFormatVersion`（UTF-16 的 "0.0.0.6"）、`StoreArchitecture` = 5（ARM） | **无** |
+| `COMPONENTS` 子键 | `CanonicalData` / `Configuration` / `DerivedData` / `Installers` / `ServicingStackVersions` / `ccpinterface` | 基本为空 |
+| `SOFTWARE\Microsoft\Windows NT\CurrentVersion` | `CurrentVersion=6.2`、`CurrentBuild=8419`、`CurrentBuildNumber=8419`、`InstallationType=Client`、`EditionID=CoreARM`、`ProductName=Windows RT` | **无** |
+
+**⇒ 要让"从零构建"的 arm32 骨架也能装包，必须在【装包之前】把这些版本信息写进 hive。**
+注意时机：不能放在收尾（`FinishImageStep`）—— 装包在那之前就发生了。
+正确插入点是**步骤 1.5（装服务栈 + 核心文件）之后、步骤 2（装包）之前**。
