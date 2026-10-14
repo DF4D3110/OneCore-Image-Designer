@@ -373,6 +373,8 @@ namespace OneCore_Image_Designer.Services
         ///   REG LOAD CBSS_SOFTWARE/SYSTEM → IMPORT imagestate.reg → UNLOAD
         /// 用 <see cref="OfflineRegistryService"/> 完成 hive 部分。
         /// </summary>
+        static void R(Action<string>? log, string m) => log?.Invoke(m);
+
         public static (bool ok, string detail) FinishImageStep(string winDir, Action<string>? log = null)
         {
             try
@@ -384,6 +386,8 @@ namespace OneCore_Image_Designer.Services
                 // OfflineRegistryService 直接报 "being used by another process"。
                 try
                 {
+                    // 先放掉本进程加载的服务栈模块 —— 否则它持有目标镜像的 hive，卸不掉
+                    CbsxService.ReleaseServicingStack(log);
                     string driveRoot = (Path.GetPathRoot(win) ?? "").TrimEnd('\\');
                     if (driveRoot.Length > 0) CbsSafety.ReleaseResidualHives(driveRoot, log);
                 }
@@ -400,6 +404,33 @@ namespace OneCore_Image_Designer.Services
                 string system = Path.Combine(win, "System32", "config", "SYSTEM");
                 if (!File.Exists(software) || !File.Exists(system))
                     return (false, "缺少 Windows\\System32\\config\\SOFTWARE 或 SYSTEM");
+
+                // ⚠ CBS 服务会在会话结束后继续持有目标镜像的 hive 一段时间（实测：
+                //   FinalizeEx 之后仍持有，且**新进程能卸掉而本进程不能** —— 说明持有者是
+                //   CBS 服务而非我们）。这里用"释放 → 等待 → 重试"给它时间；
+                //   若始终拿不到，说明必须等本进程退出，那就该把收尾移出本进程。
+                string driveRoot0 = (Path.GetPathRoot(win) ?? "").TrimEnd('\\');
+                bool hiveFree = false;
+                for (int attempt = 1; attempt <= 6; attempt++)
+                {
+                    try
+                    {
+                        // 先探一下能否独占打开
+                        using (var probe = File.Open(software, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+                        hiveFree = true;
+                        break;
+                    }
+                    catch (IOException)
+                    {
+                        R(log, $"  hive 仍被占用，第 {attempt}/6 次等待后重试…");
+                        try { CbsSafety.ReleaseResidualHives(driveRoot0, null); } catch { }
+                        Thread.Sleep(2000 * attempt);   // 递增等待：2s,4s,6s,8s,10s,12s
+                    }
+                    catch { break; }
+                }
+                if (!hiveFree)
+                    R(log, "  ⚠ hive 始终被 CBS 服务持有；收尾可能失败。"
+                         + "持有者是 CBS 服务而非本进程（新进程可卸），必要时请把收尾放到独立进程执行。");
 
                 // 用 CBS 之前的挂载名（与 cbss.cmd 的 imagestate.reg 对齐）
                 const string softwareKey = "CBSS_SOFTWARE";

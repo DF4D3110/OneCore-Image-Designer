@@ -362,6 +362,33 @@ namespace OneCore_Image_Designer.Services
             catch (Exception ex) { log?.Invoke("  查找宿主服务栈异常: " + ex.Message); return null; }
         }
 
+        /// <summary>
+        /// 卸载本次会话加载的 servicing stack 模块。
+        ///
+        /// 【为什么必须做】实测：CBS 会话 FinalizeEx 之后，目标镜像的 hive 仍挂在 HKLM 下
+        /// 卸不掉（释放尝试 9 → 9）；而**新进程**能卸掉同一批 hive（9 → 0）。
+        /// 差别就在于本进程加载着的 `cbscore.dll` 持有它们。
+        /// 所以凡是"CBS 之后还要碰目标镜像 hive"的步骤（例如收尾写 imagestate），
+        /// 都必须先放掉服务栈模块。
+        /// </summary>
+        public static void ReleaseServicingStack(Action<string>? log = null)
+        {
+            try
+            {
+                int freed = 0;
+                foreach (var name in new[] { "cbscore.dll", "cbsmsg.dll", "wcp.dll", "dpx.dll", "msdelta.dll" })
+                {
+                    IntPtr h = GetModuleHandle(name);
+                    if (h == IntPtr.Zero) continue;
+                    // 多放几次以压掉引用计数（我们自己 LoadLibrary 过）
+                    for (int i = 0; i < 4 && FreeLibrary(h); i++) freed++;
+                    log?.Invoke($"  已释放服务栈模块: {name}");
+                }
+                if (freed == 0) log?.Invoke("  （没有需要释放的服务栈模块）");
+            }
+            catch (Exception ex) { log?.Invoke("  ReleaseServicingStack 异常: " + ex.Message); }
+        }
+
         static bool LoadedFromDirectory(string moduleName, string dir)
         {
             try

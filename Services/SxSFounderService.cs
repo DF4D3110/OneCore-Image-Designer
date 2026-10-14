@@ -189,6 +189,23 @@ namespace OneCore_Image_Designer.Services
                 // WCP 同样要读写目标镜像的 hive，理由见 PrivilegeHelper 的说明
                 PrivilegeHelper.EnableServicingPrivileges(L);
 
+                // ── 先清掉该盘的残留 hive ──
+                // 实测：上一次运行留下的离线 hive 会让本次 CreateNewWindows 直接失败
+                // （0x80070020 ERROR_SHARING_VIOLATION）。持有者是 CBS/WCP 的**服务**而非
+                // 调用进程，新进程无法直接顶掉，但可以从注册表侧卸载。让铺底自愈，
+                // 而不是要求用户先手工清理。
+                try
+                {
+                    string driveRoot = (Path.GetPathRoot(Path.GetFullPath(full)) ?? "").TrimEnd('\\');
+                    if (driveRoot.Length > 0)
+                    {
+                        int left = CbsSafety.ReleaseResidualHives(driveRoot, L);
+                        if (left > 0)
+                            L($"  ⚠ {driveRoot} 仍有 {left} 个残留 hive，铺底可能失败");
+                    }
+                }
+                catch { }
+
                 // ── 架构判定 ──
                 // 铺底也受架构影响：实测用 x64 进程给 x86 镜像铺底会在
                 // CreateNewOfflineStore 处失败（0x8007051A）；换 x86 进程即成功。
