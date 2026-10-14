@@ -333,6 +333,16 @@ namespace OneCore_Image_Designer.Services
         static bool _usedHostStackFallback;
 
         /// <summary>
+        /// 工具侧首选服务栈目录（形如 …\x86_microsoft-windows-servicingstack_…_none_…）。
+        ///
+        /// 【为什么是工具侧而不是镜像侧】见 <see cref="FounderStackInstaller"/> 的说明：
+        /// 服务栈是工具的依赖，由调用方显式指定用哪一套；镜像里那份不参与选择。
+        /// 由 <see cref="ExplodeSxSNativeService"/> 在找到栈之后设置。
+        /// </summary>
+        public static string? PreferredStackDir { get; set; }
+        public static bool UsePreferredStack { get; set; }
+
+        /// <summary>
         /// 找宿主自己的 servicing stack 目录（带 cbscore.dll、且架构与当前进程一致）。
         /// 用于镜像自带栈初始化失败时回退。
         /// </summary>
@@ -425,24 +435,6 @@ namespace OneCore_Image_Designer.Services
         /// 判据：真正的组件存储一定有 Windows\WinSxS\Manifests 且条目很多
         /// （实测已填充镜像上万条；骨架则不存在或极少）。
         /// </summary>
-        static bool LooksLikeBareSkeleton(string imageRootOrHint)
-        {
-            try
-            {
-                string win = Path.GetFullPath(imageRootOrHint);
-                if (Path.GetFileName(win).Equals("Windows", StringComparison.OrdinalIgnoreCase))
-                    win = Directory.GetParent(win)?.FullName ?? win;
-                string manifests = Path.Combine(win, "Windows", "WinSxS", "Manifests");
-                if (!File.Exists(Path.Combine(win, "Windows", "System32", "config", "SOFTWARE"))
-                    && !Directory.Exists(manifests)) return true;
-                if (!Directory.Exists(manifests)) return true;
-                int n = 0;
-                foreach (var _ in Directory.EnumerateFiles(manifests)) { if (++n >= 200) return false; }
-                return true;
-            }
-            catch { return true; }
-        }
-
         /// <summary>
         /// 确保 cbscore.dll 可被 LoadLibraryA 找到。
         ///
@@ -458,25 +450,55 @@ namespace OneCore_Image_Designer.Services
         /// </summary>
         public static bool TryAddServicingStackToSearchPath(string? imageRootOrHint, out string detail)
         {
-            // ── 裸骨架：直接用【宿主】栈 ──
-            // 骨架上的镜像栈起不来（0x8007007F），而且它的 DLL 一旦进进程就再换不回来。
-            // 所以必须在加载任何栈 DLL 之前就决定用宿主栈。
-            if (!string.IsNullOrWhiteSpace(imageRootOrHint) && LooksLikeBareSkeleton(imageRootOrHint!))
+            detail = "";
+
+            // ── ① 工具侧首选栈（服务栈归工具管，不归镜像管）──
+            // 【依据】explodeSxS 把 <arch>_microsoft-windows-servicingstack_… 整个目录放到
+            // 工具旁边，由工具加载它来服务镜像；镜像自己的栈由后续装的包带进来。
+            // 好处：用哪套栈由调用方显式决定，镜像里那份不会来抢；
+            //      也就不会出现"镜像栈上下文不全 ⇒ CbsCoreInitialize 0x8007007F，
+            //      而且同名模块依赖已进进程、换不回来"这个死结。
+            var preferred = UsePreferredStack ? PreferredStackDir : null;
+
+            // 裸骨架（还没有真正的组件存储）上的"镜像栈"上下文不全，起不来；
+            // 而且栈 DLL 一旦进进程，依赖也跟着进，再想换就换不回来（实测换不成功）。
+            // 所以必须在加载【任何】栈 DLL 之前就决定改用宿主栈。
+            if (preferred == null && !string.IsNullOrWhiteSpace(imageRootOrHint))
             {
-                string? hd0 = FindHostStackDir(null);
-                if (hd0 != null)
+                try
                 {
-                    SetDllDirectory(hd0);
-                    if (LoadLibraryW(Path.Combine(hd0, "cbscore.dll")) != IntPtr.Zero)
+                    string w0 = Path.GetFullPath(imageRootOrHint!);
+                    if (Path.GetFileName(w0).Equals("Windows", StringComparison.OrdinalIgnoreCase))
+                        w0 = Directory.GetParent(w0)?.FullName ?? w0;
+                    string mf = Path.Combine(w0, "Windows", "WinSxS", "Manifests");
+                    bool bare = !Directory.Exists(mf);
+                    if (!bare)
                     {
-                        _lastStackDll = Path.Combine(hd0, "cbscore.dll");
-                        detail = "裸骨架 —— 直接用宿主服务栈: " + Path.GetFileName(hd0);
+                        int n0 = 0;
+                        foreach (var _ in Directory.EnumerateFiles(mf)) { if (++n0 >= 200) break; }
+                        bare = n0 < 200;
+                    }
+                    if (bare) preferred = FindHostStackDir(null);
+                }
+                catch { }
+            }
+            if (!string.IsNullOrWhiteSpace(preferred))
+            {
+                string pd = preferred!.TrimEnd('\\');
+                string pdll = Path.Combine(pd, "cbscore.dll");
+                if (File.Exists(pdll))
+                {
+                    SetDllDirectory(pd);
+                    // 用【完整路径】加载：同名模块会返回已加载实例，不论路径
+                    if (LoadLibraryW(pdll) != IntPtr.Zero && LoadedFromDirectory("cbscore.dll", pd))
+                    {
+                        _lastStackDll = pdll;
+                        detail = "已从指定服务栈加载 cbscore.dll: " + Path.GetFileName(pd);
                         return true;
                     }
                 }
+                detail = "指定的服务栈目录无效（缺 cbscore.dll）: " + pd;
             }
-
-            detail = "";
 
             // 1) 默认路径
             if (LoadLibraryA("cbscore.dll") != IntPtr.Zero) { detail = "cbscore.dll 已在默认搜索路径"; return true; }
@@ -609,10 +631,20 @@ namespace OneCore_Image_Designer.Services
                 // 这决定了后续的版本体系判定行为，必须可查。
                 // 注意：LoadLibrary 对【同名模块】会返回已加载的实例，**不论路径** ——
                 // 所以换栈时必须用【完整路径】加载，否则拿回的还是原来那一个。
-                if ((hr < 0 || factory == null) && _lastStackDll != null
-                    && _lastStackDll.StartsWith(Path.GetFullPath(winDir), StringComparison.OrdinalIgnoreCase))
+                // ── 回退：指定的工具侧栈也可能起不来（实测 8400 的服务栈组件
+                //    会报 0x8007007F，只有宿主栈能起来）。此时先 FreeLibrary 掉它，
+                //    再用【完整路径】加载宿主栈重试 —— 完整路径才能绕开
+                //    "同名模块返回已加载实例"的规则，否则等于没换。──
+                if ((hr < 0 || factory == null) && cbscore != IntPtr.Zero)
                 {
-                    log?.Invoke($"镜像自带栈的 CbsCoreInitialize 失败 0x{hr:X8}，回退宿主栈重试");
+                    log?.Invoke($"栈的 CbsCoreInitialize 失败 0x{hr:X8}，释放后回退宿主栈重试");
+                    // 先把这个起不来的栈放掉 —— 不放掉，后面按名加载会拿回同一个实例
+                    try
+                    {
+                        if (cbscore != IntPtr.Zero) FreeLibrary(cbscore);
+                        cbscore = IntPtr.Zero;
+                    }
+                    catch { }
                     string? hostDir = FindHostStackDir(log);
                     if (hostDir != null)
                     {

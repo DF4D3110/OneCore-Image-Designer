@@ -46,6 +46,9 @@ namespace OneCore_Image_Designer.Services
         [DllImport("advapi32.dll", SetLastError = true)]
         static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
 
+        [DllImport("kernel32", SetLastError = true)]
+        static extern bool CloseHandle(IntPtr hObject);
+
         [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         static extern bool LookupPrivilegeValue(string? lpSystemName, string lpName, out LUID lpLuid);
 
@@ -112,7 +115,11 @@ namespace OneCore_Image_Designer.Services
                 return (enabled, failed);
             }
             catch (Exception ex) { failed.Add("异常: " + ex.Message); return (enabled, failed); }
-            finally { if (token != IntPtr.Zero) try { System.Runtime.InteropServices.Marshal.Release(token); } catch { } }
+            // ⚠ token 是 Win32 内核句柄，不是 COM 接口指针！
+            //   早前这里误用 Marshal.Release —— 它会按 COM vtable 解引用，
+            //   直接访问违例 0xC0000005；而损坏状态异常 try/catch 抓不住，进程当场死。
+            //   正确 API 是 CloseHandle。
+            finally { if (token != IntPtr.Zero) try { CloseHandle(token); } catch { } }
         }
 
         /// <summary>启用 CBS/WCP 所需的全部标准特权，并把结果写进日志回调。</summary>

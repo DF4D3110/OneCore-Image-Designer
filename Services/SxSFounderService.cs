@@ -115,6 +115,9 @@ namespace OneCore_Image_Designer.Services
         [DllImport("kernel32", CharSet = CharSet.Ansi, SetLastError = true)]
         static extern IntPtr LoadLibraryA(string lpFileName);
 
+        [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr LoadLibraryW(string lpFileName);
+
         [DllImport("kernel32", CharSet = CharSet.Ansi, SetLastError = true)]
         static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
 
@@ -381,7 +384,12 @@ namespace OneCore_Image_Designer.Services
 
         static bool TryResolveWcp(string imageRoot, Action<string> log)
         {
-            // 默认搜索路径里已有一个可用的就用
+            // 【实测结论】服务栈组件目录里的 wcp.dll **缺少铺底所需的导出**
+            //   （WcpInitialize / SetIsolationIMalloc / CreateNewWindows /
+            //     CreateNewOfflineStore / DismountRegistryHives）。
+            //   所以 CbsxService.PreferredStackDir 只用于 cbscore.dll（CBS 通道），
+            //   铺底这里的 wcp.dll 仍按原有顺序解析（镜像 → 宿主）。
+            //   宿主那份实测可用 —— 见下方 HasAllExports 校验。
             IntPtr alreadyLoaded = LoadLibraryA("wcp.dll");
             if (alreadyLoaded != IntPtr.Zero)
             {

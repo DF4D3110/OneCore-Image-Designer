@@ -169,6 +169,25 @@ namespace OneCore_Image_Designer.Services
         {
             var res = new Result();
             void L(string s) { res.Log.Add(s); log?.Invoke(s); }
+
+            // ── 选定【工具侧】服务栈（必须在铺底之前 —— 铺底要加载 wcp.dll）──
+            // 依据 explodeSxS：服务栈是工具的依赖，由调用方显式指定用哪一套；
+            // 镜像里那份不参与选择。这样就不会出现"镜像栈上下文不全 ⇒
+            // CbsCoreInitialize 0x8007007F，且依赖已进进程换不回来"的死结。
+            try
+            {
+                if (cfg.StackSourceDirs != null && cfg.StackSourceDirs.Count > 0)
+                {
+                    var (sd, sv) = FounderStackInstaller.FindStack(cfg.StackSourceDirs, cfg.Arch);
+                    if (sd != null)
+                    {
+                        CbsxService.PreferredStackDir = sd;
+                        L($"工具侧服务栈: {System.IO.Path.GetFileName(sd)}" + (sv != null ? $"（版本 {sv}）" : ""));
+                    }
+                    else L("未找到可用的服务栈 —— CBS 将回退到镜像/宿主栈");
+                }
+            }
+            catch (Exception ex) { L("选定服务栈异常: " + ex.Message); }
             void Step(string name, bool ok, string detail)
             {
                 res.Steps.Add((name, ok, detail));
