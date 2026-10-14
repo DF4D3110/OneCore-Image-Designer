@@ -256,3 +256,38 @@ PA30 还原：每个文件 SHA256 与包自带 <Hash> 相符 ⇒ 与原始文件
 后果：一个已 `Installed` 的 `Enterprise` 包，导致两个真正 `Absent→Installed` 的包**被一起放弃**。
 
 **⇒ 现在是跳过并继续**（带计数），**只有适用性不足才中止**。
+
+
+---
+
+## 11. 收尾必须在【独立进程】里做（实测结论）
+
+### 现象
+
+CBS 会话 `FinalizeEx` 之后，目标镜像的 hive **仍挂在 HKLM 下**，且**本进程内怎么都卸不掉**：
+
+| 场景 | `ReleaseResidualHives` 结果 |
+|---|---|
+| **同一个进程内**（刚跑完 CBS） | **9 → 9**，重试 6 次（累计等 42 秒）**全部失败** |
+| **新进程**（哪怕同一块盘、同一批 hive） | **9 → 0**，`imagestate` 写入 **2 处**，收尾完整成功 |
+
+对照：`ReleaseServicingStack()` 把本进程加载的 `cbscore.dll` / `wcp.dll` / `dpx.dll` /
+`msdelta.dll` 都放掉了，**hive 依然被持有** ⇒ **持有者是 CBS 的【服务】，不是调用进程**，
+而该服务要到调用方进程退出才释放。
+
+### 因此
+
+`FinishImageStep`（写 `State.ini` + imagestate）**不能与 CBS 步骤同进程执行**。
+现在的实现保留同进程尝试（并带"释放 → 递增等待 → 重试"），**失败时明确提示应把收尾移出本进程**。
+
+### 另一条实测结论：铺底会自愈
+
+上一次运行留下的 hive 会让下一次 `CreateNewWindows` 直接失败
+（`0x80070020 ERROR_SHARING_VIOLATION`）。`SxSFounderService` 现在**建 windows 之前先
+`ReleaseResidualHives` 该盘**，并在仍有残留时告警。实测：**上一轮残留 9 个 hive 的情况下，铺底照样成功。**
+
+### 还有一条：`reg.exe` 为何卸不掉
+
+`reg unload` 报 `Access is denied`，而我们的 `RegUnLoadKey` 能成功 —— 差别在于
+**`reg.exe` 那条路径不启用 `SeBackupPrivilege`/`SeRestorePrivilege`**。
+所以"手工卸不掉"不代表"程序卸不掉"。
