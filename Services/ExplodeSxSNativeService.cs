@@ -129,11 +129,10 @@ namespace OneCore_Image_Designer.Services
             if (ArchRelay.NeedsRelay(imgArch, out string archReason))
             {
                 string? helper = ArchRelay.FindHelper(imgArch);
-                blockers.Add(archReason + (helper != null
-                    ? $"；可用的子程序：{helper}"
-                    : $"；未找到 {ArchRelay.ToToken(imgArch)} 子程序，请放置对应架构的 CbsxCli"));
+                checks.Add(archReason + (helper != null
+                        ? $"；装包将改走 DISM 通道（子程序可用于其它操作：{helper}）"
+                        : "；装包将改走 DISM 通道（架构不符时的既定路径，不是错误）"));
             }
-            else checks.Add($"架构匹配：镜像={ArchRelay.ToToken(imgArch)}（{archEvidence}）");
 
             // servicing stack 是否可用（CBS 与 WCP 都要）
             string root = string.IsNullOrWhiteSpace(cfg.ImageRoot) ? DeriveImageRoot(win) : cfg.ImageRoot;
@@ -253,6 +252,18 @@ namespace OneCore_Image_Designer.Services
                         var (n2, miss2, _) = FounderStackInstaller.InstallCoreFilesFromStore(root, cfg.StackSourceDirs, log, cfg.Arch);
                         Step("补最小系统文件集（取自存储）", n2 > 0, $"放入 {n2} 个" + (miss2.Count > 0 ? $"，缺失 {miss2.Count}" : ""));
                     }
+                }
+
+                // ── 步骤 1.6：写入版本信息（必须在装包【之前】） ──
+                // DISM/SSShim 靠 SOFTWARE\...\CurrentVersion 与 COMPONENTS 的
+                // StoreFormatVersion/StoreArchitecture 判 OS 版本；裸骨架没有这些，
+                // DISM 就报 Error 50 并当作 "Vista RTM or earlier"。
+                // 实测：真实 arm32 镜像有这些值，DISM 完全可用且装包成功。
+                // 时机：装包在收尾之前发生，所以不能放到 FinishImageStep 里。
+                {
+                    L("=== 步骤 1.6：写入镜像版本信息（DISM 判版本所需） ===");
+                    var (vn, vd) = FounderStackInstaller.SeedImageVersionInfo(win, cfg.Arch, 0, L);
+                    Step("写入版本信息", vn > 0, vn > 0 ? $"写入 {vn} 个值" : "未写入（" + vd + "）");
                 }
 
                 // ── 步骤 2：SKU assembly（替代 cbsx.exe /b:） ──

@@ -399,6 +399,92 @@ namespace OneCore_Image_Designer.Services
             return (copied, missing, sources);
         }
 
+        /// <summary>
+        /// 把镜像的版本信息写进骨架的 SOFTWARE / COMPONENTS hive。
+        ///
+        /// 【为什么必须写、且必须在装包之前写】
+        /// 实测：铺出来的裸骨架里没有任何版本信息，DISM/SSShim 判不出 OS 版本，
+        /// 于是报
+        ///     Error: 50  DISM does not support servicing a Windows Vista RTM or earlier
+        ///                operating system. check that SSShim.DLL is present.
+        /// 这【不是】shim 缺失（ssshim.dll 已就位），而是判不出版本。
+        /// 对照真实 arm32 镜像（8419 CLIENT_COREARM）—— 它有这些值，DISM 就完全可用，
+        /// 甚至成功装入了比镜像版本低的 arm32 包。
+        ///
+        /// 时机很关键：装包发生在收尾之前，所以不能放在 FinishImageStep 里 ——
+        /// 必须放在"装好服务栈与核心文件"之后、"装包"之前。
+        /// </summary>
+        /// <param name="winDir">镜像的 Windows 目录</param>
+        /// <param name="arch">x86 / arm / amd64 / arm64（用于 StoreArchitecture）</param>
+        /// <param name="build">构建号（例 8400）；0 表示不写具体值</param>
+        public static (int written, string detail) SeedImageVersionInfo(
+            string winDir, string arch, int build, Action<string>? log = null)
+        {
+            int written = 0;
+            var detail = new System.Text.StringBuilder();
+            try
+            {
+                string win = Path.GetFullPath(winDir);
+                string software = Path.Combine(win, "System32", "config", "SOFTWARE");
+                string components = Path.Combine(win, "System32", "config", "COMPONENTS");
+
+                // 版本号：6.2.<build>（Win8 世代）。没给 build 就只写 CurrentVersion。
+                string curBuild = build > 0 ? build.ToString() : "8400";
+
+                // ── SOFTWARE\Microsoft\Windows NT\CurrentVersion ──
+                if (File.Exists(software))
+                {
+                    // 先释放 CBS 可能仍持有的 hive，否则 LoadHive 会报"被占用"
+                    try
+                    {
+                        string dr = (Path.GetPathRoot(win) ?? "").TrimEnd('\\');
+                        if (dr.Length > 0) CbsSafety.ReleaseResidualHives(dr, log);
+                    }
+                    catch { }
+                    using var reg = new OfflineRegistryService();
+                    if (reg.LoadHive(software, writable: true))
+                    {
+                        string k = @"Microsoft\Windows NT\CurrentVersion";
+                        void W(string n, object v) { if (reg.SetValue(k, n, v, Microsoft.Win32.RegistryValueKind.String)) written++; }
+                        W("CurrentVersion", "6.2");
+                        W("CurrentBuild", curBuild);
+                        W("CurrentBuildNumber", curBuild);
+                        W("InstallationType", "Client");
+                        W("ProductName", arch.Equals("arm", StringComparison.OrdinalIgnoreCase)
+                                          || arch.Equals("arm64", StringComparison.OrdinalIgnoreCase)
+                                          ? "Windows RT" : "Windows 8");
+                        if (string.IsNullOrEmpty(reg.GetValue(k, "EditionID") as string))
+                            W("EditionID", "Core");
+                        detail.Append($"SOFTWARE: CurrentVersion=6.2 CurrentBuild={curBuild} 等; ");
+                    }
+                    else detail.Append("SOFTWARE: 打开失败; ");
+                }
+                else detail.Append("SOFTWARE: 不存在; ");
+
+                // ── COMPONENTS 根值 ──
+                if (File.Exists(components))
+                {
+                    using var reg2 = new OfflineRegistryService();
+                    if (reg2.LoadHive(components, writable: true))
+                    {
+                        // StoreFormatVersion 是 REG_BINARY，内容为 UTF-16LE 的 "0.0.0.6"
+                        // （实测真实镜像里就是这 14 个字节：48 00 2E 00 ... 36 00）
+                        var vBytes = System.Text.Encoding.Unicode.GetBytes("0.0.0.6");
+                        if (reg2.SetValue("", "StoreFormatVersion", vBytes,
+                                          Microsoft.Win32.RegistryValueKind.Binary)) written++;
+                        if (reg2.SetValue("", "StoreArchitecture", (int)SxSFounderService.ArchitectureValue(arch),
+                                          Microsoft.Win32.RegistryValueKind.DWord)) written++;
+                        detail.Append($"COMPONENTS: StoreFormatVersion=0.0.0.6 StoreArchitecture={(int)SxSFounderService.ArchitectureValue(arch)}; ");
+                    }
+                    else detail.Append("COMPONENTS: 打开失败; ");
+                }
+                else detail.Append("COMPONENTS: 不存在; ");
+            }
+            catch (Exception ex) { detail.Append("异常: " + ex.Message); }
+            log?.Invoke("  版本信息: " + detail.ToString().TrimEnd(' ', ';'));
+            return (written, detail.ToString().TrimEnd(' ', ';'));
+        }
+
         static void EnsureWritable(string dir, Action<string>? log)
         {
             if (!Directory.Exists(dir)) return;
