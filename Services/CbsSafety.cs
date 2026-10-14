@@ -52,6 +52,15 @@ namespace OneCore_Image_Designer.Services
         /// </summary>
         public static TargetCheck CheckTarget(string winDir, IEnumerable<string>? knownMountedVhds = null)
         {
+            // 记录目标盘根：RunCleanup() 会据此兜底卸载残留 hive。
+            // 每个入口都会经过 CheckTarget，所以这里一定收得全。
+            try
+            {
+                string touchedRoot = (Path.GetPathRoot(Path.GetFullPath(winDir)) ?? "").TrimEnd('\\');
+                if (touchedRoot.Length > 0) _touchedRoots.Add(touchedRoot);
+            }
+            catch { }
+
             var r = new TargetCheck();
             try
             {
@@ -238,6 +247,36 @@ namespace OneCore_Image_Designer.Services
         static readonly List<Action> _cleanup = new();
         static bool _hooked;
 
+        /// <summary>
+        /// 本进程操作过的目标盘根（例 "F:"）。由 <see cref="CheckTarget"/> 记录 ——
+        /// 每个入口都会经过那里，所以这里一定能收全。
+        /// 用途：RunCleanup() 就地对这些盘兜底卸载残留 hive。
+        /// </summary>
+        static readonly HashSet<string> _touchedRoots = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// 枚举某个盘根下【实际仍挂载】的离线 hive（WCP 的命名形如
+        /// HKLM\{bf1a281b-...}F:/Windows/System32/config/SOFTWARE）。
+        /// 用"实际枚举"而不是信任卸载 API 的返回值 —— 实测 DismountRegistryHives
+        /// 返回 0x00000000 之后 hive 仍可能挂着。
+        /// </summary>
+        public static List<string> FindResidualHives(string driveRoot)
+        {
+            var found = new List<string>();
+            try
+            {
+                string root = (driveRoot ?? "").TrimEnd('\\');
+                string prefix = "{bf1a281b-ad7b-4476-ac95-f47682990ce7}" + root.Replace('\\', '/');
+                var hklm = Microsoft.Win32.Registry.LocalMachine;
+                using var k = hklm.OpenSubKey("");
+                if (k == null) return found;
+                foreach (var name in k.GetSubKeyNames())
+                    if (name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) found.Add(name);
+            }
+            catch { }
+            return found;
+        }
+
         /// <summary>登记一个退出时必定执行的清理动作（幂等）。</summary>
         public static void RegisterCleanup(Action a)
         {
@@ -266,7 +305,38 @@ namespace OneCore_Image_Designer.Services
             {
                 try { a(); } catch { /* 收尾阶段不再抛 */ }
             }
+
+            // ── 兜底：对本进程操作过的所有目标盘卸载残留 hive，并**枚举验证** ──
+            // 原先只有 RunGuarded(winDir) 会做这件事，而无参 RunCleanup()（ExplodeSxSNativeService
+            // 的 finally 用的就是它）从不调用 ⇒ 残留 hive 一直没被处理，会阻塞下一次运行。
+            if (_touchedRoots.Count == 0) return;
+            try { PrivilegeHelper.EnableServicingPrivileges(); } catch { }
+            foreach (var root in _touchedRoots)
+            {
+                try
+                {
+                    var before = FindResidualHives(root);
+                    if (before.Count == 0) continue;
+
+                    // 先按已知 hive 名单逐个卸载
+                    TryUnloadResidualHives(root, null);
+                    // 再对枚举到的每一个卸载（含上面名单没覆盖的，例如 ntuser.dat / schema.dat）
+                    foreach (var name in before)
+                    {
+                        try { RegUnLoadKey(new IntPtr(HKEY_LOCAL_MACHINE), name); } catch { }
+                    }
+
+                    var after = FindResidualHives(root);
+                    if (after.Count > 0)
+                        LastCleanupWarning = $"{root} 仍有 {after.Count} 个离线 hive 未卸载（例 {after[0]}）。"
+                                           + "它们会阻塞后续对同一盘的铺底/CBS 操作，可能需要重启。";
+                }
+                catch { }
+            }
         }
+
+        /// <summary>上次清理留下的警告（无法卸载时非空），供界面/日志提示。</summary>
+        public static string? LastCleanupWarning { get; private set; }
 
         /// <summary>
         /// 把工作包在 using + 兜底清理里。工作抛异常时也保证清理执行。
