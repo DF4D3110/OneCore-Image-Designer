@@ -102,6 +102,14 @@ namespace OneCore_Image_Designer.Services
         }
 
         /// <summary>`/image:&lt;root&gt;` 形式的参数前缀。传进来的可以是 G:\ 或 G:\Windows。</summary>
+        /// <summary>
+        /// 拼 /scratchdir。explodeSxS 的【每一条】dism 都带 /scratchdir:X:\temp，
+        /// 我们原来只有 add-package 带 —— 这是与它的明显差异，且 apply-unattend 报
+        /// ERROR_ACCESS_DENIED(5) 很可能与此有关（DISM 需要可写的暂存目录）。
+        /// </summary>
+        static string Scratch(string? dir)
+            => string.IsNullOrWhiteSpace(dir) ? "" : $" /scratchdir:\"{dir}\"";
+
         static string ImageArg(string pathOrWinDir)
         {
             string full = Path.GetFullPath(pathOrWinDir);
@@ -158,20 +166,20 @@ namespace OneCore_Image_Designer.Services
         }
 
         /// <summary>`/apply-unattend:&lt;xml&gt;`。</summary>
-        public static Result ApplyUnattend(string pathOrWinDir, string unattendXml)
-            => Run($"{ImageArg(pathOrWinDir)} /apply-unattend:\"{unattendXml}\"");
+        public static Result ApplyUnattend(string pathOrWinDir, string unattendXml, string? scratchDir = null)
+            => Run($"{ImageArg(pathOrWinDir)} /apply-unattend:\"{unattendXml}\"" + Scratch(scratchDir));
 
         /// <summary>`/set-allintl:&lt;lang&gt;`。</summary>
-        public static Result SetAllIntl(string pathOrWinDir, string lang)
-            => Run($"{ImageArg(pathOrWinDir)} /set-allintl:{lang} /english");
+        public static Result SetAllIntl(string pathOrWinDir, string lang, string? scratchDir = null)
+            => Run($"{ImageArg(pathOrWinDir)} /set-allintl:{lang} /english" + Scratch(scratchDir));
 
         /// <summary>`/cleanup-image /analyzecomponentstore`。</summary>
-        public static Result AnalyzeComponentStore(string pathOrWinDir)
-            => Run($"{ImageArg(pathOrWinDir)} /cleanup-image /analyzecomponentstore /english");
+        public static Result AnalyzeComponentStore(string pathOrWinDir, string? scratchDir = null)
+            => Run($"{ImageArg(pathOrWinDir)} /cleanup-image /analyzecomponentstore /english" + Scratch(scratchDir));
 
         /// <summary>`/cleanup-image /startcomponentcleanup`。</summary>
-        public static Result StartComponentCleanup(string pathOrWinDir)
-            => Run($"{ImageArg(pathOrWinDir)} /cleanup-image /startcomponentcleanup /english");
+        public static Result StartComponentCleanup(string pathOrWinDir, string? scratchDir = null)
+            => Run($"{ImageArg(pathOrWinDir)} /cleanup-image /startcomponentcleanup /english" + Scratch(scratchDir));
 
         /// <summary>`/capture-image`（把目录捕获成 wim）。</summary>
         public static Result CaptureImage(string wimPath, string captureDir, string name = "Windows", string compress = "max")

@@ -218,6 +218,18 @@ namespace OneCore_Image_Designer.Services
                 string win = Path.GetFullPath(cfg.WinDir);
                 string root = string.IsNullOrWhiteSpace(cfg.ImageRoot) ? DeriveImageRoot(win) : cfg.ImageRoot;
 
+            // explodeSxS 的每条 dism 都带 /scratchdir；为空时在目标卷（VHD）上推导一个
+            if (string.IsNullOrWhiteSpace(cfg.ScratchDir))
+            {
+                try
+                {
+                    cfg.ScratchDir = Path.Combine(root, "OCID_scratch");
+                    Directory.CreateDirectory(cfg.ScratchDir);
+                    L($"暂存目录: {cfg.ScratchDir}");
+                }
+                catch { }
+            }
+
                 // ── 步骤 1：铺底（替代 sxsfounder.exe） ──
                 if (cfg.SkipFounder)
                 {
@@ -323,7 +335,7 @@ namespace OneCore_Image_Designer.Services
                         {
                             ct.ThrowIfCancellationRequested();
                             if (op.ResolvedPath == null) { fail++; continue; }
-                            var dr = DismServicingService.AddPackage(win, op.ResolvedPath);
+                            var dr = DismServicingService.AddPackage(win, op.ResolvedPath, cfg.ScratchDir);
                             if (dr.Success) ok++;
                             else { fail++; L($"    ✗ {op.IdentityString ?? op.Name}: {dr.Error}"); }
                             if (cfg.DryRun && ok >= 1) { L("    (试运行：只试一个包即停)"); break; }
@@ -459,7 +471,7 @@ namespace OneCore_Image_Designer.Services
                     {
                         if (string.IsNullOrWhiteSpace(cfg.UnattendXml))
                             L("=== 步骤 4/7：应用 edition 设置（DISM） ===");
-                        var r = DismServicingService.ApplyUnattend(win, unattend);
+                        var r = DismServicingService.ApplyUnattend(win, unattend, cfg.ScratchDir);
                         Step("apply-unattend", r.Success, r.Success ? "OK" : r.Error);
                     }
                     else L("=== 步骤 4/7：SKU 配置已跳过（既没给 unattend，也取不到 Edition XML） ===");
@@ -473,15 +485,15 @@ namespace OneCore_Image_Designer.Services
                 if (!string.IsNullOrWhiteSpace(cfg.Lang))
                 {
                     L("=== 步骤 5/7：语言配置（DISM） ===");
-                    var r = DismServicingService.SetAllIntl(win, cfg.Lang);
+                    var r = DismServicingService.SetAllIntl(win, cfg.Lang, cfg.ScratchDir);
                     Step("set-allintl", r.Success, r.Success ? cfg.Lang : r.Error);
                 }
 
                 // ── 步骤 6：组件存储清理 ──
                 L("=== 步骤 6/7：组件存储清理（DISM） ===");
-                var a = DismServicingService.AnalyzeComponentStore(win);
+                var a = DismServicingService.AnalyzeComponentStore(win, cfg.ScratchDir);
                 Step("analyzecomponentstore", a.Success, a.Success ? "OK" : a.Error);
-                var c2 = DismServicingService.StartComponentCleanup(win);
+                var c2 = DismServicingService.StartComponentCleanup(win, cfg.ScratchDir);
                 Step("startcomponentcleanup", c2.Success, c2.Success ? "OK" : c2.Error);
 
                 // ── 步骤 7：收尾（State.ini + imagestate.reg） ──
