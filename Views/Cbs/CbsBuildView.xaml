@@ -124,7 +124,23 @@
                     <Button Content="计算组装计划" Command="{Binding ShowAssemblyPlanCommand}" Style="{StaticResource ICDToolbarButton}" Margin="0,0,8,0"/>
                 </StackPanel>
 
-                <TextBlock Text="SKU 组装清单（可空 = 跳过 SKU 步骤）" FontWeight="SemiBold" Margin="0,12,0,2"/>
+                <TextBlock Text="目标 SKU（edition，只装这一个；例 professional / enterprise / serverdatacenter）"
+                           FontWeight="SemiBold" Margin="0,12,0,2"/>
+                <DockPanel>
+                    <Button DockPanel.Dock="Right" Content="扫描可用 SKU" Command="{Binding DiscoverSkusCommand}"
+                            Style="{StaticResource ICDToolbarButton}" Margin="8,0,0,0"/>
+                    <TextBox Text="{Binding TargetSku, UpdateSourceTrigger=PropertyChanged}"/>
+                </DockPanel>
+                <TextBlock Text="{Binding AvailableSkus}" TextWrapping="Wrap" FontFamily="Consolas" FontSize="12"
+                           Margin="0,6,0,0" Foreground="{StaticResource ICDSubtle}"/>
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <TextBlock Text="架构过滤" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <TextBox Text="{Binding SkuArchFilter, UpdateSourceTrigger=PropertyChanged}" Width="90" Height="26" VerticalContentAlignment="Center"/>
+                    <Button Content="按 SKU 生成组装计划（只含该 SKU 及其依赖）" Command="{Binding BuildSkuPlanCommand}"
+                            Style="{StaticResource ICDToolbarPrimaryButton}" Margin="12,0,0,0"/>
+                </StackPanel>
+
+                <TextBlock Text="SKU 组装清单（可空 = 跳过 SKU 步骤；由上面的按钮自动生成）" FontWeight="SemiBold" Margin="0,12,0,2"/>
                 <DockPanel>
                     <Button DockPanel.Dock="Right" Content="浏览…" Command="{Binding PickSkuFileCommand}" Style="{StaticResource ICDToolbarButton}" Margin="8,0,0,0"/>
                     <TextBox Text="{Binding AssemblySkuFile, UpdateSourceTrigger=PropertyChanged}"/>

@@ -439,6 +439,98 @@ namespace OneCore_Image_Designer.ViewModels.Cbs
                .Where(x => x.Length > 0)
                .ToList();
 
+
+        // ── 目标 SKU（edition）显式化 ──
+        // SKU 由装哪个 Microsoft-Windows-Editions-* 决定。**只装一个**，
+        // 不能像早前那样一次装 5 个 —— 那不是正常单 SKU 镜像。
+
+        /// <summary>目标 SKU（edition），例 professional / enterprise / serverdatacenter。</summary>
+        [ObservableProperty] string _targetSku = "";
+
+        /// <summary>可用 SKU 列表（"扫描可用 SKU" 后填入，供选择参考）。</summary>
+        [ObservableProperty] string _availableSkus = "";
+
+        /// <summary>SKU 计划要用的架构过滤（留空 = 不限）。</summary>
+        [ObservableProperty] string _skuArchFilter = "";
+
+        /// <summary>扫描 SxS 内容里可用的 SKU。</summary>
+        [RelayCommand]
+        void DiscoverSkus()
+        {
+            try
+            {
+                var dirs = SplitDirs(AssemblySourceDirs);
+                if (dirs.Count == 0) { AvailableSkus = "请先填写 SxS 内容目录。"; return; }
+                var logLines = new List<string>();
+                var eds = SkuPlanBuilder.DiscoverEditions(dirs,
+                    string.IsNullOrWhiteSpace(SkuArchFilter) ? null : SkuArchFilter.Trim(),
+                    m => logLines.Add(m));
+                AvailableSkus = SkuPlanBuilder.RenderEditions(eds);
+                // 默认选 professional（客户端最常见的 SKU）；**没有也不要抛异常**，
+                // 退回列表第一个。早前这里用了 First(predicate)，缺 professional 时会直接抛。
+                if (string.IsNullOrWhiteSpace(TargetSku) && eds.Count > 0)
+                    TargetSku = (eds.FirstOrDefault(e => e.Name.Equals("professional", StringComparison.OrdinalIgnoreCase))
+                                 ?? eds[0]).Name;
+                Status = $"发现 {eds.Count} 个可用 SKU";
+            }
+            catch (Exception ex) { AvailableSkus = "扫描异常：" + ex.Message; }
+        }
+
+        /// <summary>
+        /// 以目标 SKU 为唯一种子生成组装计划，写成 skuassembly.txt 并填入输入框，
+        /// 之后可直接用上面的「执行原生 staging」。
+        /// </summary>
+        [RelayCommand]
+        void BuildSkuPlan()
+        {
+            try
+            {
+                var dirs = SplitDirs(AssemblySourceDirs);
+                if (dirs.Count == 0) { ServicingReport = "请先填写 SxS 内容目录。"; HasServicingReport = true; return; }
+                if (string.IsNullOrWhiteSpace(TargetSku)) { ServicingReport = "请先指定目标 SKU（或点『扫描可用 SKU』）。"; HasServicingReport = true; return; }
+
+                var logLines = new List<string>();
+                var plan = SkuPlanBuilder.Build(dirs, TargetSku,
+                    string.IsNullOrWhiteSpace(SkuArchFilter) ? null : SkuArchFilter.Trim(),
+                    m => logLines.Add(m));
+
+                var sb = new System.Text.StringBuilder();
+                foreach (var l in logLines) sb.AppendLine(l);
+                if (!plan.Success)
+                {
+                    sb.AppendLine("✗ " + plan.Error);
+                    ServicingReport = sb.ToString(); HasServicingReport = true;
+                    Status = "生成 SKU 计划失败：" + plan.Error;
+                    return;
+                }
+
+                // 落成 skuassembly.txt
+                string outPath = !string.IsNullOrWhiteSpace(UpdatePackageOutDir) ? UpdatePackageOutDir
+                               : Path.Combine(Path.GetTempPath(), "ocid_sku_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".txt");
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+                    File.WriteAllText(outPath, plan.ToSkuAssemblyText());
+                    AssemblySkuFile = outPath;
+                    sb.AppendLine();
+                    sb.AppendLine($"已写出 SKU 计划（只含目标 SKU 及其依赖闭包）: {outPath}");
+                }
+                catch (Exception ex) { sb.AppendLine("写文件失败：" + ex.Message); }
+
+                sb.AppendLine();
+                sb.AppendLine("安装顺序（前 30）：");
+                int i = 0;
+                foreach (var k in plan.Order) { if (++i > 30) { sb.AppendLine($"  …（还有 {plan.Order.Count - 30} 项）"); break; } sb.AppendLine($"  {i,4}. {k}"); }
+                if (plan.Missing.Count > 0) { sb.AppendLine(); sb.AppendLine("缺失依赖：" + string.Join(", ", plan.Missing.Take(15))); }
+                if (plan.Cycles.Count > 0) { sb.AppendLine(); sb.AppendLine("检测到环：" + string.Join(" | ", plan.Cycles.Take(5))); }
+
+                ServicingReport = sb.ToString().TrimEnd();
+                HasServicingReport = true;
+                Status = plan.Summary();
+            }
+            catch (Exception ex) { ServicingReport = "异常：" + ex.Message; HasServicingReport = true; }
+        }
+
         // ── 本地日志接收器 ──
         // CbsBuildViewModel 没有任务日志通道（那是 SxsViewModel 的）。这里自带一个最小实现，
         // 让下面各服务的日志回调有落点，同时把内容汇总进 ServicingReport。
