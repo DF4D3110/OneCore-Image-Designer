@@ -20,7 +20,7 @@
                 <Button Content="使用说明" Command="{Binding ShowUsageCommand}" Style="{StaticResource ICDToolbarButton}"/>
             </StackPanel>
             <TextBlock Grid.Row="1" Grid.ColumnSpan="2" Margin="0,10,0,0" TextWrapping="Wrap"
-                       Text="上游 CBS 可执行文件未随仓库分发。prepare.cmd 会格式化 X:；本工具只检查并展示集成的源码，不会自动启动这些破坏性脚本。"
+                       Text="全部能力由本程序自带实现完成，不需要任何外部可执行文件或脚本（原来的 cbsx.exe / sxsfounder.exe / puresxs.py / *.cmd 均已移除）。目标镜像必须位于挂载的 VHD/VHDX 上。"
                        Foreground="{StaticResource ICDSubtle}"/>
         </Grid>
         <Grid Grid.Row="2">

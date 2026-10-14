@@ -45,18 +45,10 @@ namespace OneCore_Image_Designer.Services
             // DismServicingService / ExplodeSxSNativeService / PureSxsService）。
             checks.Add("外部工具：不需要（全部由本程序自带实现完成）");
 
-            var prepareScript = Path.Combine(sxsRoot, "explodeSxS", "prepare.cmd");
-            if (File.Exists(prepareScript))
-            {
-                var script = File.ReadAllText(prepareScript);
-                if (script.Contains("format X:", StringComparison.OrdinalIgnoreCase))
-                {
-                    checks.Add("prepare.cmd contains a volume-format operation targeting X:. It will not be launched by this application.");
-                    ready = false;
-                }
-            }
-            checks.Add("No upstream SxS script or image operation is executed by this preview.");
-            checks.Add("CbsExploder/SxSFounder licensing and redistribution provenance remain unverified.");
+            // 原先这里还检查 prepare.cmd 的 format X: 危险操作，并对上游工具的许可/来源存疑。
+            // prepare.cmd 已随 ThirdParty\SxS 一起删除；也不再有任何"上游工具"需要存疑 ——
+            // 全部能力都是本程序自己的实现。
+            checks.Add("本程序不启动任何外部脚本；铺底与 CBS 操作均由自带实现完成。");
             return new SxsWorkflowPreview(
                 ready ? "Preflight passed. Review the inputs and outputs before proceeding." :
                     "Preview only; image operations are unavailable until all required tools and licenses are verified.",
