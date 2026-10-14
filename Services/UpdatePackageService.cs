@@ -373,17 +373,18 @@ namespace OneCore_Image_Designer.Services
                 //   非零（TRUE，实测为 1）= 成功；零（FALSE）= 失败。
                 // ⚠ 我一度把它当 HRESULT 改成 `hr != 0 即失败`，方向正好相反 ——
                 //   是小样本探针报出 "ApplyDeltaB=0x00000001" 却当成失败才发现的。
-                // 【真正的 bug 在下一行】：成功时 outp.p 也可能为 NULL ——
-                //   **结果为空文件时（uSize == 0）它合法地就是 NULL**。
-                //   早前把 p == NULL 一律当失败，导致 2778 个"内容为空"的文件被误报成
-                //   "缺源且无法自包含: xxx — ApplyDeltaB=0x00000000"
-                //   （那个 0x00000000 意味着 BOOL=FALSE，但真正的原因是结果为空、
-                //    而非 delta 不可还原 —— 两者必须分开对待）。
+                // ⚠ 别被 "ApplyDeltaB=0x00000000" 骗了：这是 BOOL 的 FALSE（失败），
+                //   不是 HRESULT 的 S_OK。我为此走过一次弯路（详见提交记录）。
+                //   那 2778 条 "缺源且无法自包含" 是**真实失败** —— 它们确实需要 base 文件。
                 if (hr == 0) { error = "ApplyDeltaB 返回 FALSE（该 API 返回 BOOL 而非 HRESULT：0=失败；此处不是 S_OK）"; return null; }
 
                 long size = (long)outp.size;
-                if (size < 0 || size > 1024L * 1024 * 1024) { error = $"输出大小异常 {size}"; return null; }
-                if (size == 0 || outp.p == IntPtr.Zero) return Array.Empty<byte>();   // 空文件，合法
+                // ⚠ 这里【必须】把 size 取不到当作失败（返回 null），好让调用方回退到"无源"路径。
+                //   我一度为了照顾"空文件"把 size == 0 当成成功返回空数组 —— 后果是
+                //   **带源的第一条路径永远报成功**，整批文件被静默写成 0 字节
+                //   （实测：203,556 个文件全部变 0 字节、语言 .cat 归零），
+                //   而且再也不会走无源路径。空文件是极少数情形，不值得拿整批数据去赌。
+                if (size <= 0 || size > 1024L * 1024 * 1024) { error = $"输出大小异常 {size}"; return null; }
 
                 var outBytes = new byte[size];
                 Marshal.Copy(outp.p, outBytes, 0, (int)size);

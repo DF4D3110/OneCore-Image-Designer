@@ -360,3 +360,56 @@ Error: 50   DISM does not support servicing a Windows Vista RTM or earlier opera
 **⇒ 要让"从零构建"的 arm32 骨架也能装包，必须在【装包之前】把这些版本信息写进 hive。**
 注意时机：不能放在收尾（`FinishImageStep`）—— 装包在那之前就发生了。
 正确插入点是**步骤 1.5（装服务栈 + 核心文件）之后、步骤 2（装包）之前**。
+
+
+---
+
+## 13. PA30 残留的准确度量与真因
+
+### 数字（同一批内容、同一份代码，只改 base）
+
+| base | 缺源 | 占比 |
+|---|---|---|
+| **不给 base** | 2,738 / 203,556 | **1.35%** |
+| **Windows 8 Enterprise（Client）install.wim** | 1,523 / 203,556 | **0.75%** |
+
+两次的产出**完全一致**（203,556 文件 / 7,939.6 MB / 0 截断），差别只在"能否还原"。
+⇒ **base 对这批文件是承重件**：它把残留砍掉 44%。
+
+### 剩下 1,523 个是什么
+
+分属 1,145 个组件，按扩展名：
+```
+.manifest 346 · .inf_loc 222 · .dll 177 · .cab 170 · .png 48
+.resx 45 · .gif 41 · .aspx 36 · .exe 32 · .asmx 31
+```
+按组件：**IIS / Web / .NET 角色**
+```
+msil_microsoft-windows-..rshellwebaccess-web   25
+x86_netfx-aspnet_regbrowser_files              25
+x86_tsportalwebpart                            21
+x86_microsoft.dtc.powershell.scripts           16
+x86_mscorlib                                   13
+x86_netfx-aspnet_webadmin                      13
+```
+
+### 真因：**base 镜像不覆盖这些组件**，不是提取器的缺陷
+
+抽查 20 个缺源组件，**base 里 0 个存在、20 个不存在**：
+```
+base 的 WinSxS 组件总数        : 7,753
+base 里 netfx-aspnet 组件      : 3      （缺源清单里要 25 个）
+base 里 webshellwebaccess      : 0
+base 里 tsportalwebpart        : 0
+```
+这些是 Windows **Server 角色**（IIS、.NET、DTC、Web 服务）的家当，
+而 base 是 Windows 8 **Enterprise（Client）** 的 install.wim —— **Client 镜像天然不含它们**。
+
+⇒ **要把它压到 0.5% 以下，办法是换一个包含这些角色的 base**（Server 版镜像），
+或者在 Repair Content 内部做跨包补齐。**不是调提取算法能解决的。**
+
+### 度量时必须注意的坑
+
+同一轮里我一度把 `ApplyDeltaB` 的返回值当 HRESULT 读，并据此放宽了 size 检查 ——
+**结果整批 203,556 个文件被静默写成 0 字节**（0 字节文件从 0 变成 2,738→全量）。
+教训见第 14 节。
