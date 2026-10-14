@@ -13,14 +13,16 @@ using OneCore_Image_Designer.Models;
 namespace OneCore_Image_Designer.ViewModels.Cbs
 {
     /// <summary>
-    /// CBS 构建（标签页内嵌）：把一组包 CAB（手选 / 扫包根 / 解析 FM 得到）按每个包
+    /// CBS 构建（标签页内嵌）：把一组包 CAB（手选 / 扫包根）按每个包
         /// update.mum 声明的目标路径展开为目录树（含 WinSxS 存储、servicing\Packages、System32\catroot）。
-        /// 【产品线】本页属 **desktop**；DeviceLayout 分区映射是 WCOS 专用，不在此提供
+        /// 【产品线】本页属 **desktop**。DeviceLayout 与 FeatureManifest/OEMInput 都属 WCOS，
+        /// 不在此提供；CbsBuildService 本体保持中立（WCOS 的 CAB 包展开后与普通包高度相似，
+        /// 无法干净归属，故两个产品线共用它）。
+        /// 【中立性】本页属 **desktop**；DeviceLayout 分区映射是 WCOS 专用，不在此提供
         /// （CbsBuildService.LayoutXmlPath 的能力保留，供 WCOS 侧使用）。落位规则全部真实包实证。
     public partial class CbsBuildViewModel : ObservableObject
     {
         readonly MainViewModel _main;
-        readonly List<string> _fms = new();
 
         public CbsBuildViewModel(MainViewModel main)
         {
@@ -79,31 +81,6 @@ namespace OneCore_Image_Designer.ViewModels.Cbs
                 Status = $"从包根扫描到 {found.Count} 个 cab，新增 {n}（当前共 {Cabs.Count}）";
             }
             catch (Exception ex) { Status = "扫描失败: " + ex.Message; }
-        }
-
-        [RelayCommand]
-        async Task LoadFromFmAsync()
-        {
-            var fmd = new OpenFileDialog { Title = "选择 FeatureManifest (.xml)", Filter = "FM (*.xml)|*.xml|所有文件 (*.*)|*.*" };
-            if (fmd.ShowDialog() != true) return;
-            var root = new OpenFolderDialog { Title = "选择包根（MSPackages 所在目录，用于解析 $(mspackageroot) 与兜底搜索）" };
-            if (root.ShowDialog() != true) return;
-
-            IsBusy = true; Status = "解析 FM 引用包…";
-            try
-            {
-                var cabs = await Task.Run(() =>
-                {
-                    var fm = FMService.ParseFM(fmd.FileName);
-                    if (fm == null) return new List<string>();
-                    return FMService.CollectPackageCabs(new[] { fm }, root.FolderName, onlyLayout: false);
-                });
-                if (cabs.Count == 0) { Status = "FM 未解析到可定位的包 CAB（检查包根是否正确）"; return; }
-                int n = 0; foreach (var c in cabs) if (AddCab(c)) n++;
-                if (!_fms.Contains(fmd.FileName)) _fms.Add(fmd.FileName);
-                Status = $"FM 引用 {cabs.Count} 个包，新增 {n}（当前共 {Cabs.Count}）";
-            }
-            finally { IsBusy = false; }
         }
 
         [RelayCommand]

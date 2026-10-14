@@ -46,8 +46,7 @@
                         <WrapPanel Margin="0,0,0,6">
                             <Button Style="{StaticResource Tool}" Content="＋ 选择包 CAB…" Command="{Binding AddCabsCommand}"/>
                             <Button Style="{StaticResource Tool}" Content="扫描文件夹…" Command="{Binding ScanFolderCommand}"/>
-                            <Button Style="{StaticResource Tool}" Content="从 FM 解析…" Command="{Binding LoadFromFmCommand}"/>
-                            <Button Style="{StaticResource Tool}" Content="清空" Command="{Binding ClearCabsCommand}"/>
+                                        <Button Style="{StaticResource Tool}" Content="清空" Command="{Binding ClearCabsCommand}"/>
                         </WrapPanel>
                         <ListBox ItemsSource="{Binding Cabs}" Height="220" FontFamily="Consolas" FontSize="12"
                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"
