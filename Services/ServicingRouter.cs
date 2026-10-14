@@ -48,6 +48,9 @@ namespace OneCore_Image_Designer.Services
             public Version? ImageStackVersion;
             /// <summary>版本体系："6.2" / "10.0" / null</summary>
             public string? Scheme;
+
+            /// <summary>镜像架构（由 servicingstack 目录前缀或 PE 头判定）。</summary>
+            public ArchRelay.Arch ImageArchitecture = ArchRelay.Arch.Unknown;
             public string Reason = "";
             public readonly List<string> Evidence = new();
         }
@@ -125,6 +128,27 @@ namespace OneCore_Image_Designer.Services
             {
                 if (string.IsNullOrWhiteSpace(winDir)) { d.Reason = "winDir 为空"; return d; }
 
+                // ── 架构先判：与进程架构不符时，原生通道根本起不来，直接走 DISM ──
+                // 原因：CBS 的 servicing stack 是按架构的。x64 进程加载不了 x86 的 cbscore.dll，
+                // 会静默回退到宿主栈，然后以 0x8007051A ERROR_REVISION_MISMATCH 失败
+                // （Windows::COM::VerifyStoreVersionNumber）。DISM 有自己的跨架构调度（dism /image），
+                // 所以架构不符时交给它。
+                var (imgArch, archEv) = ArchRelay.DetectImageArchitecture(winDir);
+                d.ImageArchitecture = imgArch;
+                d.Evidence.Add($"镜像架构: {ArchRelay.ToToken(imgArch)} —— {archEv}");
+                var meArch = ArchRelay.CurrentProcessArch();
+                d.Evidence.Add($"进程架构: {ArchRelay.ToToken(meArch)}");
+
+                if (imgArch != ArchRelay.Arch.Unknown && imgArch != meArch)
+                {
+                    d.Channel = Channel.Dism;
+                    d.Reason = $"镜像架构（{ArchRelay.ToToken(imgArch)}）与当前进程（{ArchRelay.ToToken(meArch)}）不一致 "
+                             + "→ 改走 DISM 通道（dism /image 有自己的跨架构离线调度）。"
+                             + "原因：原生 CBS 通道要求进程能加载镜像自带的同架构 servicing stack；"
+                             + "架构不符时会静默回退到宿主栈并以 0x8007051A ERROR_REVISION_MISMATCH 失败。";
+                    return d;
+                }
+
                 var v = ReadImageStackVersion(winDir, out string ev);
                 d.ImageStackVersion = v;
                 d.Evidence.Add("镜像栈版本: " + (v?.ToString() ?? "(未知)") + " —— " + ev);
@@ -187,6 +211,7 @@ namespace OneCore_Image_Designer.Services
             sb.AppendLine("  通道            : " + d.Channel);
             sb.AppendLine("  镜像栈版本      : " + (d.ImageStackVersion?.ToString() ?? "(未知)"));
             sb.AppendLine("  版本体系        : " + (d.Scheme ?? "(未知)"));
+            sb.AppendLine("  镜像架构        : " + ArchRelay.ToToken(d.ImageArchitecture));
             sb.AppendLine("  理由            : " + d.Reason);
             foreach (var e in d.Evidence) sb.AppendLine("  证据            : " + e);
             return sb.ToString();

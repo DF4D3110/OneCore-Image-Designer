@@ -257,6 +257,29 @@ namespace OneCore_Image_Designer.Services
                     if (!plan.Success) { Step("skuassembly 解析", false, plan.Error); res.Error = plan.Error; return res; }
 
                     // cbss.cmd 会设这个环境变量；WCP 的 SKU 安装路径认它
+                    // ── 架构分流：镜像架构与进程不符时，原生 CBS 通道起不来，改走 DISM ──
+                    var (skuArch, _) = ArchRelay.DetectImageArchitecture(win);
+                    bool useDism = skuArch != ArchRelay.Arch.Unknown
+                                && skuArch != ArchRelay.CurrentProcessArch();
+                    if (useDism)
+                    {
+                        L($"  架构不符（镜像 {ArchRelay.ToToken(skuArch)} / 进程 "
+                        + $"{ArchRelay.ToToken(ArchRelay.CurrentProcessArch())}）→ 改用 DISM 通道逐包安装");
+                        int ok = 0, fail = 0;
+                        foreach (var op in plan.Operations)
+                        {
+                            ct.ThrowIfCancellationRequested();
+                            if (op.ResolvedPath == null) { fail++; continue; }
+                            var dr = DismServicingService.AddPackage(win, op.ResolvedPath);
+                            if (dr.Success) ok++;
+                            else { fail++; L($"    ✗ {op.IdentityString ?? op.Name}: {dr.Error}"); }
+                            if (cfg.DryRun && ok >= 1) { L("    (试运行：只试一个包即停)"); break; }
+                        }
+                        Step("skuassembly 执行(DISM)", fail == 0, $"成功 {ok}，失败 {fail}");
+                        if (fail > 0) { res.Error = $"{fail} 个包经 DISM 安装失败"; return res; }
+                        goto afterSku;
+                    }
+
                     string? old = Environment.GetEnvironmentVariable("WINDOWS_WCP_INSKUASSEMBLY");
                     try
                     {
@@ -271,6 +294,8 @@ namespace OneCore_Image_Designer.Services
                     finally { Environment.SetEnvironmentVariable("WINDOWS_WCP_INSKUASSEMBLY", old); }
                 }
                 else L("=== 步骤 2/7：SKU assembly 已跳过（未提供 skuassembly 文件） ===");
+
+            afterSku:;
 
                 // ── 步骤 3：语言包 ──
                 if (!string.IsNullOrWhiteSpace(cfg.LanguagePackMum))

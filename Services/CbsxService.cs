@@ -415,11 +415,12 @@ namespace OneCore_Image_Designer.Services
                     string? helper = ArchRelay.FindHelper(imgArch);
                     log?.Invoke($"⚠ 架构不匹配：{relayReason}");
                     log?.Invoke($"   镜像架构判定依据: {archEvidence}");
-                    log?.Invoke(helper != null
-                        ? $"   建议改用 {ArchRelay.ToToken(imgArch)} 子程序: {helper}"
-                        : "   建议把 " + ArchRelay.ToToken(imgArch) + " 架构的 CbsxCli 放到 "
-                          + Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ArchRelay.ToToken(imgArch)));
-                    error = relayReason;
+                    log?.Invoke("   → 请改走 DISM 通道（dism /image 有自己的跨架构离线调度）："
+                              + "ServicingRouter 判定架构不符时会自动选 Channel.Dism，"
+                              + "或直接用 DismServicingService。");
+                    if (helper != null)
+                        log?.Invoke($"   若坚持用原生通道，可改用 {ArchRelay.ToToken(imgArch)} 子程序: {helper}");
+                    error = relayReason + " → 请改走 DISM 通道（dism /image）";
                     return null;
                 }
                 log?.Invoke($"架构判定: 镜像={ArchRelay.ToToken(imgArch)} 进程={ArchRelay.ToToken(ArchRelay.CurrentProcessArch())}，匹配");
