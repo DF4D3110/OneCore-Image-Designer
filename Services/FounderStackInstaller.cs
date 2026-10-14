@@ -485,6 +485,143 @@ namespace OneCore_Image_Designer.Services
             return (written, detail.ToString().TrimEnd(' ', ';'));
         }
 
+
+        /// <summary>
+        /// 让骨架"能被 DISM 服务"所必需的最小结构。
+        ///
+        /// 【为什么需要】实测判据：`dism /image:&lt;路径&gt; /?` 的
+        ///   · 成功 → 会打印 <c>Image Version: 6.2.xxxx.0</c>
+        ///   · 失败 → <c>Error: 50  DISM does not support servicing a Windows Vista RTM or
+        ///            earlier operating system</c>
+        /// 官方 unstaged 系统（WoA 8061 ARM32 / Nano 10586 ARM64）**都能打印版本**，
+        /// 而我们铺出来的骨架不能。结构对照显示最一致的差异就是
+        /// <c>System32\Dism\</c>（DISM 的全部 provider）我们完全没有。
+        ///
+        /// 【来源】这些文件在还原出的 SxS 存储里都能按名找到（已实测）。
+        ///
+        /// 【出处】思路借鉴 explodeSxS（asdcorp，GPL-3.0）"从内容构造可服务骨架"的做法；
+        /// 本方法为本项目自写实现。
+        /// </summary>
+        public static (int copied, List<string> missing) SeedDismServicingStructure(
+            string imageRoot, IEnumerable<string> storeDirs, string? arch = null, Action<string>? log = null)
+        {
+            var missing = new List<string>();
+            int copied = 0;
+            try
+            {
+                string root = Path.GetFullPath(imageRoot);
+                string win = Directory.Exists(Path.Combine(root, "Windows")) ? Path.Combine(root, "Windows") : root;
+                string sys32 = Path.Combine(win, "System32");
+                Directory.CreateDirectory(sys32);
+
+                // ── 要补齐的文件清单（照官方 unstaged 形态） ──
+                // System32\Dism\* —— DISM 的全部 provider，缺一不可
+                var dismProviders = new[]
+                {
+                    "DismCore.dll", "DismCorePS.dll", "DismHost.exe", "DismProv.dll",
+                    "CbsProvider.dll", "CompatProvider.dll", "DmiProvider.dll", "FfuProvider.dll",
+                    "FolderProvider.dll", "GenericProvider.dll", "ImagingProvider.dll", "IntlProvider.dll",
+                    "LogProvider.dll", "OfflineSetupProvider.dll", "OSProvider.dll", "ProvProvider.dll",
+                    "SmiProvider.dll", "UnattendProvider.dll", "VhdProvider.dll", "WimProvider.dll",
+                };
+                // System32 根下的 staging/servicing 基础设施
+                var sys32Files = new[]
+                {
+                    "ssshim.dll", "sxs.dll", "wdscore.dll", "SmiEngine.dll",
+                    "PkgMgr.exe", "poqexec.exe", "sxstrace.exe", "CbsApi.dll", "CbsMsg.dll",
+                };
+
+                // 建立"文件名 → 路径"索引（架构优先匹配，与 InstallCoreFilesFromStore 同策略）
+                string wantPrefix = string.IsNullOrWhiteSpace(arch) ? "" : arch!.Trim().ToLowerInvariant() + "_";
+                var want = new HashSet<string>(dismProviders.Concat(sys32Files), StringComparer.OrdinalIgnoreCase);
+                var found = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var fallback = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var dir in storeDirs.Where(Directory.Exists))
+                {
+                    foreach (var f in UpdatePackageService.SafeEnumerateFiles(dir))
+                    {
+                        string name = Path.GetFileName(f);
+                        if (!want.Contains(name)) continue;
+                        bool archMatch = wantPrefix.Length == 0
+                                      || f.Contains(wantPrefix, StringComparison.OrdinalIgnoreCase);
+                        if (archMatch) { if (!found.ContainsKey(name)) found[name] = f; }
+                        else if (!fallback.ContainsKey(name)) fallback[name] = f;
+                    }
+                }
+                foreach (var kv in fallback)
+                    if (!found.ContainsKey(kv.Key)) found[kv.Key] = kv.Value;
+
+                log?.Invoke($"  在存储里找到 {found.Count}/{want.Count} 个 DISM/staging 文件");
+
+                // ── 落盘：System32\Dism\ ──
+                string dismDir = Path.Combine(sys32, "Dism");
+                Directory.CreateDirectory(dismDir);
+                foreach (var n in dismProviders)
+                {
+                    if (!found.TryGetValue(n, out var src)) { missing.Add("Dism\\" + n); continue; }
+                    try { File.Copy(src, Path.Combine(dismDir, n), true); copied++; }
+                    catch (Exception ex) { missing.Add($"Dism\\{n}（{ex.Message}）"); }
+                }
+                // ── 落盘：System32 根 ──
+                foreach (var n in sys32Files)
+                {
+                    if (!found.TryGetValue(n, out var src)) { missing.Add(n); continue; }
+                    try { File.Copy(src, Path.Combine(sys32, n), true); copied++; }
+                    catch (Exception ex) { missing.Add($"{n}（{ex.Message}）"); }
+                }
+
+                // ── servicing\Version\<ver>\<arch>_installed 标记 ──
+                // 官方 unstaged 形态里有这两个 9 字节文件，声明"本镜像装了哪个架构的栈"。
+                try
+                {
+                    string? verDir = null;
+                    foreach (var d in Directory.EnumerateDirectories(Path.Combine(win, "WinSxS"), "*servicingstack*"))
+                    {
+                        // 目录名形如 <arch>_microsoft-windows-servicingstack_<ptk>_<ver>_<opt>_<hash>
+                        var parts = Path.GetFileName(d).Split('_');
+                        if (parts.Length >= 4) { verDir = parts[3]; break; }
+                    }
+                    verDir ??= "6.2.8400.0";
+                    string sv = Path.Combine(win, "servicing", "Version", verDir);
+                    Directory.CreateDirectory(sv);
+                    string tok = string.IsNullOrWhiteSpace(arch) ? "x86" : arch!.Trim().ToLowerInvariant();
+                    File.WriteAllText(Path.Combine(sv, tok + "_installed"), tok + "_installed");
+                    copied++;
+                    log?.Invoke($"  写下 servicing\\Version\\{verDir}\\{tok}_installed");
+                }
+                catch (Exception ex) { missing.Add("servicing\\Version 标记（" + ex.Message + "）"); }
+
+                // ── CatRoot：DISM 判版本会读目录里的 .cat ──
+                try
+                {
+                    string catRoot = Path.Combine(sys32, "CatRoot", "{F750E6C3-38EE-11D1-85E5-00C04FC295EE}");
+                    Directory.CreateDirectory(catRoot);
+                    var cats = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var dir in storeDirs.Where(Directory.Exists))
+                        foreach (var f in UpdatePackageService.SafeEnumerateFiles(dir))
+                        {
+                            string n = Path.GetFileName(f);
+                            if (!n.EndsWith(".cat", StringComparison.OrdinalIgnoreCase)) continue;
+                            if (cats.Count >= 12) break;               // 只需少量根证书目录
+                            if (!cats.ContainsKey(n)) cats[n] = f;
+                        }
+                    foreach (var kv in cats)
+                    {
+                        try { File.Copy(kv.Value, Path.Combine(catRoot, kv.Key), true); copied++; }
+                        catch { }
+                    }
+                    log?.Invoke($"  CatRoot: 放入 {cats.Count} 个 .cat");
+                }
+                catch (Exception ex) { missing.Add("CatRoot（" + ex.Message + "）"); }
+
+                log?.Invoke($"  DISM 可服务结构: 放入 {copied} 个文件"
+                          + (missing.Count > 0 ? $"，缺失 {missing.Count}" : ""));
+                foreach (var m in missing.Take(8)) log?.Invoke("    缺: " + m);
+            }
+            catch (Exception ex) { log?.Invoke("  SeedDismServicingStructure 异常: " + ex.Message); }
+            return (copied, missing);
+        }
+
         static void EnsureWritable(string dir, Action<string>? log)
         {
             if (!Directory.Exists(dir)) return;

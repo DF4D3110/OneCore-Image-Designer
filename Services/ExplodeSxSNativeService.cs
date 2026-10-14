@@ -266,6 +266,21 @@ namespace OneCore_Image_Designer.Services
                     Step("写入版本信息", vn > 0, vn > 0 ? $"写入 {vn} 个值" : "未写入（" + vd + "）");
                 }
 
+                // ── 步骤 1.7：补齐"能被 DISM 服务"的最小结构（必须在装包之前） ──
+                // 判据：dism /image:<路径> /? 必须打印 "Image Version:"，
+                //       否则报 Error 50 "Vista RTM or earlier" —— 那就算做失败了。
+                {
+                    L("=== 步骤 1.7：补齐 DISM 可服务结构（System32\\Dism 等） ===");
+                    if (cfg.StackSourceDirs != null && cfg.StackSourceDirs.Count > 0)
+                    {
+                        var (dn, dmiss) = FounderStackInstaller.SeedDismServicingStructure(
+                            root, cfg.StackSourceDirs, cfg.Arch, L);
+                        Step("补齐 DISM 可服务结构", dn > 0,
+                             $"放入 {dn} 个文件" + (dmiss.Count > 0 ? $"，缺失 {dmiss.Count}" : ""));
+                    }
+                    else L("  （没有存储来源，跳过）");
+                }
+
                 // ── 步骤 2：SKU assembly（替代 cbsx.exe /b:） ──
                 if (!string.IsNullOrWhiteSpace(cfg.SkuAssemblyFile))
                 {
