@@ -368,11 +368,22 @@ namespace OneCore_Image_Designer.Services
                 // 第 4 参数是 DELTA_OUTPUT*；用 out DeltaOutput 让封送层负责这一层指针，
                 // 避免再手工解引用造成结构体错位。
                 int hr = ApplyDeltaB(0 /* DELTA_FLAG_NONE */, src, dlt, out DeltaOutput outp);
-                if (hr == 0 || outp.p == IntPtr.Zero) { error = $"ApplyDeltaB=0x{hr:X8}"; return null; }
+
+                // 【注意 ApplyDeltaB 返回的是 BOOL，不是 HRESULT】
+                //   非零（TRUE，实测为 1）= 成功；零（FALSE）= 失败。
+                // ⚠ 我一度把它当 HRESULT 改成 `hr != 0 即失败`，方向正好相反 ——
+                //   是小样本探针报出 "ApplyDeltaB=0x00000001" 却当成失败才发现的。
+                // 【真正的 bug 在下一行】：成功时 outp.p 也可能为 NULL ——
+                //   **结果为空文件时（uSize == 0）它合法地就是 NULL**。
+                //   早前把 p == NULL 一律当失败，导致 2778 个"内容为空"的文件被误报成
+                //   "缺源且无法自包含: xxx — ApplyDeltaB=0x00000000"
+                //   （那个 0x00000000 意味着 BOOL=FALSE，但真正的原因是结果为空、
+                //    而非 delta 不可还原 —— 两者必须分开对待）。
+                if (hr == 0) { error = "ApplyDeltaB 返回 FALSE（该 API 返回 BOOL 而非 HRESULT：0=失败；此处不是 S_OK）"; return null; }
 
                 long size = (long)outp.size;
-                // 上限保护：msdelta 若因源不匹配而输出异常值，绝不能让 new byte[] 直接爆掉
-                if (size <= 0 || size > 1024L * 1024 * 1024) { error = $"输出大小异常 {size}"; return null; }
+                if (size < 0 || size > 1024L * 1024 * 1024) { error = $"输出大小异常 {size}"; return null; }
+                if (size == 0 || outp.p == IntPtr.Zero) return Array.Empty<byte>();   // 空文件，合法
 
                 var outBytes = new byte[size];
                 Marshal.Copy(outp.p, outBytes, 0, (int)size);
