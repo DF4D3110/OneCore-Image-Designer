@@ -235,6 +235,12 @@ namespace OneCore_Image_Designer.Services
         [DllImport("kernel32", CharSet = CharSet.Ansi, SetLastError = true)]
         static extern IntPtr LoadLibraryA(string lpFileName);
 
+        [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr LoadLibraryW(string lpFileName);
+
+        [DllImport("kernel32", SetLastError = true)]
+        static extern bool FreeLibrary(IntPtr hModule);
+
         [DllImport("kernel32", CharSet = CharSet.Ansi, SetLastError = true)]
         static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
 
@@ -322,6 +328,40 @@ namespace OneCore_Image_Designer.Services
         /// 用于防止进程级 SetDllDirectory（铺底加载 wcp.dll 时会设成宿主服务栈目录）
         /// 让我们误以为"从镜像栈加载成功"，实际拿到的是宿主栈。
         /// </summary>
+        /// <summary>本次会话是否回退到了宿主服务栈（供日志/界面显示与判定）。</summary>
+        public static bool UsedHostStackFallback => _usedHostStackFallback;
+        static bool _usedHostStackFallback;
+
+        /// <summary>
+        /// 找宿主自己的 servicing stack 目录（带 cbscore.dll、且架构与当前进程一致）。
+        /// 用于镜像自带栈初始化失败时回退。
+        /// </summary>
+        static string? FindHostStackDir(Action<string>? log)
+        {
+            try
+            {
+                string winDirHost = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+                if (string.IsNullOrEmpty(winDirHost)) return null;
+                string sxs = Path.Combine(winDirHost, "WinSxS");
+                if (!Directory.Exists(sxs)) return null;
+
+                // 进程架构前缀：x86 / amd64 / arm64
+                string prefix = Environment.Is64BitProcess
+                    ? (System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture
+                        == System.Runtime.InteropServices.Architecture.Arm64 ? "arm64_" : "amd64_")
+                    : "x86_";
+
+                foreach (var d in Directory.EnumerateDirectories(sxs, prefix + "*servicingstack*"))
+                {
+                    if (!File.Exists(Path.Combine(d, "cbscore.dll"))) continue;
+                    log?.Invoke("  宿主服务栈候选: " + Path.GetFileName(d));
+                    return d;
+                }
+                return null;
+            }
+            catch (Exception ex) { log?.Invoke("  查找宿主服务栈异常: " + ex.Message); return null; }
+        }
+
         static bool LoadedFromDirectory(string moduleName, string dir)
         {
             try
@@ -345,6 +385,37 @@ namespace OneCore_Image_Designer.Services
         [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern uint GetModuleFileName(IntPtr hModule, StringBuilder lpFilename, uint nSize);
 
+
+        /// <summary>
+        /// 判断镜像是否只是"裸骨架"（还没有真正的组件存储）。
+        ///
+        /// 【为什么必须在这里判】实测：对刚铺底出来的骨架，镜像自带的栈会以
+        /// CbsCoreInitialize 0x8007007F (ERROR_PROC_NOT_FOUND) 失败。更要命的是
+        /// **它的 DLL 一旦进了进程，再换宿主栈也换不回来** —— 宿主 cbscore.dll 会绑到
+        /// 镜像那套依赖上，同样报 ERROR_PROC_NOT_FOUND。所以这个决定必须在加载任何
+        /// 栈 DLL【之前】做出。
+        ///
+        /// 判据：真正的组件存储一定有 Windows\WinSxS\Manifests 且条目很多
+        /// （实测已填充镜像上万条；骨架则不存在或极少）。
+        /// </summary>
+        static bool LooksLikeBareSkeleton(string imageRootOrHint)
+        {
+            try
+            {
+                string win = Path.GetFullPath(imageRootOrHint);
+                if (Path.GetFileName(win).Equals("Windows", StringComparison.OrdinalIgnoreCase))
+                    win = Directory.GetParent(win)?.FullName ?? win;
+                string manifests = Path.Combine(win, "Windows", "WinSxS", "Manifests");
+                if (!File.Exists(Path.Combine(win, "Windows", "System32", "config", "SOFTWARE"))
+                    && !Directory.Exists(manifests)) return true;
+                if (!Directory.Exists(manifests)) return true;
+                int n = 0;
+                foreach (var _ in Directory.EnumerateFiles(manifests)) { if (++n >= 200) return false; }
+                return true;
+            }
+            catch { return true; }
+        }
+
         /// <summary>
         /// 确保 cbscore.dll 可被 LoadLibraryA 找到。
         ///
@@ -360,6 +431,24 @@ namespace OneCore_Image_Designer.Services
         /// </summary>
         public static bool TryAddServicingStackToSearchPath(string? imageRootOrHint, out string detail)
         {
+            // ── 裸骨架：直接用【宿主】栈 ──
+            // 骨架上的镜像栈起不来（0x8007007F），而且它的 DLL 一旦进进程就再换不回来。
+            // 所以必须在加载任何栈 DLL 之前就决定用宿主栈。
+            if (!string.IsNullOrWhiteSpace(imageRootOrHint) && LooksLikeBareSkeleton(imageRootOrHint!))
+            {
+                string? hd0 = FindHostStackDir(null);
+                if (hd0 != null)
+                {
+                    SetDllDirectory(hd0);
+                    if (LoadLibraryW(Path.Combine(hd0, "cbscore.dll")) != IntPtr.Zero)
+                    {
+                        _lastStackDll = Path.Combine(hd0, "cbscore.dll");
+                        detail = "裸骨架 —— 直接用宿主服务栈: " + Path.GetFileName(hd0);
+                        return true;
+                    }
+                }
+            }
+
             detail = "";
 
             // 1) 默认路径
@@ -485,8 +574,55 @@ namespace OneCore_Image_Designer.Services
                 _nop = () => { };
 
                 hr = init(malloc, _ret1, _nop, _nop, _nop, _nop, _nop, out IClassFactory factory);
-                if (hr < 0 || factory == null) { error = $"CbsCoreInitialize 失败 0x{hr:X8}"; return null; }
-                log?.Invoke("CbsCoreInitialize OK");
+
+                // ── 回退：镜像自带的栈可能初始化不了 ──
+                // 实测：8400 的一批栈会以 CbsCoreInitialize 0x8007007F
+                // (ERROR_PROC_NOT_FOUND) 失败，而宿主栈能起来。
+                // 所以策略是【优先镜像栈，失败回退宿主栈】，并记录实际生效的是哪一个 ——
+                // 这决定了后续的版本体系判定行为，必须可查。
+                // 注意：LoadLibrary 对【同名模块】会返回已加载的实例，**不论路径** ——
+                // 所以换栈时必须用【完整路径】加载，否则拿回的还是原来那一个。
+                if ((hr < 0 || factory == null) && _lastStackDll != null
+                    && _lastStackDll.StartsWith(Path.GetFullPath(winDir), StringComparison.OrdinalIgnoreCase))
+                {
+                    log?.Invoke($"镜像自带栈的 CbsCoreInitialize 失败 0x{hr:X8}，回退宿主栈重试");
+                    string? hostDir = FindHostStackDir(log);
+                    if (hostDir != null)
+                    {
+                        SetDllDirectory(hostDir);
+                        // ⚠ 必须用【完整路径】加载。LoadLibrary 对【同名模块】会直接返回
+                        // 已加载的那个实例，**不论路径** —— 用 "cbscore.dll" 会拿回镜像那一个，
+                        // 等于没换（实测就是这样：回退后仍报同一个 0x8007007F）。
+                        string hostDll = Path.Combine(hostDir, "cbscore.dll");
+                        IntPtr cbscore2 = LoadLibraryW(hostDll);
+                        if (cbscore2 == IntPtr.Zero)
+                        {
+                            // 实在不行再试一次按名加载（理论上到不了这里）
+                            cbscore2 = LoadLibraryA("cbscore.dll");
+                        }
+                        if (cbscore2 != IntPtr.Zero && LoadedFromDirectory("cbscore.dll", hostDir))
+                        {
+                            IntPtr proc2 = GetProcAddress(cbscore2, "CbsCoreInitialize");
+                            if (proc2 != IntPtr.Zero)
+                            {
+                                var init2 = Marshal.GetDelegateForFunctionPointer<CbsCoreInitializeDelegate>(proc2);
+                                hr = init2(malloc, _ret1, _nop, _nop, _nop, _nop, _nop, out factory);
+                                _lastStackDll = Path.Combine(hostDir, "cbscore.dll");
+                                _usedHostStackFallback = true;
+                                log?.Invoke($"宿主栈 CbsCoreInitialize -> 0x{hr:X8}");
+                            }
+                        }
+                    }
+                    else log?.Invoke("  找不到可用的宿主服务栈，无法回退");
+                }
+
+                if (hr < 0 || factory == null)
+                {
+                    error = $"CbsCoreInitialize 失败 0x{hr:X8}（镜像自带栈与宿主栈都已尝试）"
+                          + (PrivilegeHelper.Explain(hr) is string h2 ? " —— " + h2 : "");
+                    return null;
+                }
+                log?.Invoke("CbsCoreInitialize OK" + (_usedHostStackFallback ? "（宿主栈回退）" : "（镜像自带栈）"));
 
                 Guid iidSession = new("75207391-23F2-4396-85F0-8FDB879ED0ED");
                 hr = factory.CreateInstance(IntPtr.Zero, ref iidSession, out IntPtr pSession);

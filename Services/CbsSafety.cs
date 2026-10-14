@@ -335,6 +335,32 @@ namespace OneCore_Image_Designer.Services
             }
         }
 
+        /// <summary>
+        /// 释放某个盘上的残留离线 hive，返回【仍挂着】的数量。
+        /// 供收尾步骤在打开目标镜像的 hive 之前调用 —— CBS 会话结束后它可能仍持有
+        /// 这些 hive（实测 finishimg 因此打不开 SOFTWARE/SYSTEM）。
+        /// </summary>
+        public static int ReleaseResidualHives(string driveRoot, Action<string>? log = null)
+        {
+            try
+            {
+                var before = FindResidualHives(driveRoot);
+                if (before.Count == 0) return 0;
+                try { PrivilegeHelper.EnableServicingPrivileges(log); } catch { }
+                TryUnloadResidualHives(driveRoot, log);
+                foreach (var name in before)
+                {
+                    try { RegUnLoadKey(new IntPtr(HKEY_LOCAL_MACHINE), name); } catch { }
+                }
+                var after = FindResidualHives(driveRoot);
+                log?.Invoke($"  释放 {driveRoot} 残留 hive: {before.Count} → {after.Count}");
+                if (after.Count > 0)
+                    LastCleanupWarning = $"{driveRoot} 仍有 {after.Count} 个离线 hive 未卸载。";
+                return after.Count;
+            }
+            catch (Exception ex) { log?.Invoke("  释放残留 hive 异常: " + ex.Message); return -1; }
+        }
+
         /// <summary>上次清理留下的警告（无法卸载时非空），供界面/日志提示。</summary>
         public static string? LastCleanupWarning { get; private set; }
 

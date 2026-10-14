@@ -378,6 +378,17 @@ namespace OneCore_Image_Designer.Services
             try
             {
                 string win = Path.GetFullPath(winDir);
+
+                // ⚠ 先释放 CBS 可能仍持有的残留 hive —— 否则下面打不开 SOFTWARE/SYSTEM。
+                // 实测：CBS 会话 FinalizeEx 之后，目标镜像的 hive 仍挂在 HKLM 下，
+                // OfflineRegistryService 直接报 "being used by another process"。
+                try
+                {
+                    string driveRoot = (Path.GetPathRoot(win) ?? "").TrimEnd('\\');
+                    if (driveRoot.Length > 0) CbsSafety.ReleaseResidualHives(driveRoot, log);
+                }
+                catch { }
+
                 string stateDir = Path.Combine(win, "Setup", "State");
                 Directory.CreateDirectory(stateDir);
                 string stateIni = Path.Combine(stateDir, "State.ini");
