@@ -39,15 +39,11 @@ namespace OneCore_Image_Designer.Services
                 ready = false;
             }
 
-            foreach (var binary in new[] { "bin\\sxsfounder.exe", "bin\\cbsx.exe" })
-            {
-                var binaryPath = Path.Combine(sxsRoot, "explodeSxS", binary);
-                if (!File.Exists(binaryPath))
-                {
-                    checks.Add($"Required CBS binary is not bundled: {binaryPath}");
-                    ready = false;
-                }
-            }
+            // 原先在这里要求存在外部 cbsx.exe / sxsfounder.exe 与 prepare.cmd。
+            // 这些外部工具已全部删除 —— 铺底、CBS 装包、DISM 收尾、纯 SxS 导出
+            // 现在都由本程序自己的 C# 实现完成（SxSFounderService / CbsxService /
+            // DismServicingService / ExplodeSxSNativeService / PureSxsService）。
+            checks.Add("外部工具：不需要（全部由本程序自带实现完成）");
 
             var prepareScript = Path.Combine(sxsRoot, "explodeSxS", "prepare.cmd");
             if (File.Exists(prepareScript))

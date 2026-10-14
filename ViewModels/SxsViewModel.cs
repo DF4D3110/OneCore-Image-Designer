@@ -16,8 +16,10 @@ namespace OneCore_Image_Designer.ViewModels
     {
         private readonly IntegrationToolService _service = new();
         private readonly SxsWorkflowPreflightService _preflight = new();
-        private static readonly string SxsRoot = Path.Combine(
-            AppDomain.CurrentDomain.BaseDirectory, "ThirdParty", "SxS");
+        // 原先这里指向随应用分发的 ThirdParty\SxS（内含 GPL 的 cbsx.exe / sxsfounder.exe
+        // 与 puresxs.py / havesxs.py / *.cmd）。**该目录已删除** —— 那些能力现在全部由
+        // 本程序自己的 C# 实现提供，不再需要任何外部工具或脚本。
+        private static readonly string SxsRoot = AppDomain.CurrentDomain.BaseDirectory;
 
         [ObservableProperty] private string _status = "正在检查随应用集成的 SxS 源码";
         [ObservableProperty] private string _imagePath = string.Empty;

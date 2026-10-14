@@ -22,7 +22,6 @@
     <!-- 璁惧甯冨眬鍐呯疆妯℃澘 + 鎸?Windows 绯荤粺 build 褰掓。鐨勫畼鏂规牎楠岃鍒欙紙闈?ADK 鐗堟湰锛夛細闅忚緭鍑虹洰褰曞彂甯冿紝杩愯鏃舵寜璺緞鍔犺浇 -->
     <None Include="Assets\Templates\**\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Assets\ValidationRules\**\*.xml" CopyToOutputDirectory="PreserveNewest" />
-    <None Update="ThirdParty\SxS\**\*.*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

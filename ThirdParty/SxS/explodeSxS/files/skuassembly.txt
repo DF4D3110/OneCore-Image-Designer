@@ -1,2 +1,0 @@
-/ip /m:sxs\Microsoft-Windows-CoreEdition~31bf3856ad364e35~amd64~~10.0.26085.1.mum
-/sp /m:sxs\Microsoft-Windows-ProfessionalEdition~31bf3856ad364e35~amd64~~10.0.26085.1.mum

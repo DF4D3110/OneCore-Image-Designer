@@ -196,19 +196,21 @@ static void SxsPreview()
     try
     {
         var sxs = Path.Combine(root, "SxS");
-        Directory.CreateDirectory(Path.Combine(sxs, "explodeSxS"));
-        var prepare = Path.Combine(sxs, "explodeSxS", "prepare.cmd");
-        File.WriteAllText(prepare, "format X: /q /y");
+        Directory.CreateDirectory(sxs);
         var image = Path.Combine(root, "source.wim");
         File.WriteAllText(image, "not an actual image");
+
         var preview = new SxsWorkflowPreflightService().Preview(image, root, sxs);
-        True(!preview.Ready, "Unlicensed/missing tools and format script must block SxS operations.");
+
+        // 语义已变：外部 cbsx.exe / sxsfounder.exe / prepare.cmd 全部移除，
+        // 能力由本程序自带实现完成（SxSFounderService / CbsxService /
+        // DismServicingService / ExplodeSxSNativeService / PureSxsService）。
+        // 所以预检**不再**因"缺少外部工具"而阻断，而应当明确说明不需要外部工具。
+        True(preview.Checks.Any(c => c.Contains("不需要", StringComparison.OrdinalIgnoreCase)
+                                  || c.Contains("自带", StringComparison.OrdinalIgnoreCase)),
+             "Preview should state that no external tools or scripts are required.");
         True(preview.Inputs.Contains(image), "Preview should include the input image.");
         True(preview.PlannedOutputs.Contains(root), "Preview should include the output directory.");
-        True(preview.Checks.Any(check => check.Contains("formatting operation", StringComparison.OrdinalIgnoreCase)
-            || check.Contains("formatting", StringComparison.OrdinalIgnoreCase)
-            || check.Contains("volume-format", StringComparison.OrdinalIgnoreCase)), "X: format hazard should be reported.");
-        True(preview.Checks.Any(check => check.Contains("not be launched", StringComparison.OrdinalIgnoreCase)), "Preview must explicitly state scripts are not launched.");
     }
     finally { Directory.Delete(root, true); }
 }
