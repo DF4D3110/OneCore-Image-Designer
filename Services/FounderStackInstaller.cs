@@ -273,6 +273,9 @@ namespace OneCore_Image_Designer.Services
             @"system32\bcryptprimitives.dll",
             @"system32\sechost.dll",
             @"system32\ci.dll",
+            @"system32\ssshim.dll",            // ★ DISM 服务离线镜像必需 —— 缺它 DISM 报
+                                               //   Error 50 "check that SSShim.DLL is present"
+            @"system32\cbsmsg.dll",            // CBS 的消息资源，服务栈的一部分
             @"system32\ntoskrnl.exe",          // 用于探测位数
         };
 
@@ -330,7 +333,7 @@ namespace OneCore_Image_Designer.Services
         /// （例如 arm32 存储里取到的 PE 头是 0x01C4 ARMNT）。
         /// </summary>
         public static (int copied, List<string> missing, List<string> sources) InstallCoreFilesFromStore(
-            string imageRoot, IEnumerable<string> storeDirs, Action<string>? log = null)
+            string imageRoot, IEnumerable<string> storeDirs, Action<string>? log = null, string? arch = null)
         {
             var missing = new List<string>();
             var sources = new List<string>();
@@ -343,15 +346,32 @@ namespace OneCore_Image_Designer.Services
                 // 建立"文件名 → 路径"索引（只收核心文件那几个名字，避免索引整个存储）
                 var want = new HashSet<string>(CoreFilesForCbs.Select(p => Path.GetFileName(p)!),
                                                StringComparer.OrdinalIgnoreCase);
+                // 架构前缀：优先匹配路径里含 `<arch>_` 的组件目录。
+                // 【为什么必须过滤】只按文件名找会捞到别的架构：实测给 arm32 目标
+                // 捞到了 x86 的 ssshim.dll（PE 头 0x014C 而非 0x01C4）。
+                string wantPrefix = string.IsNullOrWhiteSpace(arch) ? "" : arch!.Trim().ToLowerInvariant() + "_";
                 var found = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var fallback = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var dir in storeDirs.Where(Directory.Exists))
                 {
                     foreach (var f in UpdatePackageService.SafeEnumerateFiles(dir))
                     {
                         string name = Path.GetFileName(f);
                         if (!want.Contains(name)) continue;
-                        if (!found.ContainsKey(name)) found[name] = f;
+                        bool archMatch = wantPrefix.Length == 0 || f.Contains(wantPrefix, StringComparison.OrdinalIgnoreCase);
+                        if (archMatch)
+                        {
+                            if (!found.ContainsKey(name)) found[name] = f;
+                        }
+                        else if (!fallback.ContainsKey(name)) fallback[name] = f;
                     }
+                }
+                // 架构对不上的仅在"该名字完全没有匹配架构的版本"时兜底，并告警
+                foreach (var kv in fallback)
+                {
+                    if (found.ContainsKey(kv.Key)) continue;
+                    found[kv.Key] = kv.Value;
+                    log?.Invoke($"  ⚠ {kv.Key} 没有 {wantPrefix.TrimEnd('_')} 架构版本，用找到的代替");
                 }
                 log?.Invoke($"  在存储里找到 {found.Count}/{want.Count} 个核心文件");
 

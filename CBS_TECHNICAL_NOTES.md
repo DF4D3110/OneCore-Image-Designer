@@ -291,3 +291,46 @@ CBS 会话 `FinalizeEx` 之后，目标镜像的 hive **仍挂在 HKLM 下**，�
 `reg unload` 报 `Access is denied`，而我们的 `RegUnLoadKey` 能成功 —— 差别在于
 **`reg.exe` 那条路径不启用 `SeBackupPrivilege`/`SeRestorePrivilege`**。
 所以"手工卸不掉"不代表"程序卸不掉"。
+
+
+---
+
+## 12. arm32：铺底能做，装包受平台限制（实测）
+
+### 能做的部分（全部实测通过）
+
+| 步骤 | 结果 |
+|---|---|
+| **仅凭 Repair Content 还原存储** | 155,954 文件 / 5.6 GB / **0 截断**，**不需要任何外部 base** |
+| **x86 进程给 arm32 铺底** | ✅ `CreateNewWindows + CreateNewOfflineStore` 成功（disposition 0/0） |
+| **装 arm32 服务栈** | ✅ 43 文件 / 12.7 MB，cbscore + wcp 齐，`6.2.8400.0` |
+| **装核心文件（取自存储）** | ✅ 13/13（含 `ssshim.dll`、`cbsmsg.dll`） |
+| **架构路由** | ✅ 正确判为"镜像 arm / 进程 x86"并改走 DISM 通道 |
+
+**⇒ 跨架构铺底是可行的**：WCP 的 `ulProcessorArchitecture` 是参数，x86 进程能铺出 arm32 骨架。
+（但 x64 进程铺 x86 会在 `CreateNewOfflineStore` 处失败 `0x8007051A` —— 那一条仍然拦。）
+所以 `SxSFounderService` 的架构检查改为**只拦已实测失败的组合**，其余放行并告警。
+
+### 装包：DISM 报 Error 50
+
+```
+Error: 50
+DISM does not support servicing a Windows Vista RTM or earlier operating system.
+If the operating system is supported check that SSShim.DLL is present.
+```
+
+- **x64 的 `Dism.exe`（0x8664）与 x86 的 `SysWOW64\Dism.exe`（0x014C）都是这个结果。**
+- 镜像里 `ssshim.dll` 已就位 —— 而且**它在 arm32 内容里只有 x86 版本**（ARM 组件目录
+  `arm_microsoft-windows-*` 里故意携带 x86 跨架构桥接文件），这不是缺陷。
+- **arm32 内容确实带 1 个 x86 `cbscore.dll`**（和 arm64 一样有跨架构栈），但**没有 x64 版本**，
+  所以 x64 宿主 DISM 用不上。
+
+### 结论
+
+**从 x64 宿主给 arm32 镜像装包，当前不可行**，原因在平台侧而非本程序：
+- 原生 CBS 通路不可能 —— x86 进程加载不了 ARM 的 `cbscore.dll`；
+- DISM 通路要求 shim 与宿主架构匹配，而 arm32 内容只提供 ARM 与 x86 两种 shim，
+  x86 DISM 同样报 Error 50（具体原因待查，怀疑与骨架缺少 DISM 判版本所需的注册表内容有关）。
+
+**要装 arm32 的包，需要一个 ARM32 的 Windows 宿主**（或等价的执行环境）。
+在那之前，arm32 这条线能交付的是：**完整的存储还原 + 铺好的骨架 + 装好的服务栈与核心文件**。

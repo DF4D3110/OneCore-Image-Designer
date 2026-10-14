@@ -212,7 +212,13 @@ namespace OneCore_Image_Designer.Services
                 // 铺底目标通常是空目录，"镜像架构"按请求的 arch 参数理解。
                 var want = ArchRelay.Parse(arch);
                 var me = ArchRelay.CurrentProcessArch();
-                if (want != ArchRelay.Arch.Unknown && want != me)
+
+                // 【只拦已实测失败的组合】x64 进程给 x86 镜像铺底会在
+                // CreateNewOfflineStore 处失败（0x8007051A），这是实测结论。
+                // 但 WCP 的 ulProcessorArchitecture 是【参数】，跨架构铺底原则上可行 ——
+                // 例如 x86/x64 宿主给 arm32 铺底尚未实测，不该直接拒绝，应当放行并告警。
+                bool knownBad = me == ArchRelay.Arch.Amd64 && want == ArchRelay.Arch.X86;
+                if (knownBad)
                 {
                     string? helper = ArchRelay.FindHelper(want);
                     L($"⚠ 架构不匹配：请求铺底 {ArchRelay.ToToken(want)}，当前进程 {ArchRelay.ToToken(me)}。"
@@ -224,7 +230,11 @@ namespace OneCore_Image_Designer.Services
                     res.Error = $"架构不匹配：需 {ArchRelay.ToToken(want)} 进程铺底，当前为 {ArchRelay.ToToken(me)}";
                     return res;
                 }
-                L($"架构判定: 目标={ArchRelay.ToToken(want)} 进程={ArchRelay.ToToken(me)}，匹配");
+                if (want != ArchRelay.Arch.Unknown && want != me)
+                    L($"架构判定: 目标={ArchRelay.ToToken(want)} 进程={ArchRelay.ToToken(me)} —— "
+                    + "跨架构铺底（WCP 的 arch 是参数）。该组合未实测，失败请回报。");
+                else
+                    L($"架构判定: 目标={ArchRelay.ToToken(want)} 进程={ArchRelay.ToToken(me)}，匹配");
 
                 // ── 让 wcp.dll 可见：优先目标镜像带的服务栈目录，回退宿主 ──
                 if (!TryResolveWcp(full, L)) { res.Error = "找不到 wcp.dll"; return res; }
