@@ -246,6 +246,13 @@ namespace OneCore_Image_Designer.Services
                         var (n, miss) = FounderStackInstaller.InstallCoreFiles(root, cfg.CoreFileSourceWinDir, log);
                         Step("补最小系统文件集", n > 0, $"放入 {n} 个" + (miss.Count > 0 ? $"，缺失 {miss.Count}" : ""));
                     }
+                    else
+                    {
+                        // 没有完整系统镜像可做来源（例如 arm32 只有 Repair Content）时，
+                        // 从【还原出的存储】里按文件名取核心文件。
+                        var (n2, miss2, _) = FounderStackInstaller.InstallCoreFilesFromStore(root, cfg.StackSourceDirs, log);
+                        Step("补最小系统文件集（取自存储）", n2 > 0, $"放入 {n2} 个" + (miss2.Count > 0 ? $"，缺失 {miss2.Count}" : ""));
+                    }
                 }
 
                 // ── 步骤 2：SKU assembly（替代 cbsx.exe /b:） ──

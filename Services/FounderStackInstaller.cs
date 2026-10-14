@@ -315,6 +315,70 @@ namespace OneCore_Image_Designer.Services
             return (copied, missing);
         }
 
+
+        /// <summary>
+        /// 从【还原出的 SxS 存储】里按【文件名】找核心文件并放进骨架的 system32。
+        ///
+        /// 【为什么需要这个变体】<see cref="InstallCoreFiles"/> 期望来源形如
+        /// `&lt;源&gt;\system32\kernelbase.dll`；但 Repair Content 还原出来的素材是**散在
+        /// WinSxS 组件目录**里的：
+        ///   .../kb777777-arm-neutral-common_foundation_&lt;hash&gt;/
+        ///        arm_microsoft-windows-kernelbase_&lt;ptk&gt;_6.2.8400.0_none_&lt;hash&gt;/kernelbase.dll
+        /// 当**没有完整系统镜像**可做来源时（例如 arm32），这是唯一可行的取法。
+        ///
+        /// 【注意】只按文件名取，因此调用方应确认存储的架构与目标一致
+        /// （例如 arm32 存储里取到的 PE 头是 0x01C4 ARMNT）。
+        /// </summary>
+        public static (int copied, List<string> missing, List<string> sources) InstallCoreFilesFromStore(
+            string imageRoot, IEnumerable<string> storeDirs, Action<string>? log = null)
+        {
+            var missing = new List<string>();
+            var sources = new List<string>();
+            int copied = 0;
+            try
+            {
+                string destWin = Path.Combine(Path.GetFullPath(imageRoot), "Windows");
+                if (!Directory.Exists(destWin)) { log?.Invoke("  (骨架里没有 Windows 目录)"); return (0, missing, sources); }
+
+                // 建立"文件名 → 路径"索引（只收核心文件那几个名字，避免索引整个存储）
+                var want = new HashSet<string>(CoreFilesForCbs.Select(p => Path.GetFileName(p)!),
+                                               StringComparer.OrdinalIgnoreCase);
+                var found = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var dir in storeDirs.Where(Directory.Exists))
+                {
+                    foreach (var f in UpdatePackageService.SafeEnumerateFiles(dir))
+                    {
+                        string name = Path.GetFileName(f);
+                        if (!want.Contains(name)) continue;
+                        if (!found.ContainsKey(name)) found[name] = f;
+                    }
+                }
+                log?.Invoke($"  在存储里找到 {found.Count}/{want.Count} 个核心文件");
+
+                string destSys32 = Path.Combine(destWin, "system32");
+                Directory.CreateDirectory(destSys32);
+                EnsureWritable(destWin, log);
+
+                foreach (var rel in CoreFilesForCbs)
+                {
+                    string name = Path.GetFileName(rel);
+                    if (!found.TryGetValue(name, out var src)) { missing.Add(name); continue; }
+                    string dst = Path.Combine(destWin, "system32", name);
+                    try
+                    {
+                        File.Copy(src, dst, true);
+                        copied++;
+                        sources.Add($"{name} ← {src}");
+                    }
+                    catch (Exception ex) { missing.Add($"{name}（复制失败: {ex.Message}）"); }
+                }
+                log?.Invoke($"  核心文件（取自存储）: 放入 {copied} 个" + (missing.Count > 0 ? $"，缺失 {missing.Count} 个" : ""));
+                foreach (var m in missing.Take(6)) log?.Invoke("    缺: " + m);
+            }
+            catch (Exception ex) { log?.Invoke("  InstallCoreFilesFromStore 异常: " + ex.Message); }
+            return (copied, missing, sources);
+        }
+
         static void EnsureWritable(string dir, Action<string>? log)
         {
             if (!Directory.Exists(dir)) return;
