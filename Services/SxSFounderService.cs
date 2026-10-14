@@ -1,4 +1,5 @@
 using System;
+using System.Text;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -127,6 +128,9 @@ namespace OneCore_Image_Designer.Services
         static extern bool SetDllDirectory(string lpPathName);
 
         [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr GetDllDirectory(uint nBufferLength, StringBuilder lpBuffer);
+
+        [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern uint GetFullPathNameW(string lpFileName, uint nBufferLength,
             System.Text.StringBuilder lpBuffer, IntPtr lpFilePart);
 
@@ -158,6 +162,16 @@ namespace OneCore_Image_Designer.Services
             IntPtr regKeys = IntPtr.Zero;
             IntPtr cookie = IntPtr.Zero;
             IntPtr alloc = IntPtr.Zero;
+            // 保存进入前的 DllDirectory：本方法为加载 wcp.dll 会改它，而那是【进程全局】的，
+            // 不清回去会污染后续步骤（例如 CBS 会从宿主服务栈加载 cbscore.dll）。
+            string? savedDllDir = null;
+            try
+            {
+                var sbDir = new StringBuilder(1024);
+                if (GetDllDirectory((uint)sbDir.Capacity, sbDir) != IntPtr.Zero || sbDir.Length > 0)
+                    savedDllDir = sbDir.ToString();
+            }
+            catch { }
             try
             {
                 if (string.IsNullOrWhiteSpace(offlineImagePath)) { res.Error = "offlineImagePath 为空"; return res; }
@@ -299,6 +313,8 @@ namespace OneCore_Image_Designer.Services
                     catch (Exception ex) { L("DismountRegistryHives 异常: " + ex.Message); }
                 }
                 if (alloc != IntPtr.Zero) { try { Marshal.Release(alloc); } catch { } }
+                // 还原 DllDirectory，避免污染同进程后续的 CBS/WCP 调用
+                try { SetDllDirectory(savedDllDir ?? string.Empty); } catch { }
                 // cookie 释放交给 WcpShutdown（本轮保留，避免破坏 WCP 内部状态）
                 _ = cookie;
             }

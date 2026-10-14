@@ -318,6 +318,34 @@ namespace OneCore_Image_Designer.Services
         static string? _lastStackDll;
 
         /// <summary>
+        /// 校验某个模块是否确实来自指定目录。
+        /// 用于防止进程级 SetDllDirectory（铺底加载 wcp.dll 时会设成宿主服务栈目录）
+        /// 让我们误以为"从镜像栈加载成功"，实际拿到的是宿主栈。
+        /// </summary>
+        static bool LoadedFromDirectory(string moduleName, string dir)
+        {
+            try
+            {
+                IntPtr h = GetModuleHandle(moduleName);
+                if (h == IntPtr.Zero) return false;
+                var sb = new StringBuilder(1024);
+                uint n = GetModuleFileName(h, sb, (uint)sb.Capacity);
+                if (n == 0) return false;
+                string actual = Path.GetFullPath(sb.ToString());
+                string want = Path.GetFullPath(dir);
+                if (!want.EndsWith(Path.DirectorySeparatorChar)) want += Path.DirectorySeparatorChar;
+                return actual.StartsWith(want, StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
+
+        [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr GetModuleHandle(string lpModuleName);
+
+        [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern uint GetModuleFileName(IntPtr hModule, StringBuilder lpFilename, uint nSize);
+
+        /// <summary>
         /// 确保 cbscore.dll 可被 LoadLibraryA 找到。
         ///
         /// CBS 规则：所用 servicing stack 必须**不低于**目标镜像的版本，否则
@@ -363,7 +391,13 @@ namespace OneCore_Image_Designer.Services
                     if (!File.Exists(dll)) continue;
                     tried.Add(dir);
                     SetDllDirectory(dir);
-                    if (LoadLibraryA("cbscore.dll") != IntPtr.Zero)
+                    // ⚠ 关键：必须确认这一份真的是【本次 dir】里的，而不是被
+                    // SetDllDirectory 之外的既有搜索路径抢先满足的。
+                    // 铺底步骤为加载 wcp.dll 会 SetDllDirectory 到宿主服务栈目录，
+                    // 那是进程全局的 ⇒ 如果不加校验，这里会"成功地"加载到宿主栈，
+                    // 然后拿 19041 的栈去服务 8400 的镜像（版本不符）。
+                    // 校验方式：拿到已加载模块的路径，确认它在 dir 之下。
+                    if (LoadLibraryA("cbscore.dll") != IntPtr.Zero && LoadedFromDirectory("cbscore.dll", dir))
                     {
                         _lastStackDll = dll;
                         detail = "已从 " + dir + " 加载 cbscore.dll";
