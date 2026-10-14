@@ -53,7 +53,8 @@ namespace OneCore_Image_Designer.Services
             /// <summary>语言包 mum/cab（可空 = 跳过）。</summary>
             public string LanguagePackMum = "";
             /// <summary>edition 用的 unattend xml（可空 = 跳过）。</summary>
-            public string UnattendXml = "";
+            public string Edition = "Core";      // SKU 名，对应 servicing\Editions\<Edition>Edition.xml
+        public string UnattendXml = "";
             /// <summary>语言，例 en-US。</summary>
             public string Lang = "en-US";
             /// <summary>DISM 暂存目录（可空）。</summary>
@@ -361,12 +362,70 @@ namespace OneCore_Image_Designer.Services
                 else L("=== 步骤 3/7：语言包已跳过 ===");
 
                 // ── 步骤 4：edition unattend + 校验 ──
-                if (!string.IsNullOrWhiteSpace(cfg.UnattendXml))
+                // ── 步骤 4：SKU 配置（照 explodeSxS 的两步）──
+                //   ① copy <win>\Windows\servicing\Editions\<Edition>Edition.xml  → <win>\Windows\<Edition>.xml
+                //   ② dism /image:<win> /apply-unattend:<那个 xml>
+                // 那个 Edition XML 是 **SKU 定义**（由 editions 包装进 servicing\Editions\），
+                // 没有它就无法把镜像变成目标版本 —— exploreSxS 的 _edition 参数干的就是这件事。
                 {
-                    L("=== 步骤 4/7：应用 edition 设置（DISM） ===");
-                    var r = DismServicingService.ApplyUnattend(win, cfg.UnattendXml);
-                    Step("apply-unattend", r.Success, r.Success ? "OK" : r.Error);
-                    if (!r.Success) { res.Error = r.Error; return res; }
+                    string unattend = cfg.UnattendXml;
+                    if (string.IsNullOrWhiteSpace(unattend) && !string.IsNullOrWhiteSpace(cfg.Edition))
+                    {
+                        L("=== 步骤 4/7：SKU 配置（从 servicing\\Editions 取 Edition XML） ===");
+                        string srcXml = Path.Combine(win, "Windows", "servicing", "Editions", cfg.Edition + "Edition.xml");
+                        if (!File.Exists(srcXml))
+                            srcXml = Path.Combine(win, "servicing", "Editions", cfg.Edition + "Edition.xml");
+
+                        // 实测：装完 editions 包后 servicing\Editions 下会出现
+                        //   <Edition>Edition.xml（如 ServerStandardEdition.xml），
+                        // 另有 EditionMatrix.xml / UpgradeMatrix.xml 两个【不是 SKU 定义】。
+                        // cfg.Edition 默认写死会找不到，所以这里按实际存在的文件自动推导。
+                        if (!File.Exists(srcXml))
+                        {
+                            foreach (var edDir in new[]
+                            {
+                                Path.Combine(win, "Windows", "servicing", "Editions"),
+                                Path.Combine(win, "servicing", "Editions")
+                            })
+                            {
+                                if (!Directory.Exists(edDir)) continue;
+                                var cands = Directory.EnumerateFiles(edDir, "*Edition.xml")
+                                    .Where(f => !Path.GetFileName(f).Equals("EditionMatrix.xml", StringComparison.OrdinalIgnoreCase)
+                                             && !Path.GetFileName(f).Equals("UpgradeMatrix.xml", StringComparison.OrdinalIgnoreCase))
+                                    .ToList();
+                                // 优先匹配 cfg.Edition 前缀，否则取唯一的一个
+                                var pick = cands.FirstOrDefault(f => Path.GetFileName(f)
+                                                .StartsWith(cfg.Edition, StringComparison.OrdinalIgnoreCase));
+                                pick ??= cands.Count == 1 ? cands[0] : null;
+                                if (pick != null)
+                                {
+                                    srcXml = pick;
+                                    L($"  按镜像实际内容选定 SKU 定义: {Path.GetFileName(pick)}");
+                                    break;
+                                }
+                            }
+                        }
+                        if (File.Exists(srcXml))
+                        {
+                            string dstXml = Path.Combine(win, "Windows", cfg.Edition + ".xml");
+                            try
+                            {
+                                File.Copy(srcXml, dstXml, true);
+                                unattend = dstXml;
+                                L($"  已取 Edition XML: {cfg.Edition}Edition.xml -> {cfg.Edition}.xml");
+                            }
+                            catch (Exception ex) { L("  复制 Edition XML 失败: " + ex.Message); }
+                        }
+                        else L($"  找不到 servicing\\Editions\\{cfg.Edition}Edition.xml（editions 包可能还没装）");
+                    }
+                    if (!string.IsNullOrWhiteSpace(unattend))
+                    {
+                        if (string.IsNullOrWhiteSpace(cfg.UnattendXml))
+                            L("=== 步骤 4/7：应用 edition 设置（DISM） ===");
+                        var r = DismServicingService.ApplyUnattend(win, unattend);
+                        Step("apply-unattend", r.Success, r.Success ? "OK" : r.Error);
+                    }
+                    else L("=== 步骤 4/7：SKU 配置已跳过（既没给 unattend，也取不到 Edition XML） ===");
                 }
                 var cur = DismServicingService.GetCurrentEdition(win);
                 var tgt = DismServicingService.GetTargetEditions(win);

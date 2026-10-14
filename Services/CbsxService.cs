@@ -340,7 +340,8 @@ namespace OneCore_Image_Designer.Services
         /// 由 <see cref="ExplodeSxSNativeService"/> 在找到栈之后设置。
         /// </summary>
         public static string? PreferredStackDir { get; set; }
-        public static bool UsePreferredStack { get; set; }
+        public static bool UsePreferredStack { get; set; } =
+            Environment.GetEnvironmentVariable("OCID_USE_TOOL_STACK") == "1";
 
         /// <summary>
         /// 找宿主自己的 servicing stack 目录（带 cbscore.dll、且架构与当前进程一致）。
