@@ -74,6 +74,8 @@ namespace OneCore_Image_Designer.Services
             /// 而且实测在已有镜像上会以 CreateNewOfflineStore 0x8007051A（权限不足）失败。
             /// </summary>
             public bool SkipFounder;
+        /// <summary>跳过服务栈安装（目标镜像已自带栈时用，避免动它的 ACL 受限文件）。</summary>
+        public bool SkipStack;
 
             /// <summary>
             /// servicing stack 来源目录。**非空时会执行"把服务栈装进镜像"这一步** ——
@@ -259,7 +261,12 @@ namespace OneCore_Image_Designer.Services
                 }
 
                 // ── 步骤 1.5：把 servicing stack 装进镜像（"从头组装"的关键一步） ──
-                if (cfg.StackSourceDirs.Count > 0)
+                                if (cfg.SkipStack)
+                {
+                    L("=== 步骤 1.5：安装 servicing stack —— 已跳过（目标镜像自带栈） ===");
+                    Step("安装 servicing stack", true, "已跳过（镜像自带栈）");
+                }
+                else if (cfg.StackSourceDirs.Count > 0)
                 {
                     L("=== 步骤 1.5：安装 servicing stack（铺底骨架是空壳，CBS 需要它才能起来） ===");
                     var scfg = new FounderStackInstaller.Config
@@ -330,6 +337,16 @@ namespace OneCore_Image_Designer.Services
                     var (skuArch, _) = ArchRelay.DetectImageArchitecture(win);
                     bool useDism = skuArch != ArchRelay.Arch.Unknown
                                 && skuArch != ArchRelay.CurrentProcessArch();
+                    // OCID_FORCE_NATIVE_CBS=1 强制走原生 CBS（绕过架构路由）。
+                    // ・DISM 通道无法装 Product 级包（实测：
+                    //   dism /add-package /packagepath:<Edition>.mum
+                    //   → Error 5「not a type that can be modified」）
+                    // ・而 CBS 能。所以跨架构时也值得直接试 CBS。
+                    if (Environment.GetEnvironmentVariable("OCID_FORCE_NATIVE_CBS") == "1")
+                    {
+                        if (useDism) L("  ⚠ OCID_FORCE_NATIVE_CBS=1：架构不符但强制走原生 CBS");
+                        useDism = false;
+                    }
                     if (useDism)
                     {
                         L($"  架构不符（镜像 {ArchRelay.ToToken(skuArch)} / 进程 "
