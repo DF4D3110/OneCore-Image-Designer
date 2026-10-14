@@ -413,3 +413,47 @@ base 里 tsportalwebpart        : 0
 同一轮里我一度把 `ApplyDeltaB` 的返回值当 HRESULT 读，并据此放宽了 size 检查 ——
 **结果整批 203,556 个文件被静默写成 0 字节**（0 字节文件从 0 变成 2,738→全量）。
 教训见第 14 节。
+
+
+---
+
+## 14. arm64 走 DISM：已实测可用
+
+素材：`E:\17046.1000.171118-1403.RS_PRERELEASE_CLIENTSINGLELANGUAGE_OEMRET_ARM64FRE_EN-US.iso`
+（另有 `E:\winpe_10.0.9834.0_arm64.wim`）。应用后 102,754 个文件，
+`Windows 10 Home Single Language`，世代 **10.0.17046**。
+
+### 路由判定（正确）
+
+```
+镜像架构 : arm64（WinSxS 下 servicingstack 目录以 arm64 为主，4 个）
+进程架构 : amd64
+是否需要转接 : 是 —— 镜像是 arm64、进程是 amd64
+```
+⇒ 架构不符 ⇒ 走 DISM。**同时世代是 10.0，按版本策略也走 DISM** —— 两条判据一致。
+
+### DISM 读
+
+```
+dism /image:L:\ /get-packages  -> 成功，含真实包：
+  Microsoft-OneCore-ApplicationModel-Sync-Desktop-FOD-Package~...~arm64~~10.0.17046.1000   [Installed]
+  Microsoft-Windows-CHPE-Binaries-arm64x86-Package~...~arm64.x86~~10.0.17046.1000        [Installed]
+  Microsoft-Windows-EditionSpecific-Education-arm64arm-Package~...~arm64.arm~~10.0.17046.1000 [Staged]
+dism /image:L:\ /get-currentedition -> 退出码 0
+```
+
+### DISM 写
+
+```
+dism /image:L:\ /add-package /packagepath:<...~arm64.arm~en-US~10.0.17046.1000.mum>
+-> 跑到 100%，"The operation completed successfully"，exit=0
+```
+
+### 一个值得记的观察
+
+arm64 镜像里存在 **`arm64.x86` 与 `arm64.arm` 这类交叉架构包**
+（`CHPE-Binaries-arm64x86`、`EditionSpecific-Education-arm64arm`）。
+**这正是 arm64 能携带 crossarch x86 服务栈的来源，也正是 arm32 所缺少的东西** ——
+arm32 的内容里只有 ARM 与 x86 两种 shim，没有 x64，所以 x64 宿主的 DISM 用不上它。
+
+**⇒ arm64：读、写、路由判定三者都已实测通过。**
