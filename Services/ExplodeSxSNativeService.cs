@@ -380,6 +380,32 @@ namespace OneCore_Image_Designer.Services
                         //   <Edition>Edition.xml（如 ServerStandardEdition.xml），
                         // 另有 EditionMatrix.xml / UpgradeMatrix.xml 两个【不是 SKU 定义】。
                         // cfg.Edition 默认写死会找不到，所以这里按实际存在的文件自动推导。
+                        // ★ 从 skuassembly 里的 editions 包名推导 edition token —— 这是【确定】的来源，
+                        //   不要用"名字最短"这类启发式（实测会选中 ProfessionalEdition.xml 而实际装的是
+                        //   ServerStandard）。包名形如
+                        //   microsoft-windows-editions-serverstandard-package~31bf3856ad364e35~x86~~6.2.8400.0.mum
+                        string skuToken = "";
+                        try
+                        {
+                            if (!string.IsNullOrWhiteSpace(cfg.SkuAssemblyFile) && File.Exists(cfg.SkuAssemblyFile))
+                            {
+                                foreach (var line in File.ReadAllLines(cfg.SkuAssemblyFile))
+                                {
+                                    var mm = System.Text.RegularExpressions.Regex.Match(line,
+                                        @"microsoft-windows-editions-([a-z0-9]+)-package", 
+                                        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                                    if (mm.Success) { skuToken = mm.Groups[1].Value; break; }
+                                }
+                            }
+                        }
+                        catch { }
+                        if (skuToken.Length > 0)
+                        {
+                            string bySku = Path.Combine(win, "servicing", "Editions",
+                                char.ToUpperInvariant(skuToken[0]) + skuToken.Substring(1) + "Edition.xml");
+                            if (File.Exists(bySku)) { srcXml = bySku; L($"  按 SKU 包名推导 Edition XML: {Path.GetFileName(bySku)}"); }
+                        }
+
                         if (!File.Exists(srcXml))
                         {
                             foreach (var edDir in new[]
@@ -388,7 +414,9 @@ namespace OneCore_Image_Designer.Services
                                 Path.Combine(win, "servicing", "Editions")
                             })
                             {
-                                if (!Directory.Exists(edDir)) continue;
+                                if (!Directory.Exists(edDir)) { L($"    (目录不存在: {edDir})"); continue; }
+                                var all = Directory.EnumerateFiles(edDir, "*.xml").ToList();
+                                L($"    {edDir} 下有 {all.Count} 个 xml: " + string.Join(", ", all.Take(8).Select(Path.GetFileName)));
                                 var cands = Directory.EnumerateFiles(edDir, "*Edition.xml")
                                     .Where(f => !Path.GetFileName(f).Equals("EditionMatrix.xml", StringComparison.OrdinalIgnoreCase)
                                              && !Path.GetFileName(f).Equals("UpgradeMatrix.xml", StringComparison.OrdinalIgnoreCase))
@@ -396,7 +424,9 @@ namespace OneCore_Image_Designer.Services
                                 // 优先匹配 cfg.Edition 前缀，否则取唯一的一个
                                 var pick = cands.FirstOrDefault(f => Path.GetFileName(f)
                                                 .StartsWith(cfg.Edition, StringComparison.OrdinalIgnoreCase));
-                                pick ??= cands.Count == 1 ? cands[0] : null;
+                                pick ??= cands.Count >= 1
+                                    ? cands.OrderBy(f => Path.GetFileName(f).Length).First()   // 多个候选时取名字最短的（最可能是主 SKU）
+                                    : null;
                                 if (pick != null)
                                 {
                                     srcXml = pick;
@@ -407,12 +437,19 @@ namespace OneCore_Image_Designer.Services
                         }
                         if (File.Exists(srcXml))
                         {
-                            string dstXml = Path.Combine(win, "Windows", cfg.Edition + ".xml");
+                            // 目标路径照 explodeSxS: <镜像>\Windows\<Edition>.xml
+                            // ⚠ 不要拼 "Windows" —— win 本身已是 Windows 目录（早前拼成
+                            //   G:\Windows\Windows\Core.xml 就是这么来的）。
+                            // 文件名用【推导出的】Edition 名，不要用 cfg.Edition（它可能是过时的默认值）。
+                            string edName = Path.GetFileName(srcXml);
+                            if (edName.EndsWith("Edition.xml", StringComparison.OrdinalIgnoreCase))
+                                edName = edName.Substring(0, edName.Length - "Edition.xml".Length);
+                            string dstXml = Path.Combine(win, edName + ".xml");
                             try
                             {
                                 File.Copy(srcXml, dstXml, true);
                                 unattend = dstXml;
-                                L($"  已取 Edition XML: {cfg.Edition}Edition.xml -> {cfg.Edition}.xml");
+                                L($"  已取 Edition XML: {Path.GetFileName(srcXml)} -> {Path.GetFileName(dstXml)}");
                             }
                             catch (Exception ex) { L("  复制 Edition XML 失败: " + ex.Message); }
                         }
