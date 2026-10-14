@@ -175,6 +175,26 @@ namespace OneCore_Image_Designer.Services
                 // WCP 同样要读写目标镜像的 hive，理由见 PrivilegeHelper 的说明
                 PrivilegeHelper.EnableServicingPrivileges(L);
 
+                // ── 架构判定 ──
+                // 铺底也受架构影响：实测用 x64 进程给 x86 镜像铺底会在
+                // CreateNewOfflineStore 处失败（0x8007051A）；换 x86 进程即成功。
+                // 铺底目标通常是空目录，"镜像架构"按请求的 arch 参数理解。
+                var want = ArchRelay.Parse(arch);
+                var me = ArchRelay.CurrentProcessArch();
+                if (want != ArchRelay.Arch.Unknown && want != me)
+                {
+                    string? helper = ArchRelay.FindHelper(want);
+                    L($"⚠ 架构不匹配：请求铺底 {ArchRelay.ToToken(want)}，当前进程 {ArchRelay.ToToken(me)}。"
+                    + "实测该组合会在 CreateNewOfflineStore 处失败（0x8007051A）。");
+                    L(helper != null
+                        ? $"   建议改用 {ArchRelay.ToToken(want)} 子程序: {helper}"
+                        : "   建议把 " + ArchRelay.ToToken(want) + " 架构的 SxSFounderCli 放到 "
+                          + Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ArchRelay.ToToken(want)));
+                    res.Error = $"架构不匹配：需 {ArchRelay.ToToken(want)} 进程铺底，当前为 {ArchRelay.ToToken(me)}";
+                    return res;
+                }
+                L($"架构判定: 目标={ArchRelay.ToToken(want)} 进程={ArchRelay.ToToken(me)}，匹配");
+
                 // ── 让 wcp.dll 可见：优先目标镜像带的服务栈目录，回退宿主 ──
                 if (!TryResolveWcp(full, L)) { res.Error = "找不到 wcp.dll"; return res; }
 

@@ -404,6 +404,26 @@ namespace OneCore_Image_Designer.Services
                 }
                 log?.Invoke("servicing stack: " + stackDetail);
 
+                // ── 架构判定（必须最先，因为架构错了后面全白费）──
+                // CBS 的 servicing stack 是**按架构**的：x64 进程加载不了 x86 的 cbscore.dll，
+                // 它会**静默回退到宿主栈**，然后拿宿主版本去服务目标镜像 →
+                // 0x8007051A ERROR_REVISION_MISMATCH（Windows::COM::VerifyStoreVersionNumber）。
+                // 这里提前把结论说清楚，并给出转接指引，而不是让调用方去猜那个错误码。
+                var (imgArch, archEvidence) = ArchRelay.DetectImageArchitecture(winDir);
+                if (ArchRelay.NeedsRelay(imgArch, out string relayReason))
+                {
+                    string? helper = ArchRelay.FindHelper(imgArch);
+                    log?.Invoke($"⚠ 架构不匹配：{relayReason}");
+                    log?.Invoke($"   镜像架构判定依据: {archEvidence}");
+                    log?.Invoke(helper != null
+                        ? $"   建议改用 {ArchRelay.ToToken(imgArch)} 子程序: {helper}"
+                        : "   建议把 " + ArchRelay.ToToken(imgArch) + " 架构的 CbsxCli 放到 "
+                          + Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ArchRelay.ToToken(imgArch)));
+                    error = relayReason;
+                    return null;
+                }
+                log?.Invoke($"架构判定: 镜像={ArchRelay.ToToken(imgArch)} 进程={ArchRelay.ToToken(ArchRelay.CurrentProcessArch())}，匹配");
+
                 // CBS 离线服务要读写目标镜像的 hive。dism /Apply-Image 铺出的镜像会还原
                 // WIM 原始 ACL（hive 归属 TrustedInstaller），此时必须显式启用备份/还原特权，
                 // 否则 ICbsSession::Initialize 会以 0x8007051A (ERROR_NO_SUCH_PRIVILEGE) 失败。

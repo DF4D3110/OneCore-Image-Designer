@@ -124,6 +124,17 @@ namespace OneCore_Image_Designer.Services
             if (!ElevationHelper.IsElevated()) blockers.Add("当前不是管理员权限（CBS/WCP 需要）");
             else checks.Add("已具备管理员权限");
 
+            // ── 架构判定：铺底与 CBS 都受架构影响（已实证 x64 铺 x86 镜像会失败）──
+            var (imgArch, archEvidence) = ArchRelay.DetectImageArchitecture(win);
+            if (ArchRelay.NeedsRelay(imgArch, out string archReason))
+            {
+                string? helper = ArchRelay.FindHelper(imgArch);
+                blockers.Add(archReason + (helper != null
+                    ? $"；可用的子程序：{helper}"
+                    : $"；未找到 {ArchRelay.ToToken(imgArch)} 子程序，请放置对应架构的 CbsxCli"));
+            }
+            else checks.Add($"架构匹配：镜像={ArchRelay.ToToken(imgArch)}（{archEvidence}）");
+
             // servicing stack 是否可用（CBS 与 WCP 都要）
             string root = string.IsNullOrWhiteSpace(cfg.ImageRoot) ? DeriveImageRoot(win) : cfg.ImageRoot;
             bool hasCbs = false, hasWcp = false;
