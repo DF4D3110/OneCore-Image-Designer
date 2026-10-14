@@ -21,6 +21,8 @@ internal static class Program
     {
         public bool Enumerate;
         public bool Dry;
+        public bool Finish;
+        public int WaitForPid;
         public bool Help;
         public SkuAssemblyService.PackageIntent Intent = SkuAssemblyService.PackageIntent.Unknown;
         public string? Manifest;
@@ -40,6 +42,33 @@ internal static class Program
         if (o.Help) { PrintUsage(); return 0; }
 
         if (string.IsNullOrWhiteSpace(o.WinDir)) { Console.Error.WriteLine("缺少 /o:<winDir>"); PrintUsage(); return 2; }
+
+            // /finish：以【独立进程】执行收尾（写 State.ini + imagestate）。
+            // 必须独立成进程 —— CBS 服务会持有目标镜像的 hive 直到调用方进程退出，
+            // 同一进程内收尾必然失败（详见 CBS_TECHNICAL_NOTES.md 第 11 节）。
+            if (o.Finish)
+            {
+                // 如果指定了 /waitfor:<pid>，先等那个进程退出再收尾。
+                // 【为什么必须等】持有目标镜像 hive 的是跑过 CBS 的那个进程；
+                // 它不退出，换任何进程来收尾都拿不到 hive（实测 9→9 全失败）。
+                if (o.WaitForPid > 0)
+                {
+                    Console.WriteLine($"  等待进程 {o.WaitForPid} 退出后再收尾…");
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    while (sw.Elapsed < TimeSpan.FromMinutes(30))
+                    {
+                        try { System.Diagnostics.Process.GetProcessById(o.WaitForPid); }
+                        catch { Console.WriteLine("  该进程已退出，开始收尾"); break; }
+                        System.Threading.Thread.Sleep(1000);
+                    }
+                }
+                Console.WriteLine("=== CbsxCli /finish（独立进程收尾） ===");
+                var (ok, detail) = OneCore_Image_Designer.Services.FinishImageService
+                    .Finish(o.WinDir!, m => Console.WriteLine("  " + m));
+                Console.WriteLine();
+                Console.WriteLine("  " + (ok ? "OK  " : "FAIL") + " " + detail);
+                return ok ? 0 : 1;
+            }
         if (!Directory.Exists(o.WinDir)) { Console.Error.WriteLine("winDir 不存在: " + o.WinDir); return 2; }
 
         var lines = new List<string>();
@@ -151,6 +180,9 @@ internal static class Program
 
             if (a.StartsWith("/ep", StringComparison.OrdinalIgnoreCase)) { o.Enumerate = true; continue; }
             if (a.StartsWith("/dry", StringComparison.OrdinalIgnoreCase)) { o.Dry = true; continue; }
+            if (a.StartsWith("/finish", StringComparison.OrdinalIgnoreCase)) { o.Finish = true; continue; }
+            if (a.StartsWith("/waitfor:", StringComparison.OrdinalIgnoreCase))
+            { int.TryParse(a.Substring("/waitfor:".Length), out o.WaitForPid); continue; }
 
             if (a.StartsWith("/ip", StringComparison.OrdinalIgnoreCase)) { if (!SetIntent(o, SkuAssemblyService.PackageIntent.Installed, ref error)) return o; continue; }
             if (a.StartsWith("/sp", StringComparison.OrdinalIgnoreCase)) { if (!SetIntent(o, SkuAssemblyService.PackageIntent.Staged, ref error)) return o; continue; }
@@ -165,7 +197,7 @@ internal static class Program
         if (o.Enumerate && !string.IsNullOrWhiteSpace(o.Batch)) error = "/ep 不能与 /b 同用";
         if (!string.IsNullOrWhiteSpace(o.Batch) && (o.Intent != SkuAssemblyService.PackageIntent.Unknown || o.Manifest != null))
             error = "/b 不能与 /ip /sp /up /m 同用";
-        if (!o.Enumerate && string.IsNullOrWhiteSpace(o.Batch))
+        if (!o.Enumerate && !o.Finish && string.IsNullOrWhiteSpace(o.Batch))
         {
             if (o.Intent == SkuAssemblyService.PackageIntent.Unknown) error = "缺少包操作（/ip | /sp | /up）";
             else if (string.IsNullOrWhiteSpace(o.Manifest)) error = "缺少 /m:<mum>";
@@ -193,6 +225,7 @@ internal static class Program
         Console.WriteLine(@"
 用法:
   CbsxCli /ep /o:<winDir> [/log:<path>]
+  CbsxCli /finish /o:<winDir> [/waitfor:<pid>]   独立进程执行收尾（等 pid 退出后再做）
   CbsxCli /ip|/sp|/up /m:<mum> /o:<winDir> [/dry] [/log:<path>]
   CbsxCli /b:<batch> /o:<winDir> [/dry] [/log:<path>]
 
