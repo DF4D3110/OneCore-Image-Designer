@@ -39,6 +39,34 @@ internal static class Program
     static int Main(string[] args)
     {
         Console.OutputEncoding = System.Text.Encoding.UTF8;
+
+        // ── 提权钩子：装包类操作默认在 TrustedInstaller 下跑 ──
+        //
+        // 【为什么】离线 CBS 的权限是分层的，实测逐级才通：
+        //   管理员 + SeBackup/Restore/TakeOwnership/Security + takeown/icacls
+        //        → 卡在驱动组件的 q-unstage
+        //   LocalSystem（schtasks /ru SYSTEM 或 NSudo SYSTEM）
+        //        → 能过 StageFile / Doqe install，但 Commit 写离线 SOFTWARE hive 的
+        //          `\Classes\Unknown\shell` 键时 STATUS_ACCESS_DENIED
+        //   TrustedInstaller（NSudo TI 模式）
+        //        → 才拥有那些键
+        // 而且 Execute 一失败，镜像就被标记 CBS_E_IMAGE_UNSERVICEABLE(0x800F0830)，
+        // 必须重新 apply 才能再试 —— 所以不该"先失败再补救"，而是一开始就用对的身份。
+        //
+        // 只读 / 辅助模式不重启：/ep 枚举、/dry 试运行、/? 帮助、
+        // /finish 收尾（它靠 /waitfor:<pid> 等父进程退出，重启会改 PID 语义）、
+        // /postinstall（走 DISM，DISM 自己会委托 TrustedInstaller 服务）、/no-ti 显式关掉。
+        bool readOnlyOrHelper = args.Any(a =>
+            a.StartsWith("/ep", StringComparison.OrdinalIgnoreCase)
+            || a.StartsWith("/dry", StringComparison.OrdinalIgnoreCase)
+            || a.StartsWith("/?", StringComparison.OrdinalIgnoreCase)
+            || a.StartsWith("/help", StringComparison.OrdinalIgnoreCase)
+            || a.StartsWith("/finish", StringComparison.OrdinalIgnoreCase)
+            || a.StartsWith("/postinstall", StringComparison.OrdinalIgnoreCase)
+            || a.StartsWith("/no-ti", StringComparison.OrdinalIgnoreCase));
+        if (!readOnlyOrHelper && ElevationHelper.EnsureTrustedInstallerOrRelaunch(Console.WriteLine))
+            return 0;
+
         Console.WriteLine("CbsxCli 1.0  ——  CBS COM 客户端（cbsx.exe 的 C# 替代品）");
         Console.WriteLine();
 

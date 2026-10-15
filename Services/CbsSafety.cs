@@ -277,6 +277,71 @@ namespace OneCore_Image_Designer.Services
             return found;
         }
 
+        /// <summary>WCP/CBS 挂载的离线 hive 前缀（形如 HKLM\{bf1a281b-…}F:/Windows/…）。</summary>
+        const string WcpHivePrefix = "{bf1a281b-ad7b-4476-ac95-f47682990ce7}";
+
+        /// <summary>我们自己加载的离线 hive 前缀（<see cref="OfflineRegistryService"/> 用的）。</summary>
+        const string OurHivePrefix = "OCID_OfflineHive_";
+
+        /// <summary>
+        /// 枚举【全部】离线 hive —— WCP 的 `{bf1a281b-…}` **以及**我们自己的 `OCID_OfflineHive_*`。
+        ///
+        /// 【为什么必须单独有这个方法】<see cref="FindResidualHives"/> 只认 WCP 前缀，
+        /// 我们自己的 `OCID_OfflineHive_*` 完全不在匹配范围内。实测在一次会话里泄漏了 **69 个**
+        /// —— 因为多条路径都会 `RegLoadKey`（枚举包、离线注册表浏览、预修 hive 键 ACL 等），
+        /// 而收尾的兜底只扫 WCP 前缀，于是它们一直挂在 HKLM 下。
+        ///
+        /// 泄漏的后果是实打实的：下次对同一镜像操作时会被"残留挂载"挡住，
+        /// 而且 `RegUnLoadKey` 也可能因为别处还持有而失败 —— 只能在源头清干净。
+        /// </summary>
+        public static List<string> FindAllOfflineHives()
+        {
+            var found = new List<string>();
+            try
+            {
+                var hklm = Microsoft.Win32.Registry.LocalMachine;
+                using var k = hklm.OpenSubKey("");
+                if (k == null) return found;
+                foreach (var name in k.GetSubKeyNames())
+                    if (name.StartsWith(WcpHivePrefix, StringComparison.OrdinalIgnoreCase)
+                        || name.StartsWith(OurHivePrefix, StringComparison.OrdinalIgnoreCase))
+                        found.Add(name);
+            }
+            catch { }
+            return found;
+        }
+
+        /// <summary>
+        /// 卸载【全部】离线 hive（WCP + 我们自己的），返回【仍挂着】的数量。
+        /// 这是收尾的最后一道网：不管是谁挂的、挂在哪一步，退出前都清掉。
+        /// </summary>
+        public static int SweepAllOfflineHives(Action<string>? log = null)
+        {
+            try
+            {
+                var before = FindAllOfflineHives();
+                if (before.Count == 0) { log?.Invoke("  无残留离线 hive"); return 0; }
+                try { PrivilegeHelper.EnableServicingPrivileges(log); } catch { }
+
+                // 先按名单逐个卸；再对枚举到的每一个重试一遍（第一次可能被持有而失败）
+                foreach (var name in before)
+                {
+                    try { RegUnLoadKey(new IntPtr(HKEY_LOCAL_MACHINE), name); } catch { }
+                }
+                var after = FindAllOfflineHives();
+                foreach (var name in after)
+                {
+                    try { RegUnLoadKey(new IntPtr(HKEY_LOCAL_MACHINE), name); } catch { }
+                }
+                after = FindAllOfflineHives();
+                log?.Invoke($"  清空离线 hive: {before.Count} → {after.Count}");
+                if (after.Count > 0)
+                    LastCleanupWarning = $"仍有 {after.Count} 个离线 hive 未卸载（例 {after[0]}），可能需要重启。";
+                return after.Count;
+            }
+            catch (Exception ex) { log?.Invoke("  清空离线 hive 异常: " + ex.Message); return -1; }
+        }
+
         /// <summary>登记一个退出时必定执行的清理动作（幂等）。</summary>
         public static void RegisterCleanup(Action a)
         {
@@ -309,7 +374,8 @@ namespace OneCore_Image_Designer.Services
             // ── 兜底：对本进程操作过的所有目标盘卸载残留 hive，并**枚举验证** ──
             // 原先只有 RunGuarded(winDir) 会做这件事，而无参 RunCleanup()（ExplodeSxSNativeService
             // 的 finally 用的就是它）从不调用 ⇒ 残留 hive 一直没被处理，会阻塞下一次运行。
-            if (_touchedRoots.Count == 0) return;
+            // ⚠ 原来这里有 `if (_touchedRoots.Count == 0) return;` —— 那会让下面的
+            //    全量兜底（SweepAllOfflineHives）也一起被跳过，实测因此泄漏了 69 个 hive。
             try { PrivilegeHelper.EnableServicingPrivileges(); } catch { }
             foreach (var root in _touchedRoots)
             {
@@ -333,6 +399,12 @@ namespace OneCore_Image_Designer.Services
                 }
                 catch { }
             }
+
+            // ── 最后一道网：清空【全部】离线 hive ──
+            // 上面的循环只覆盖 _touchedRoots 里那些"能按盘符匹配到 WCP 前缀"的 hive；
+            // 我们自己的 OCID_OfflineHive_* 名字里不带盘符，只能全量扫。
+            // 实测：一次会话泄漏 69 个，全部来自 OfflineRegistryService 的 RegLoadKey。
+            try { SweepAllOfflineHives(null); } catch { }
         }
 
         /// <summary>

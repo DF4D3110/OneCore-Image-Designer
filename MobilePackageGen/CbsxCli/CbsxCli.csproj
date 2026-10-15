@@ -47,6 +47,10 @@
     <Compile Include="..\..\Services\DismServicingService.cs" />
     <Compile Include="..\..\Services\ArchRelay.cs" />
     <Compile Include="..\..\Services\PrivilegeHelper.cs" />
+    <!-- ElevationHelper：装包前以 TrustedInstaller 重启自己。
+         CBS 的 Commit 阶段要写归 TrustedInstaller 属主的离线 hive 注册表键，
+         管理员/SYSTEM 都会在那儿 E_ACCESSDENIED（详见该类注释）。 -->
+    <Compile Include="..\..\Services\ElevationHelper.cs" />
     <Compile Include="..\..\Services\OfflineRegistryService.cs" />
   </ItemGroup>
 
