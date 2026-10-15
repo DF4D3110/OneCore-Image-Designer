@@ -29,7 +29,7 @@ namespace OneCore_Image_Designer.Services
             return new XmlSerializer(typeof(DeviceLayoutDoc), overrides);
         }
 
-        private static readonly string LogDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash_logs");
+        private static readonly string LogDir = OcidLogPaths.CrashDir;
         private static string? _currentLogFile;
         private static readonly object _logLock = new();
 

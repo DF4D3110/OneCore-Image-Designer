@@ -9,12 +9,11 @@ using System.Runtime.InteropServices;
 
 namespace OneCore_Image_Designer.Services
 {
-    /// <summary>轻量动作轨迹：追加写 crash_logs\trace_last.log（启动时清空）。冻结排查靠它定位卡在哪一步。</summary>
+    /// <summary>轻量动作轨迹：追加写 <c>OCID_Logs\crash\trace_last.log</c>（启动时清空）。冻结排查靠它定位卡在哪一步。</summary>
     public static class AppTrace
     {
         static readonly object Gate = new();
-        static readonly string LogPath = Path.Combine(
-            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash_logs"), "trace_last.log");
+        static readonly string LogPath = Path.Combine(OcidLogPaths.CrashDir, "trace_last.log");
         static readonly Stopwatch Sw = Stopwatch.StartNew();
         static bool _headWritten;
 
@@ -106,7 +105,7 @@ namespace OneCore_Image_Designer.Services
         {
             try
             {
-                string dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash_logs");
+                string dir = OcidLogPaths.CrashDir;
                 Directory.CreateDirectory(dir);
                 string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 string file = Path.Combine(dir, $"freeze_{stamp}.log");

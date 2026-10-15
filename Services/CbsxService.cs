@@ -554,6 +554,124 @@ namespace OneCore_Image_Designer.Services
         [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern bool SetDllDirectory(string lpPathName);
 
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern IntPtr GetModuleHandleW(string lpModuleName);
+
+        // ────────────────────────────────────────────────────────────────
+        // 注册表截获钩子（OcidRegHook.dll）
+        // ────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// 装 `OcidRegHook.dll`：它给 `wcp.dll` 的**导入表**打补丁，把 ntdll 的
+        /// `NtCreateKey` / `NtCreateKeyTransacted` / `NtOpenKey` / `NtOpenKeyEx` /
+        /// `NtSetValueKey` / `NtDeleteKey` / `NtDeleteValueKey` 换成我们的包装函数。
+        ///
+        /// 【为什么需要】
+        /// 实测：组件 manifest 里用 `HKEY_CLASSES_ROOT` 声明的注册表写（例：shell32 的
+        /// `HKCR\Unknown\shell` 默认值 = `openas`）**没有落到离线 hive**，而是落到了
+        /// 宿主机的 `HKLM\SOFTWARE\Classes\...`，被内核保护拦下报 `STATUS_ACCESS_DENIED`，
+        /// 并导致整笔注册表事务（KTM）回滚 ⇒ Commit 失败。
+        /// 钩子让我们**在进程内看清** WCP 到底请求了哪些键路径，进而**改写到我们自己的离线 hive**，
+        /// 不再去碰宿主机的注册表。
+        ///
+        /// 【开关（环境变量）】
+        ///   `OCID_REGHOOK`        = `0` 可关掉（默认开）
+        ///   `OCID_REGHOOK_LOG`    = 日志文件路径（默认 `%TEMP%\ocid_reghook.log`）
+        ///   `OCID_REGHOOK_MAP`    = 映射文件路径（每行 `活动前缀=离线前缀`）；不设 ⇒ **只记录不改写**
+        ///   `OCID_REGHOOK_REWRITE`= `1` 时才真正改写路径
+        ///
+        /// 【钩子 DLL 的位置】`<BaseDirectory>\` 或 `<BaseDirectory>\<x64|Win32>\`
+        /// （与我们放 NSudoAPI.dll 的规矩一致）。找不到就跳过并说明，**不报错**。
+        /// </summary>
+        /// <summary>
+        /// 【诊断】无条件落一个标记文件，用来确认注册表截获那段代码**到底有没有被执行**、
+        /// 以及走了哪个分支。踩过的坑：钩子日志没生成，但分不清是"没调用""提前返回"还是"钩子没生效"。
+        /// ⇒ 分支处都打一个标记，一次运行就能定位。
+        /// </summary>
+        static void RegHookMark(string msg)
+        {
+            try
+            {
+                File.AppendAllText(
+                    Path.Combine(OcidLogPaths.RegHookDir, "reghook_mark.txt"),
+                    DateTime.Now.ToString("HH:mm:ss.fff") + "  " + msg + Environment.NewLine);
+            }
+            catch { }
+        }
+
+        static void TryInstallRegHook(Action<string>? log)
+        {
+            RegHookMark("enter");
+            try
+            {
+                if (Environment.GetEnvironmentVariable("OCID_REGHOOK") == "0")
+                { RegHookMark("skip: OCID_REGHOOK=0"); log?.Invoke("  注册表截获：已按 OCID_REGHOOK=0 关闭"); return; }
+
+                string baseDir = AppContext.BaseDirectory;
+                string archDir = Environment.Is64BitProcess ? "x64" : "Win32";
+                string? hookPath = new[] {
+                        Path.Combine(baseDir, "OcidRegHook.dll"),
+                        Path.Combine(baseDir, archDir, "OcidRegHook.dll"),
+                    }.FirstOrDefault(File.Exists);
+                if (hookPath == null)
+                {
+                    RegHookMark("skip: OcidRegHook.dll not found under " + baseDir);
+                    log?.Invoke("  注册表截获：未找到 OcidRegHook.dll（跳过；不影响其余流程）");
+                    return;
+                }
+                RegHookMark("found hook dll: " + hookPath);
+
+                // wcp.dll 必须已经在内存里，否则打不了它的导入表。
+                // 正常路径下 cbscore 在 CbsCoreInitialize 时就把它加载了；兜底再从栈目录显式预加载一次。
+                if (GetModuleHandleW("wcp.dll") == IntPtr.Zero)
+                {
+                    RegHookMark("wcp.dll not loaded yet; trying preload from stack dir");
+                    string? dir = string.IsNullOrEmpty(_lastStackDll) ? null : Path.GetDirectoryName(_lastStackDll);
+                    if (dir != null && File.Exists(Path.Combine(dir, "wcp.dll")))
+                        LoadLibraryW(Path.Combine(dir, "wcp.dll"));
+                    if (GetModuleHandleW("wcp.dll") == IntPtr.Zero)
+                    {
+                        RegHookMark("skip: wcp.dll still not loaded (stackDir=" + (dir ?? "null") + ")");
+                        log?.Invoke("  注册表截获：wcp.dll 尚未加载，无法打补丁（跳过）");
+                        return;
+                    }
+                    RegHookMark("preloaded wcp.dll");
+                    log?.Invoke("  注册表截获：从栈目录预加载了 wcp.dll");
+                }
+
+                IntPtr h = LoadLibraryW(hookPath);
+                if (h == IntPtr.Zero)
+                {
+                    RegHookMark("skip: LoadLibrary failed err=" + Marshal.GetLastWin32Error());
+                    log?.Invoke($"  注册表截获：加载 {hookPath} 失败（错误 {Marshal.GetLastWin32Error()}）"); return;
+                }
+                RegHookMark("hook dll loaded");
+
+                IntPtr fn = GetProcAddress(h, "OcidRegHook_Install");
+                if (fn == IntPtr.Zero)
+                { RegHookMark("skip: no OcidRegHook_Install export"); log?.Invoke("  注册表截获：钩子 DLL 里没有 OcidRegHook_Install"); return; }
+
+                string logPath = Environment.GetEnvironmentVariable("OCID_REGHOOK_LOG")
+                    ?? Path.Combine(OcidLogPaths.RegHookDir, "ocid_reghook.log");
+                string? mapPath = Environment.GetEnvironmentVariable("OCID_REGHOOK_MAP");
+                bool rewrite = Environment.GetEnvironmentVariable("OCID_REGHOOK_REWRITE") == "1";
+
+                var install = Marshal.GetDelegateForFunctionPointer<RegHookInstallFn>(fn);
+                int patched = install(logPath, mapPath, rewrite ? 1 : 0);
+
+                RegHookMark($"install returned {patched}  log={logPath}");
+                log?.Invoke($"  注册表截获：已装钩子（补丁 {patched} 个导入），rewrite={(rewrite ? "开" : "关")}");
+                log?.Invoke($"    日志: {logPath}");
+                log?.Invoke($"    映射: {(mapPath == null ? "（未设 ⇒ 只记录不改写）" : mapPath)}");
+            }
+            catch (Exception ex) { RegHookMark("EXCEPTION: " + ex.Message); log?.Invoke("  注册表截获：装钩子异常 " + ex.Message + "（已忽略）"); }
+        }
+
+        delegate int RegHookInstallFn(
+            [MarshalAs(UnmanagedType.LPWStr)] string? logPath,
+            [MarshalAs(UnmanagedType.LPWStr)] string? mappingPath,
+            int enableRewrite);
+
         // ────────────────────────────────────────────────────────────────
         // 会话
         // ────────────────────────────────────────────────────────────────
@@ -689,6 +807,13 @@ namespace OneCore_Image_Designer.Services
                     return null;
                 }
                 log?.Invoke("CbsCoreInitialize OK" + (_usedHostStackFallback ? "（宿主栈回退）" : "（镜像自带栈）"));
+
+                // 装注册表截获钩子 —— 时机很关键：
+                //   太早：wcp.dll 还没被 cbscore 加载 ⇒ 拿不到模块句柄、打不了它的导入表
+                //   太晚：WcpInitialize 可能已经跑过、把函数指针缓存下来了
+                // 此刻 cbscore 已初始化（wcp 已加载），而 WcpInitialize 要到
+                // CreateInstance/建会话时才调 ⇒ 正好。
+                TryInstallRegHook(log);
 
                 Guid iidSession = new("75207391-23F2-4396-85F0-8FDB879ED0ED");
                 hr = factory.CreateInstance(IntPtr.Zero, ref iidSession, out IntPtr pSession);

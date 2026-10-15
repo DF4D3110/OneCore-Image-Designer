@@ -444,7 +444,7 @@ namespace OneCore_Image_Designer.Services
                     }
                     else
                     {
-                        string resultFile = Path.Combine(Path.GetTempPath(), "ocid_postinstall_" + DateTime.Now.ToString("HHmmss") + ".log");
+                        string resultFile = OcidLogPaths.Stamped(OcidLogPaths.CbsDir, "postinstall", ".log");
                         var psi = new System.Diagnostics.ProcessStartInfo(cli)
                         {
                             UseShellExecute = false, CreateNoWindow = true,

@@ -1934,7 +1934,7 @@ namespace OneCore_Image_Designer.Services
             {
                 if (_logFilePath == null)
                 {
-                    string logDir = Path.Combine(Path.GetTempPath(), "OneCoreImageDesigner_Logs");
+                    string logDir = OcidLogPaths.MiscDir;
                     Directory.CreateDirectory(logDir);
                     _logFilePath = Path.Combine(logDir, $"component_extract_{DateTime.Now:yyyyMMdd_HHmmss}.log");
                 }

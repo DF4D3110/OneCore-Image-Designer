@@ -12,7 +12,7 @@ namespace OneCore_Image_Designer.Services
     {
         #region 日志
 
-        private static readonly string LogDir = Path.Combine(Path.GetTempPath(), "OneCoreImageDesigner_Logs");
+        private static readonly string LogDir = OcidLogPaths.MiscDir;
         private static readonly string LogFile = Path.Combine(LogDir, $"driver_extract_{DateTime.Now:yyyyMMdd_HHmmss}.log");
 
         private static void Log(string message)
