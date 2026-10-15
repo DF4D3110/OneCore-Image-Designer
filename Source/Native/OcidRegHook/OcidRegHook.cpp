@@ -30,6 +30,7 @@
 #include <windows.h>
 #include <winternl.h>
 #include <tlhelp32.h>      // CreateToolhelp32Snapshot / Module32FirstW —— 遍历所有已加载模块
+#include <shlwapi.h>       // StrStrIW —— 模块名过滤用（大小写不敏感的子串匹配）
 #include <stdio.h>
 #include <string>
 #include <vector>
@@ -145,6 +146,51 @@ static std::wstring HandleToPath(HANDLE h)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 调用方归属：这条注册表调用是【哪个模块】发出的？
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 【为什么需要】实测的教训：只给 wcp.dll 打补丁时，截到的 231,006 次调用
+// **全部**带离线前缀、活路径 0 次 —— 而那笔真正失败的写**根本没出现**。
+// 事后才查明 `DirectRegistryProvider`（SIL）被**编译进了多个 DLL**
+// （`CbsCore.dll`、`wcp.dll`、`updateagent.dll` …），所以那笔写来自别的模块。
+//
+// ⇒ 光有"路径"不够，必须知道"**谁**在调用"。在包装函数里取 `_ReturnAddress()`，
+//   再用 `GetModuleHandleExW(FROM_ADDRESS)` 反查模块名，一行日志就能点名。
+//
+// 同时这也是"让程序自己知道在做什么、东西在哪"落到钩子上的一步。
+static std::wstring CallerModule()
+{
+    void* ra = _ReturnAddress();
+    HMODULE m = NULL;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)ra, &m) || m == NULL)
+        return L"?";
+
+    wchar_t full[MAX_PATH] = { 0 };
+    if (GetModuleFileNameW(m, full, MAX_PATH) == 0) return L"?";
+    const wchar_t* base = wcsrchr(full, L'\\');
+    return std::wstring(base ? base + 1 : full);
+}
+
+// 只记录来自指定模块的调用（子串匹配，大小写不敏感）。空 ⇒ 不过滤。
+// 用途：日志动辄 66 MB、二十多万行，很难看；指定关心的模块就能一刀切下去。
+static std::wstring g_moduleFilter;
+// 只记录"写/删"类调用，跳过 NtCreateKey/NtOpenKey（它们占了绝大多数行且信息量低）
+static bool g_writesOnly = false;
+
+static bool ShouldLog(const std::wstring& mod, bool isWrite)
+{
+    if (g_writesOnly && !isWrite) return false;
+    if (!g_moduleFilter.empty())
+    {
+        if (mod.size() < g_moduleFilter.size()) return false;
+        if (StrStrIW(mod.c_str(), g_moduleFilter.c_str()) == NULL) return false;
+    }
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 原始函数指针（签名照 ntdll）
 // ─────────────────────────────────────────────────────────────────────────────
 typedef NTSTATUS (NTAPI *PFN_NtCreateKey)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
@@ -179,8 +225,10 @@ static NTSTATUS NTAPI Hook_NtCreateKey(PHANDLE ph, ACCESS_MASK am, POBJECT_ATTRI
     std::wstring want = oa ? UsToStr(oa->ObjectName) : L"(null)";
     std::wstring use  = want;
     if (g_enableRewrite) use = RewritePath(want);
-    LogW(L"[NtCreateKey] want=%s%s%s", want.c_str(),
-         (use != want ? L"  use=" : L""), (use != want ? use.c_str() : L""));
+    std::wstring mod = CallerModule();
+    if (ShouldLog(mod, false))
+        LogW(L"[NtCreateKey] by=%s  want=%s%s%s", mod.c_str(), want.c_str(),
+             (use != want ? L"  use=" : L""), (use != want ? use.c_str() : L""));
 
     UNICODE_STRING us;
     PUNICODE_STRING pcls = cls;
@@ -210,8 +258,10 @@ static NTSTATUS NTAPI Hook_NtCreateKeyTransacted(PHANDLE ph, ACCESS_MASK am, POB
     InterlockedIncrement(&g_callCount);
     std::wstring want = oa ? UsToStr(oa->ObjectName) : L"(null)";
     std::wstring use  = g_enableRewrite ? RewritePath(want) : want;
-    LogW(L"[NtCreateKeyTransacted] want=%s%s%s", want.c_str(),
-         (use != want ? L"  use=" : L""), (use != want ? use.c_str() : L""));
+    std::wstring mod = CallerModule();
+    if (ShouldLog(mod, false))
+        LogW(L"[NtCreateKeyTransacted] by=%s  want=%s%s%s", mod.c_str(), want.c_str(),
+             (use != want ? L"  use=" : L""), (use != want ? use.c_str() : L""));
 
     if (use != want && oa && oa->ObjectName)
     {
@@ -281,27 +331,38 @@ static NTSTATUS NTAPI Hook_NtOpenKeyEx(PHANDLE ph, ACCESS_MASK am, POBJECT_ATTRI
 }
 
 // 写值：这里最要紧 —— 它只有句柄没有路径，所以先用 NtQueryKey 把句柄反查成路径。
+// 同时记下【是哪个模块】在写 —— 只给 wcp.dll 打补丁时，那笔失败的写压根没出现，
+// 事后才查明 SIL 被编进了多个 DLL。by= 这一列就是用来直接点名的。
 static NTSTATUS NTAPI Hook_NtSetValueKey(HANDLE h, PUNICODE_STRING name,
                                          ULONG titleIdx, ULONG type, PVOID data, ULONG size)
 {
     InterlockedIncrement(&g_callCount);
-    std::wstring kp = HandleToPath(h);
-    LogW(L"[NtSetValueKey] key=%s  value=%s  type=%lu  size=%lu",
-         kp.c_str(), UsToStr(name).c_str(), type, size);
+    std::wstring mod = CallerModule();
+    if (ShouldLog(mod, true))
+    {
+        std::wstring kp = HandleToPath(h);
+        LogW(L"[NtSetValueKey] by=%s  key=%s  value=%s  type=%lu  size=%lu",
+             mod.c_str(), kp.c_str(), UsToStr(name).c_str(), type, size);
+    }
     return Real_NtSetValueKey(h, name, titleIdx, type, data, size);
 }
 
 static NTSTATUS NTAPI Hook_NtDeleteKey(HANDLE h)
 {
     InterlockedIncrement(&g_callCount);
-    LogW(L"[NtDeleteKey] key=%s", HandleToPath(h).c_str());
+    std::wstring mod = CallerModule();
+    if (ShouldLog(mod, true))
+        LogW(L"[NtDeleteKey] by=%s  key=%s", mod.c_str(), HandleToPath(h).c_str());
     return Real_NtDeleteKey(h);
 }
 
 static NTSTATUS NTAPI Hook_NtDeleteValueKey(HANDLE h, PUNICODE_STRING name)
 {
     InterlockedIncrement(&g_callCount);
-    LogW(L"[NtDeleteValueKey] key=%s  value=%s", HandleToPath(h).c_str(), UsToStr(name).c_str());
+    std::wstring mod = CallerModule();
+    if (ShouldLog(mod, true))
+        LogW(L"[NtDeleteValueKey] by=%s  key=%s  value=%s",
+             mod.c_str(), HandleToPath(h).c_str(), UsToStr(name).c_str());
     return Real_NtDeleteValueKey(h, name);
 }
 
@@ -408,6 +469,23 @@ int __stdcall OcidRegHook_Install(const wchar_t* logPath,
     LogOpen(logPath);
     LoadMappings(mappingPath);
     g_enableRewrite = (enableRewrite != 0);
+
+    // 日志降噪：只记指定模块 / 只记写删操作
+    // （一次 staging 能产生 20 万行、66 MB —— 不过滤基本没法读）
+    {
+        wchar_t buf[MAX_PATH] = { 0 };
+        if (GetEnvironmentVariableW(L"OCID_REGHOOK_MODULES", buf, MAX_PATH) > 0)
+        {
+            g_moduleFilter = buf;
+            LogW(L"[install] module filter = %s", buf);
+        }
+        wchar_t w[8] = { 0 };
+        if (GetEnvironmentVariableW(L"OCID_REGHOOK_WRITES_ONLY", w, 8) > 0 && w[0] == L'1')
+        {
+            g_writesOnly = true;
+            LogW(L"[install] writes only = on");
+        }
+    }
 
     // 先拿到 NtQueryKey 的真身（句柄反查路径要用）
     if (!Real_NtQueryKey)
