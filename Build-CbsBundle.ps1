@@ -58,6 +58,48 @@ foreach ($arch in @('x64', 'Win32')) {
 }
 if ($placed.Count -eq 0) { Write-Warning '  一个 NSudoAPI.dll 都没放进去 —— 提权会退化为不做提权' }
 
+# ── 3.5. 注册表截获钩子 OcidRegHook.dll（原生 x86）──
+#
+# 它是给 wcp.dll / CbsCore.dll 等的导入表打补丁用的原生 DLL，
+# CbsxService.TryInstallRegHook 会在 <BaseDirectory>\ 和 <BaseDirectory>\<x64|Win32>\ 里找它。
+#
+# 【为什么要放进正式脚本】此前它是我手工 cl 编出来的 —— 换台机器、或清一次生成就没了，
+# 于是"程序里明明有这段逻辑、运行时却悄悄跳过"。写进脚本才可复现。
+#
+# 【两个必须记住的编译要点】
+#   · .cpp 带 UTF-8 BOM 或加 /utf-8 —— 否则 cl 按代码页 936 读中文注释，乱码破坏语法
+#   · 需要 .def 文件 —— __stdcall + __declspec(dllexport) 导出的是修饰名
+#     (_OcidRegHook_Install@12)，而调用方按未修饰名查，不用 .def 就找不到
+Step "构建 OcidRegHook.dll (原生 x86)"
+$hookSrcDir = Join-Path $repo 'Source\Native\OcidRegHook'
+$hookOutDir = Join-Path $repo 'Source\Native\Output\x86'
+$hookDll    = Join-Path $hookOutDir 'OcidRegHook.dll'
+$hookBuilt  = $false
+if (Test-Path (Join-Path $hookSrcDir 'OcidRegHook.cpp')) {
+    New-Item -ItemType Directory -Path $hookOutDir -Force | Out-Null
+    $vcvars = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio', 'D:\Program Files\Microsoft Visual Studio' `
+                          -Recurse -File -Filter 'vcvars32.bat' -ErrorAction SilentlyContinue -Depth 6 |
+              Select-Object -First 1 -ExpandProperty FullName
+    if ($vcvars) {
+        $def = Join-Path $hookSrcDir 'OcidRegHook.def'
+        $cl  = "call `"$vcvars`" >nul 2>&1 && cd /d `"$hookSrcDir`" && " +
+               "cl /nologo /LD /O2 /W3 /EHsc /utf-8 /DUNICODE /D_UNICODE OcidRegHook.cpp " +
+               "/Fe:`"$hookDll`" /Fo:`"$hookOutDir\OcidRegHook.obj`" " +
+               "/link /MACHINE:X86 /DEF:`"$def`" ntdll.lib kernel32.lib"
+        & cmd /c $cl 2>&1 | Select-String -Pattern 'error|错误' | Select-Object -First 5 | ForEach-Object { Write-Host "    $_" }
+        $hookBuilt = Test-Path $hookDll
+        if (-not $hookBuilt) { Write-Warning '  cl 编译失败（见上面的 error）' }
+    } else { Write-Warning '  找不到 vcvars32.bat —— 未安装 MSVC 的 x86 工具链？' }
+} else { Write-Warning "  找不到源文件：$hookSrcDir\OcidRegHook.cpp" }
+
+if ($hookBuilt) {
+    Copy-Item $hookDll (Join-Path $cbsDir 'OcidRegHook.dll') -Force
+    $w32 = Join-Path $cbsDir 'Win32'
+    if (Test-Path $w32) { Copy-Item $hookDll (Join-Path $w32 'OcidRegHook.dll') -Force }
+} else {
+    Write-Warning '  OcidRegHook.dll 未生成 —— 注册表截获不可用（其余功能不受影响）'
+}
+
 # ── 4. 结果 ──
 $files = Get-ChildItem $cbsDir -Recurse -File
 $sizeMb = [math]::Round(($files | Measure-Object Length -Sum).Sum / 1MB, 1)
@@ -66,4 +108,5 @@ Write-Host "CBS 文件夹就绪：$cbsDir"
 Write-Host "  $($files.Count) 个文件 / $sizeMb MB"
 Write-Host "  CbsxCli.exe        : $(Test-Path (Join-Path $cbsDir 'CbsxCli.exe'))"
 Write-Host "  NSudoAPI.dll       : $($placed -join ', ')"
+Write-Host "  OcidRegHook.dll    : $(Test-Path (Join-Path $cbsDir 'OcidRegHook.dll'))"
 Write-Host "  自包含（免装 .NET）: $(Test-Path (Join-Path $cbsDir 'coreclr.dll'))"
