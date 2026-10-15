@@ -1,4 +1,4 @@
-﻿// OcidRegHook.dll —— 给 wcp.dll 的导入表打补丁，截获它对注册表的原生调用
+// OcidRegHook.dll —— 给 wcp.dll 的导入表打补丁，截获它对注册表的原生调用
 //
 // 【为什么需要它】
 // OCID 用自建 CBS 会话（自己 LoadLibrary cbscore.dll → wcp.dll）离线服务镜像时，
@@ -29,6 +29,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winternl.h>
+#include <tlhelp32.h>      // CreateToolhelp32Snapshot / Module32FirstW —— 遍历所有已加载模块
 #include <stdio.h>
 #include <string>
 #include <vector>
@@ -352,6 +353,52 @@ static void* PatchIAT(HMODULE mod, const char* dllName, const char* funcName, vo
 // ─────────────────────────────────────────────────────────────────────────────
 // 导出
 // ─────────────────────────────────────────────────────────────────────────────
+// 遍历【本进程所有已加载模块】逐个打补丁。
+//
+// 【为什么不是只打 wcp.dll】实测：只打 wcp.dll 时截获了 231,006 次注册表调用，
+// **全部**带离线前缀（`{bf1a281b-…}<drive>:/…`），一次活路径都没有 —— 也就是说
+// wcp.dll 这条路的路径解析本来就是对的。而那笔真正失败的写
+// （`SOFTWARE\Classes\Unknown\shell` 默认值）**根本没出现在日志里**；
+// 失败栈是 SIL 的 `DirectRegistryProvider::SysSetValueKey`
+// ⇒ 那次调用是从**别的模块**发出的（cbscore.dll / 其它 SIL 组件 / 或 NtCreateKeyTransacted）。
+// ⇒ 所以必须遍历所有模块。
+//
+// 注意：跳过我们自己（我们最终调的是保存下来的真身指针，正常情况下不会绕回来，
+// 但跳过能彻底避免递归的隐患）。
+static int PatchAllModules(const char* dllName,
+                           const char* const* funcs,
+                           void* const* hooks,
+                           void** const* reals,
+                           int count)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+    if (snap == INVALID_HANDLE_VALUE)
+    { LogW(L"[install] CreateToolhelp32Snapshot failed: %lu", GetLastError()); return 0; }
+
+    int total = 0;
+    MODULEENTRY32W me;
+    ZeroMemory(&me, sizeof(me));
+    me.dwSize = sizeof(me);
+
+    for (BOOL ok = Module32FirstW(snap, &me); ok; ok = Module32NextW(snap, &me))
+    {
+        if (_wcsicmp(me.szModule, L"OcidRegHook.dll") == 0) continue;   // 跳过自己
+
+        int hit = 0;
+        for (int i = 0; i < count; ++i)
+        {
+            if (PatchIAT((HMODULE)me.modBaseAddr, dllName, funcs[i], hooks[i], reals[i])) ++hit;
+        }
+        if (hit > 0)
+        {
+            LogW(L"[install] patched %d import(s) in %s", hit, me.szModule);
+            total += hit;
+        }
+    }
+    CloseHandle(snap);
+    return total;
+}
+
 extern "C" __declspec(dllexport)
 int __stdcall OcidRegHook_Install(const wchar_t* logPath,
                                   const wchar_t* mappingPath,
@@ -362,9 +409,6 @@ int __stdcall OcidRegHook_Install(const wchar_t* logPath,
     LoadMappings(mappingPath);
     g_enableRewrite = (enableRewrite != 0);
 
-    HMODULE wcp = GetModuleHandleW(L"wcp.dll");
-    if (!wcp) { LogW(L"[install] wcp.dll is NOT loaded yet — call me after loading it"); return -1; }
-
     // 先拿到 NtQueryKey 的真身（句柄反查路径要用）
     if (!Real_NtQueryKey)
     {
@@ -372,26 +416,52 @@ int __stdcall OcidRegHook_Install(const wchar_t* logPath,
         Real_NtQueryKey = (PFN_NtQueryKey)GetProcAddress(ntdll, "NtQueryKey");
     }
 
-    struct Item { const char* fn; void* hook; void** real; };
-    Item items[] = {
-        { "NtCreateKey",           (void*)Hook_NtCreateKey,           (void**)&Real_NtCreateKey },
-        { "NtCreateKeyTransacted", (void*)Hook_NtCreateKeyTransacted, (void**)&Real_NtCreateKeyTransacted },
-        { "NtOpenKey",             (void*)Hook_NtOpenKey,             (void**)&Real_NtOpenKey },
-        { "NtOpenKeyEx",           (void*)Hook_NtOpenKeyEx,           (void**)&Real_NtOpenKeyEx },
-        { "NtSetValueKey",         (void*)Hook_NtSetValueKey,         (void**)&Real_NtSetValueKey },
-        { "NtDeleteKey",           (void*)Hook_NtDeleteKey,           (void**)&Real_NtDeleteKey },
-        { "NtDeleteValueKey",      (void*)Hook_NtDeleteValueKey,      (void**)&Real_NtDeleteValueKey },
+    static const char* funcs[] = {
+        "NtCreateKey", "NtCreateKeyTransacted", "NtOpenKey", "NtOpenKeyEx",
+        "NtSetValueKey", "NtDeleteKey", "NtDeleteValueKey",
     };
+    static void* hooks[] = {
+        (void*)Hook_NtCreateKey, (void*)Hook_NtCreateKeyTransacted, (void*)Hook_NtOpenKey,
+        (void*)Hook_NtOpenKeyEx, (void*)Hook_NtSetValueKey, (void*)Hook_NtDeleteKey,
+        (void*)Hook_NtDeleteValueKey,
+    };
+    static void** reals[] = {
+        (void**)&Real_NtCreateKey, (void**)&Real_NtCreateKeyTransacted, (void**)&Real_NtOpenKey,
+        (void**)&Real_NtOpenKeyEx, (void**)&Real_NtSetValueKey, (void**)&Real_NtDeleteKey,
+        (void**)&Real_NtDeleteValueKey,
+    };
+    const int N = (int)(sizeof(funcs) / sizeof(funcs[0]));
+
+    // 默认遍历所有已加载模块；OCID_REGHOOK_ONLY_WCP=1 时退回"只打 wcp.dll"（对照/排障用）
+    bool onlyWcp = false;
+    {
+        wchar_t buf[8] = { 0 };
+        if (GetEnvironmentVariableW(L"OCID_REGHOOK_ONLY_WCP", buf, 8) > 0 && buf[0] == L'1')
+            onlyWcp = true;
+    }
 
     int patched = 0;
-    for (int i = 0; i < (int)(sizeof(items) / sizeof(items[0])); ++i)
+    if (onlyWcp)
     {
-        void* real = PatchIAT(wcp, "ntdll.dll", items[i].fn, items[i].hook, items[i].real);
-        if (real) { ++patched; LogW(L"[install] patched ntdll!%S", items[i].fn); }
-        else      { LogW(L"[install] NOT patched (not imported?): ntdll!%S", items[i].fn); }
+        HMODULE wcp = GetModuleHandleW(L"wcp.dll");
+        if (!wcp) { LogW(L"[install] wcp.dll is NOT loaded yet"); return -1; }
+        for (int i = 0; i < N; ++i)
+        {
+            void* real = PatchIAT(wcp, "ntdll.dll", funcs[i], hooks[i], reals[i]);
+            if (real) { ++patched; LogW(L"[install] patched ntdll!%S (wcp only)", funcs[i]); }
+            else      { LogW(L"[install] NOT imported by wcp.dll: ntdll!%S", funcs[i]); }
+        }
     }
-    LogW(L"[install] done: %d patched, rewrite=%s, mappings=%zu",
-         patched, (g_enableRewrite ? L"ON" : L"off"), g_mappings.size());
+    else
+    {
+        patched  = PatchAllModules("ntdll.dll",     funcs, hooks, reals, N);
+        patched += PatchAllModules("advapi32.dll",  funcs, hooks, reals, N);
+        patched += PatchAllModules("kernelbase.dll", funcs, hooks, reals, N);
+    }
+
+    LogW(L"[install] done: %d patched, scope=%s, rewrite=%s, mappings=%zu",
+         patched, (onlyWcp ? L"wcp.dll only" : L"all loaded modules"),
+         (g_enableRewrite ? L"ON" : L"off"), g_mappings.size());
     return patched;
 }
 
