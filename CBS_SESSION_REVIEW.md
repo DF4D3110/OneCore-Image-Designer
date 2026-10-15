@@ -197,3 +197,180 @@ F:\...\COMPONENTS  →  17,039,360 B  (17 MB)
 2. **宿主 CBS 栈（10.0.19041）能否装 6.2.8061 的包** —— 未验证（此前 6.2.8400 栈 `CbsCoreInitialize` 失败 `0x8007007F`，只有宿主栈能初始化，原因未查清）
 3. **三条出路里哪条可行** —— 未验证
 4. **`Feature Pack` 级包能否在空店上被 DISM 装** —— 未验证（`add-package` 报了 `not a type`，但那是 Product 级包；Feature Pack 级没单独试过）
+
+---
+
+## 八、后续进展（同日续做）—— 权限是分层的，真 TrustedInstaller 才够
+
+### 8.1 关键认知：权限逐级递进
+
+| 身份 | 走到哪一步失败 |
+|---|---|
+| 管理员 + `SeBackup/Restore/TakeOwnership/Security` + `takeown`/`icacls` | 卡在**驱动组件**的 `q-unstage`（更早） |
+| **LocalSystem**（`schtasks /ru SYSTEM`、或 NSudo `SYSTEM`） | 能过 `StageFile` + `Doqe install`；卡在 **Commit 写离线 hive 的注册表键** |
+| **TrustedInstaller**（NSudo `TI` 模式） | 才**拥有**那些键 ⇒ 这才是正解 |
+
+失败点原文（LocalSystem）：
+```
+CSI  STATUS_ACCESS_DENIED from DirectRegistryProvider::SysSetValueKey(
+       key = "\REGISTRY\MACHINE\{bf1a281b-…}M:/Windows/System32/config/SOFTWARE
+                \Classes\Unknown\shell", data = "openas")
+     → CKey::SetValue → CComponentStore::ApplyTransactionNow
+     → ICSITransaction::Commit → E_ACCESSDENIED
+```
+
+**⇒ 是【注册表键的 ACL】归 TrustedInstaller，不是文件 ACL。** 所以 `takeown`/`icacls` 再多也没用。
+
+### 8.2 为什么 DISM 能行
+
+```
+DISM：dism.exe → CbsProvider.dll → 委托给【Windows Modules Installer 服务】
+                                    （TiWorker.exe，跑在 TrustedInstaller 身份）
+我们：自己 LoadLibrary(cbscore.dll) ⇒ 身份 = 我们的进程
+⇒ 所以必须自己持有 TrustedInstaller token
+```
+
+### 8.3 NSudo 集成（已打通）
+
+- **项目里已有 C# 封装**：`MobilePackageGen\MobilePackageGen.Common\NSudo\NSudoInstance.cs`
+  （namespace `M2.NSudo`，调 `NSudoAPI.dll` 的 `NSudoCreateProcess`）。
+- **构建**：只编译 `Source\Native\NSudoSDK\NSudoAPI.vcxproj`（+ 依赖 `Mile.Library`、`NSudoSDK`）
+  —— 这样绕开 `MINT\MINT.h` 与新版 SDK 的 `C2011`（只有 `NSudoDevilMode` /
+  `MouriOptimizationPlugin` 两个插件项目报）。产物 `Output\Binaries\Release\{x64,Win32}\NSudoAPI.dll`。
+  ARM64 因本机没装 v143 ARM64 工具集而失败。
+- **运行时位置**：`<程序目录>\x64\NSudoAPI.dll`（x86 进程用 `Win32\`）——**必须按架构放**，
+  否则 x86 进程会去加载 x64 的 DLL 而失败。
+
+### 8.4 修掉的一批"静默错误"
+
+`ElevationHelper` 里 NSudo 枚举常量**全部错位**，而且错得隐蔽（都是"看起来合理"的数字）：
+
+| 常量 | 原值 | 原值实际含义 | 正确值 |
+|---|---|---|---|
+| `NSUDO_USER_MODE_TRUSTED_INSTALLER` | 3 | **CURRENT_USER** | **1** |
+| `NSUDO_USER_MODE_CURRENT` | 1 | **TRUSTED_INSTALLER** | **3** |
+| mandatory label | 3 | MEDIUM_PLUS | **0（不改变）** |
+| priority | 1 | BELOW_NORMAL | **2** |
+| show window | 0 | DEFAULT | **2** |
+
+**⇒ 一个写着"以 TrustedInstaller 启动"的调用，实际会以【当前用户】启动** —— 完全无声地失败。
+
+另外 `IsTrustedInstaller()` 判的是 token 的 **User** SID，但以 TI 运行时 **User 仍是
+`nt authority\system`**（TI 服务进程跑在 SYSTEM 下），TI 的身份出现在**组**里：
+```
+NT SERVICE\TrustedInstaller  S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464
+                             Group owner, Enabled
+```
+⇒ 原实现**永远返回 false**。现在判组，并加了 `IsSystem()`。
+
+**⇒ 教训：`whoami` 的用户名不可信，要看 token 的组。**
+
+### 8.5 新增能力
+
+| 接口 | 用途 |
+|---|---|
+| `ElevationHelper.RunAs(identity, cmdline, ...)` | 通用：以 TI / SYSTEM / 当前用户跑任意命令 |
+| `ElevationHelper.RunAsTrustedInstaller(exe, args, ...)` | 便捷重载 |
+| `ElevationHelper.EnsureTrustedInstallerOrRelaunch(log)` | 入口级：不是 TI 就用 NSudo 重启自己，`OCID_ELEVATED_TI=1` 防递归 |
+| `CbsxCli` | 装包路径自动先提权到 TI；`/ep` `/dry` `/?` `/finish` `/postinstall` 不提权（`/finish` 靠 `/waitfor:<pid>`；`/postinstall` 走 DISM 自己会委托） |
+| `keyform_verify --as-ti` / `--whoami` | 测试用自我提权 / 报告身份 |
+
+### 8.6 顺带修掉的 hive 泄漏
+
+`CbsSafety.FindResidualHives` 只匹配 WCP 前缀 `{bf1a281b-…}`，**我们自己的
+`OCID_OfflineHive_*` 完全不在范围内** ⇒ 一次会话实测泄漏 **69 个**。
+已加 `FindAllOfflineHives()` / `SweepAllOfflineHives()`，并接进 `RunCleanup()` 的最后一道网
+（原来那里有 `if (_touchedRoots.Count == 0) return;`，会把兜底整个跳过 —— 这才是泄漏根因）。
+harness 加 `--hivesweep`，实测 **69 → 0**。
+
+### 8.7 实测：TI 下的 8061 ARM staging
+
+```
+身份: TrustedInstaller（NSudo）
+CbsCoreInitialize OK（镜像自带栈）
+会话已初始化 (bootDrive="M:", winDir="M:\Windows")
+Plan: Package 行数: 946
+COMPONENTS hive: 256 KB → 2.3 MB → 4.4 MB → 7.2 MB …（CBS 树在建）
+日志: Stage / StageFile / Doqe [install] deployment 大量出现，无 E_ACCESSDENIED
+```
+
+**⇒ 已确认：跨架构（x86 栈服务 arm 镜像）+ TrustedInstaller 身份，CBS 离线 staging 正常推进。**
+
+### 8.8 环境清理
+
+- 离线 hive：69 → 0（`--hivesweep`）
+- 挂载：只保留 `M:`（8061 ARM）、`F:`（8400 x86）、`J:`（8400 原始）；ISO 全卸
+- 删除 9 个死 VHD（`cbs_e2e2` / `cbs_clean` / `cbs_workx` / `cbs_8061x86` / `cbs_arm8061*` …）
+
+---
+
+## 九、卡点精确化：Commit 阶段的一个注册表写（三种身份都一样）
+
+### 9.1 实际成果（至今最好的一次）
+
+身份 = **TrustedInstaller**（NSudo TI），x86 进程 + 8061 自带 x86 服务栈 → **arm** 镜像 `M:`：
+
+```
+CbsCoreInitialize OK · 会话已初始化 (bootDrive="M:", winDir="M:\Windows")
+Plan: Package 行数: 946
+Stage / StageFile / Doqe [install] 大量成功
+COMPONENTS hive : 256 KB → 8448 KB
+WinSxS          : 86 → 4279 个组件 / 18136 个文件
+M: 已用         : 6.01 GB
+⇒ 但最后一次 Commit 失败，事务未提交（DISM 仍只认 CompatPack 为 Installed）
+```
+
+**⇒ staging 的**主体是成功的**；失败的只是最后一笔提交。**
+
+### 9.2 失败点（管理员 / SYSTEM / TrustedInstaller 三者逐字相同）
+
+```
+CSI STATUS_ACCESS_DENIED from DirectRegistryProvider::SysSetValueKey(
+      key = "\REGISTRY\MACHINE\{bf1a281b-…}M:/Windows/System32/config/SOFTWARE
+               \Classes\Unknown\shell",
+      vn = "", ti = 0, t = 0, data = "openas")
+  → CKey::SetValue
+  → CComponentStore::PendActiveTransaction
+  → CComponentStore::ApplyTransactionNow
+  → ICSITransaction::Commit → E_ACCESSDENIED
+```
+
+### 9.3 已排除的解释
+
+1. **不是键 ACL**：对照 8400 的 `J:` / `F:`，该键 `所有者=NT AUTHORITY\SYSTEM`，
+   `Administrators` 与 `SYSTEM` **都有 FullControl**，无 Deny。
+2. **不是"键不可创建"**：在**全新 apply 的镜像**（无任何占用）上加载 SOFTWARE hive,
+   `New-Item HKLM\…\Classes\Unknown\shell` **成功**
+   （`Classes\Unknown` 在 8061 基线里本来不存在 —— CBS 是要**创建**它）。
+3. **不是 hive 文件 ACL**：SOFTWARE 文件所有者已 takeown 成 `BUILTIN\Administrators`。
+4. **不是 token 身份**：如上，三种身份都停在同一处。
+
+### 9.4 尚存线索
+
+- 日志里出现 `LockComponentPath … path: "\??\x:\Windows\WinSxS\x86_microsoft-windows-servicingstack_…"`，
+  CBS 把组件路径算成 `x:`，而镜像在 `M:`。
+  ⚠ 已查 `CbsxService.DeriveBootDrive("M:\Windows")` → `"M:"`（正确），
+  `bootDrive` 日志也是 `"M:"` ⇒ 这个 `x:` 应属 CBS 对离线镜像的内部规范表示，**不是我们的 bug**，但值得留意。
+- 失败前 Windows 把该 SOFTWARE hive 交由 `TiWorker` / `TrustedInstaller` 持有过
+  （残留 8 个 `{bf1a281b-…}` 挂载）。
+
+### 9.5 决定性对照实验（进行中）
+
+**同一个 build（8061）的 x86 镜像**（`E:\x868061\fbl_core1_soc.8061.0.110803-1830_x86fre_client_EN-US_DVD.iso`
+→ apply 到 `Q:`，同形态：空店 + `Q:\packages`），跑**完全相同**的流程，但**无跨架构**。
+
+- **成功** ⇒ 根源是"**跨架构**服务 arm 镜像"（x86 进程 + x86 栈 + arm 镜像这个组合）
+- **同样失败** ⇒ 是"我们自建 CBS 会话"这条路的**通用问题**（与架构无关）
+
+脚本：`C:\Users\DELL\Documents\deepseek-harness\default-workspace\control_x86.ps1`
+
+**⇒ 参考：x86/amd64 镜像（6.2.8220 / 6.2.8400 / 6.3.9600）的原生 CBS 过去验证是能装通的，
+所以"跨架构"是目前最可疑的差异点。**
+
+### 9.6 踩坑记录（脚本层面）
+
+**写 `.ps1` 给 `powershell.exe`（5.1）跑时，若文件是 UTF-8 **无 BOM** 且含中文，
+5.1 会按 ANSI 读成乱码，乱码可能**吞掉后续行**（实测 `$iso = '...'` 赋值直接失效，
+变量变 null）。⇒ **给 5.1 的脚本用纯 ASCII，或写成 UTF-8 **带 BOM**。**
+
+
