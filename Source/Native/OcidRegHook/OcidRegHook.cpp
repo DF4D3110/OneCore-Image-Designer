@@ -341,6 +341,64 @@ static NTSTATUS NTAPI Hook_NtOpenKeyEx(PHANDLE ph, ACCESS_MASK am, POBJECT_ATTRI
 // 离线前缀，却仍然无法判断"到底哪一次调用返回了 ACCESS_DENIED"。
 // 返回状态必须记：它才是把"请求"和"失败"对应起来的那一环。
 //   st=0x00000000 成功；st=0xC0000022 = STATUS_ACCESS_DENIED
+// ─────────────────────────────────────────────────────────────────────────────
+// 兜底修法：句柄只有读权限时，用路径重新以写权限打开再写一次
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 【为什么需要】根因已用 `--regprobe` 秒级证实：**CBS/WCP 手里的那个键句柄只有读权限**，
+// 它却用它去写 ⇒ `NtSetValueKey` 必然返回 `STATUS_ACCESS_DENIED (0xC0000022)`。
+// 同一个离线键，**只读句柄写 → 被拒；读写句柄写 → 成功**（逐字对照过）。
+//
+// 这也解释了为什么"同一个父键的其它值都写成功、只有 `Classes\Unknown\shell` 失败"：
+// 那些是它**新建**的键（顺带拿到写权限），而 `shell` 是**已存在**的键、
+// 它先前**只读打开**（用于"检查值是否存在"）并缓存了句柄，然后复用它去写。
+//
+// 【本修法的性质】只在**失败之后**兜底重试，**成功路径完全不变** ⇒ 风险极小。
+static NTSTATUS RetrySetValueWithWriteHandle(const std::wstring& keyPath,
+                                             PUNICODE_STRING name, ULONG titleIdx,
+                                             ULONG type, PVOID data, ULONG size)
+{
+    if (keyPath.empty() || keyPath[0] != L'\\')
+    {
+        LogW(L"[RETRY] abort: keyPath not absolute ('%s')", keyPath.c_str());
+        return (NTSTATUS)0xC0000022;
+    }
+    if (!Real_NtOpenKey)
+    {
+        // ⚠ 这个假象很容易把结论带偏：指针为空时这里会"静默失败"，
+        //   表现与"打开成功但写被拒"一模一样，都是 0xC0000022。
+        LogW(L"[RETRY] abort: Real_NtOpenKey is NULL");
+        return (NTSTATUS)0xC0000022;
+    }
+
+    UNICODE_STRING us;
+    RtlInitUnicodeString(&us, keyPath.c_str());
+
+    // 不用 InitializeObjectAttributes 宏，手工填，避免宏展开依赖
+    OBJECT_ATTRIBUTES oa;
+    oa.Length = sizeof(OBJECT_ATTRIBUTES);
+    oa.RootDirectory = NULL;
+    oa.ObjectName = &us;
+    oa.Attributes = OBJ_CASE_INSENSITIVE;
+    oa.SecurityDescriptor = NULL;
+    oa.SecurityQualityOfService = NULL;
+
+    HANDLE hk = NULL;
+    NTSTATUS stOpen = Real_NtOpenKey(&hk, KEY_SET_VALUE, &oa);
+    if (stOpen < 0)
+    {
+        // 打开就失败了 —— 必须区分出来，否则会误判成"写被拒"
+        LogW(L"[RETRY] open FAILED st=0x%08X  key=%s", (unsigned)stOpen, keyPath.c_str());
+        return stOpen;
+    }
+
+    NTSTATUS st = Real_NtSetValueKey(hk, name, titleIdx, type, data, size);
+    CloseHandle(hk);
+    // 打开成功、写被拒 ⇒ 强烈指向"内核层保护 / 事务语义"，而不是句柄权限
+    LogW(L"[RETRY] open=0  write=0x%08X  key=%s", (unsigned)st, keyPath.c_str());
+    return st;
+}
+
 static NTSTATUS NTAPI Hook_NtSetValueKey(HANDLE h, PUNICODE_STRING name,
                                          ULONG titleIdx, ULONG type, PVOID data, ULONG size)
 {
@@ -349,6 +407,17 @@ static NTSTATUS NTAPI Hook_NtSetValueKey(HANDLE h, PUNICODE_STRING name,
     bool logIt = ShouldLog(mod, true);
 
     NTSTATUS st = Real_NtSetValueKey(h, name, titleIdx, type, data, size);
+
+    // ★ 兜底：被拒就换一个【有写权限】的句柄重试一次。
+    //   只在失败后走这里，成功路径不受影响。
+    if (st == (NTSTATUS)0xC0000022)
+    {
+        std::wstring kp0 = HandleToPath(h);
+        NTSTATUS st2 = RetrySetValueWithWriteHandle(kp0, name, titleIdx, type, data, size);
+        LogW(L"[NtSetValueKey] RETRY-writehand st=0x%08X -> 0x%08X  key=%s  value=%s",
+             (unsigned)st, (unsigned)st2, kp0.c_str(), UsToStr(name).c_str());
+        st = st2;
+    }
 
     if (logIt || st < 0)
     {
@@ -522,11 +591,25 @@ int __stdcall OcidRegHook_Install(const wchar_t* logPath,
         }
     }
 
-    // 先拿到 NtQueryKey 的真身（句柄反查路径要用）
-    if (!Real_NtQueryKey)
+    // ★ 主动从 ntdll 解析【所有】真身指针 —— 不要依赖"某个模块的 IAT 恰好被我们打过补丁时
+    //   顺带把真身存下来"。实测吃过亏：`RetrySetValueWithWriteHandle` 走的是 `Real_NtOpenKey`，
+    //   如果它是空的，重试会**静默失败**并返回 0xC0000022 —— 与"打开成功但写被拒"表现一样，
+    //   足以把结论带偏一整轮。
     {
         HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-        Real_NtQueryKey = (PFN_NtQueryKey)GetProcAddress(ntdll, "NtQueryKey");
+        if (ntdll)
+        {
+            if (!Real_NtQueryKey)           Real_NtQueryKey           = (PFN_NtQueryKey)GetProcAddress(ntdll, "NtQueryKey");
+            if (!Real_NtCreateKey)          Real_NtCreateKey          = (PFN_NtCreateKey)GetProcAddress(ntdll, "NtCreateKey");
+            if (!Real_NtCreateKeyTransacted)Real_NtCreateKeyTransacted= (PFN_NtCreateKeyTransacted)GetProcAddress(ntdll, "NtCreateKeyTransacted");
+            if (!Real_NtOpenKey)            Real_NtOpenKey            = (PFN_NtOpenKey)GetProcAddress(ntdll, "NtOpenKey");
+            if (!Real_NtOpenKeyEx)          Real_NtOpenKeyEx          = (PFN_NtOpenKeyEx)GetProcAddress(ntdll, "NtOpenKeyEx");
+            if (!Real_NtSetValueKey)        Real_NtSetValueKey        = (PFN_NtSetValueKey)GetProcAddress(ntdll, "NtSetValueKey");
+            if (!Real_NtDeleteKey)          Real_NtDeleteKey          = (PFN_NtDeleteKey)GetProcAddress(ntdll, "NtDeleteKey");
+            if (!Real_NtDeleteValueKey)     Real_NtDeleteValueKey     = (PFN_NtDeleteValueKey)GetProcAddress(ntdll, "NtDeleteValueKey");
+        }
+        LogW(L"[install] reals: NtQueryKey=%p NtOpenKey=%p NtSetValueKey=%p NtCreateKey=%p",
+             Real_NtQueryKey, Real_NtOpenKey, Real_NtSetValueKey, Real_NtCreateKey);
     }
 
     static const char* funcs[] = {
