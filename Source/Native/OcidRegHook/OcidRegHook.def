@@ -1,0 +1,9 @@
+﻿LIBRARY OcidRegHook
+
+EXPORTS
+    ; __stdcall 的 __declspec(dllexport) 会导出修饰名（_OcidRegHook_Install@12），
+    ; 而调用方是用 GetProcAddress(h, "OcidRegHook_Install") 找的 —— 名字对不上就拿不到函数。
+    ; 这个 .def 把未修饰名一并导出，两边才接得上。
+    OcidRegHook_Install
+    OcidRegHook_Uninstall
+    OcidRegHook_Stats
