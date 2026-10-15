@@ -284,63 +284,41 @@ namespace OneCore_Image_Designer.Services
         const string OurHivePrefix = "OCID_OfflineHive_";
 
         /// <summary>
-        /// 枚举【全部】离线 hive —— WCP 的 `{bf1a281b-…}` **以及**我们自己的 `OCID_OfflineHive_*`。
+        /// 我们**所有**自建 hive 名字的公共前缀。
+        ///
+        /// 【为什么不能只认 `OCID_OfflineHive_`】实测吃过亏：临时排障时用了
+        /// `OCID_P_` / `OCID_P2_` / `OCID_WA_` / `OCID_ACL_` / `OCID_CP_` / `OCID_CHK_`
+        /// 这些一次性名字，它们**全都挂住了镜像的 SOFTWARE hive 且卸不掉**：
+        ///   · `--hivesweep` 扫不到（前缀不匹配）
+        ///   · `reg unload` 又失败（`reg.exe` 不启用 SeBackup/SeRestorePrivilege，
+        ///     只有我们自己的 `RegUnLoadKey` + 已启用特权才行）
+        /// ⇒ 于是镜像被锁死，后续 `ICbsSession::Initialize` 报
+        /// `0x80070020 ERROR_SHARING_VIOLATION`。
+        /// 所以判据放宽到 `OCID_` —— 凡是我们自己起的名字都能被兜住。
+        /// </summary>
+        const string OurHiveAnyPrefix = "OCID_";
+
+        /// <summary>
+        /// 枚举【全部】离线 hive —— WCP 的 `{bf1a281b-…}` **以及**我们自己的 `OCID_*`。
         ///
         /// 【为什么必须单独有这个方法】<see cref="FindResidualHives"/> 只认 WCP 前缀，
         /// 我们自己的 `OCID_OfflineHive_*` 完全不在匹配范围内。实测在一次会话里泄漏了 **69 个**
         /// —— 因为多条路径都会 `RegLoadKey`（枚举包、离线注册表浏览、预修 hive 键 ACL 等），
         /// 而收尾的兜底只扫 WCP 前缀，于是它们一直挂在 HKLM 下。
         ///
-        /// 泄漏的后果是实打实的：下次对同一镜像操作时会被"残留挂载"挡住，
-        /// 而且 `RegUnLoadKey` 也可能因为别处还持有而失败 —— 只能在源头清干净。
+        /// 实现委托给 <see cref="OfflineHiveLedger"/>：那里给出了**结构化**的挂载地图
+        /// （谁挂的、挂在哪、hive 文件是谁、是不是临时副本），比只回一堆名字有用得多。
         /// </summary>
         public static List<string> FindAllOfflineHives()
-        {
-            var found = new List<string>();
-            try
-            {
-                var hklm = Microsoft.Win32.Registry.LocalMachine;
-                using var k = hklm.OpenSubKey("");
-                if (k == null) return found;
-                foreach (var name in k.GetSubKeyNames())
-                    if (name.StartsWith(WcpHivePrefix, StringComparison.OrdinalIgnoreCase)
-                        || name.StartsWith(OurHivePrefix, StringComparison.OrdinalIgnoreCase))
-                        found.Add(name);
-            }
-            catch { }
-            return found;
-        }
+            => OfflineHiveLedger.Enumerate().Select(m => m.MountKey).ToList();
 
         /// <summary>
         /// 卸载【全部】离线 hive（WCP + 我们自己的），返回【仍挂着】的数量。
         /// 这是收尾的最后一道网：不管是谁挂的、挂在哪一步，退出前都清掉。
+        /// 实现委托给 <see cref="OfflineHiveLedger.ReleaseAll"/>。
         /// </summary>
         public static int SweepAllOfflineHives(Action<string>? log = null)
-        {
-            try
-            {
-                var before = FindAllOfflineHives();
-                if (before.Count == 0) { log?.Invoke("  无残留离线 hive"); return 0; }
-                try { PrivilegeHelper.EnableServicingPrivileges(log); } catch { }
-
-                // 先按名单逐个卸；再对枚举到的每一个重试一遍（第一次可能被持有而失败）
-                foreach (var name in before)
-                {
-                    try { RegUnLoadKey(new IntPtr(HKEY_LOCAL_MACHINE), name); } catch { }
-                }
-                var after = FindAllOfflineHives();
-                foreach (var name in after)
-                {
-                    try { RegUnLoadKey(new IntPtr(HKEY_LOCAL_MACHINE), name); } catch { }
-                }
-                after = FindAllOfflineHives();
-                log?.Invoke($"  清空离线 hive: {before.Count} → {after.Count}");
-                if (after.Count > 0)
-                    LastCleanupWarning = $"仍有 {after.Count} 个离线 hive 未卸载（例 {after[0]}），可能需要重启。";
-                return after.Count;
-            }
-            catch (Exception ex) { log?.Invoke("  清空离线 hive 异常: " + ex.Message); return -1; }
-        }
+            => OfflineHiveLedger.ReleaseAll(log);
 
         /// <summary>登记一个退出时必定执行的清理动作（幂等）。</summary>
         public static void RegisterCleanup(Action a)
@@ -435,6 +413,9 @@ namespace OneCore_Image_Designer.Services
 
         /// <summary>上次清理留下的警告（无法卸载时非空），供界面/日志提示。</summary>
         public static string? LastCleanupWarning { get; private set; }
+
+        /// <summary>供其它收尾路径（如 <see cref="OfflineHiveLedger.ReleaseAll"/>）写入清理警告。</summary>
+        public static void NoteCleanupWarning(string warning) => LastCleanupWarning = warning;
 
         /// <summary>
         /// 把工作包在 using + 兜底清理里。工作抛异常时也保证清理执行。

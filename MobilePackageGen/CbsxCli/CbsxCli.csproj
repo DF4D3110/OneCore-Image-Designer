@@ -42,6 +42,8 @@
     <Compile Include="..\..\Services\SkuAssemblyService.cs" />
     <Compile Include="..\..\Services\CbsxService.cs" />
     <Compile Include="..\..\Services\CbsSafety.cs" />
+    <!-- 离线 hive 挂载台账（CbsSafety 的枚举/清理已委托给它） -->
+    <Compile Include="..\..\Services\OfflineHiveLedger.cs" />
     <Compile Include="..\..\Services\FinishImageService.cs" />
     <Compile Include="..\..\Services\PostInstallService.cs" />
     <Compile Include="..\..\Services\DismServicingService.cs" />

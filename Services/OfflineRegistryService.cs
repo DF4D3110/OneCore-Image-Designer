@@ -207,6 +207,11 @@ namespace OneCore_Image_Designer.Services
                     throw new System.ComponentModel.Win32Exception(result, errorMsg);
                 }
 
+                // 登记进挂载台账 —— 让程序自己知道"我挂在哪、挂的是副本还是原件"。
+                // ⚠ 注意挂的是**临时目录里的副本**（上面 File.Copy），不是镜像里的真 hive；
+                //   而 CBS 挂的是**真 hive**。台账把这两者分开标注，避免误判"我改过了为什么没生效"。
+                OfflineHiveLedger.RecordOurs(_subKeyName, _tempHivePath, "离线注册表浏览/编辑（副本）");
+
                 Log($"打开根键: HKLM\\{_subKeyName}, writable={writable}");
                 _rootKey = Registry.LocalMachine.OpenSubKey(_subKeyName, writable);
                 if (_rootKey == null)
@@ -692,6 +697,7 @@ namespace OneCore_Image_Designer.Services
                 if (!string.IsNullOrEmpty(_subKeyName))
                 {
                     try { RegUnLoadKey(HKEY_LOCAL_MACHINE, _subKeyName); } catch { }
+                    OfflineHiveLedger.ForgetOurs(_subKeyName);
                 }
 
                 // 等待文件释放
@@ -754,6 +760,8 @@ namespace OneCore_Image_Designer.Services
             int result = RegLoadKey(HKEY_LOCAL_MACHINE, _subKeyName, _tempHivePath);
             if (result == 0)
             {
+                // 重新挂载也要登记（旧挂载点已被 Dispose 注销）
+                OfflineHiveLedger.RecordOurs(_subKeyName, _tempHivePath, "离线注册表浏览/编辑（副本·重载）");
                 _rootKey = Registry.LocalMachine.OpenSubKey(_subKeyName, _writable);
                 Log($"ReloadHive: 成功，子键名: {_subKeyName}");
             }
@@ -774,6 +782,7 @@ namespace OneCore_Image_Designer.Services
             if (!string.IsNullOrEmpty(_subKeyName))
             {
                 try { RegUnLoadKey(HKEY_LOCAL_MACHINE, _subKeyName); } catch { }
+                OfflineHiveLedger.ForgetOurs(_subKeyName);
                 _subKeyName = "";
             }
 

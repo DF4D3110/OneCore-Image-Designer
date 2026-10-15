@@ -370,6 +370,14 @@ namespace OneCore_Image_Designer.Services
                     try
                     {
                         Environment.SetEnvironmentVariable("WINDOWS_WCP_INSKUASSEMBLY", "1");
+                        // 标注"现在在做什么" —— 随后所有离线 hive 挂载都会带上它，
+                        // 出问题时日志能直接说清是哪个阶段挂的（见 OfflineHiveLedger）。
+                        // 同时先打一次挂载地图：动手之前先知道镜像的 hive 现在挂在哪、有没有残留，
+                        // 而不是等报 0x80070020(SHARING_VIOLATION) 再回头猜。
+                        OfflineHiveLedger.CurrentOperation = "CBS 装包（skuassembly / ApplyPlan）";
+                        L("=== 动手前的离线 hive 地图 ===");
+                        foreach (var ln in OfflineHiveLedger.Describe(Path.GetPathRoot(win)?.TrimEnd('\\')).Split('\n'))
+                            L(ln);
                         var r = CbsxService.ApplyPlan(win, plan, log);
                         Step("skuassembly 执行", r.Success, r.Success
                             ? $"{r.Operations.Count} 个包，RebootRequired={r.RebootRequired}"
