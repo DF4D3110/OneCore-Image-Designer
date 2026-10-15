@@ -583,7 +583,8 @@ namespace OneCore_Image_Designer.Services
                 // 0x8007051A ERROR_REVISION_MISMATCH（Windows::COM::VerifyStoreVersionNumber）。
                 // 这里提前把结论说清楚，并给出转接指引，而不是让调用方去猜那个错误码。
                 var (imgArch, archEvidence) = ArchRelay.DetectImageArchitecture(winDir);
-                if (ArchRelay.NeedsRelay(imgArch, out string relayReason))
+                bool forceCrossArch = Environment.GetEnvironmentVariable("OCID_FORCE_CROSS_ARCH") == "1";
+                if (ArchRelay.NeedsRelay(imgArch, out string relayReason) && !forceCrossArch)
                 {
                     string? helper = ArchRelay.FindHelper(imgArch);
                     log?.Invoke($"⚠ 架构不匹配：{relayReason}");
@@ -596,7 +597,12 @@ namespace OneCore_Image_Designer.Services
                     error = relayReason + " → 请改走 DISM 通道（dism /image）";
                     return null;
                 }
-                log?.Invoke($"架构判定: 镜像={ArchRelay.ToToken(imgArch)} 进程={ArchRelay.ToToken(ArchRelay.CurrentProcessArch())}，匹配");
+                if (forceCrossArch)
+                    log?.Invoke($"⚠ OCID_FORCE_CROSS_ARCH=1：跳过架构守卫，强制跨架构试验"
+                              + $"（镜像={ArchRelay.ToToken(imgArch)} 进程={ArchRelay.ToToken(ArchRelay.CurrentProcessArch())}，"
+                              + $"可能报 0x8007051A）");
+                else
+                    log?.Invoke($"架构判定: 镜像={ArchRelay.ToToken(imgArch)} 进程={ArchRelay.ToToken(ArchRelay.CurrentProcessArch())}，匹配");
 
                 // CBS 离线服务要读写目标镜像的 hive。dism /Apply-Image 铺出的镜像会还原
                 // WIM 原始 ACL（hive 归属 TrustedInstaller），此时必须显式启用备份/还原特权，
