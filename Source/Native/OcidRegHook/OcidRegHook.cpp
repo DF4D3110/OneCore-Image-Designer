@@ -158,7 +158,11 @@ static std::wstring HandleToPath(HANDLE h)
 //   再用 `GetModuleHandleExW(FROM_ADDRESS)` 反查模块名，一行日志就能点名。
 //
 // 同时这也是"让程序自己知道在做什么、东西在哪"落到钩子上的一步。
-static std::wstring CallerModule()
+//
+// ⚠ `__declspec(noinline)` 是必须的：不加的话编译器会把它内联进包装函数，
+// `_ReturnAddress()` 取到的就变成包装函数自己的帧 ⇒ 日志里 `by=` 全是我们自己的 DLL
+// （实测就是这样，白白浪费了一轮），完全失去"点名调用方"的意义。
+__declspec(noinline) static std::wstring CallerModule()
 {
     void* ra = _ReturnAddress();
     HMODULE m = NULL;
@@ -331,39 +335,53 @@ static NTSTATUS NTAPI Hook_NtOpenKeyEx(PHANDLE ph, ACCESS_MASK am, POBJECT_ATTRI
 }
 
 // 写值：这里最要紧 —— 它只有句柄没有路径，所以先用 NtQueryKey 把句柄反查成路径。
-// 同时记下【是哪个模块】在写 —— 只给 wcp.dll 打补丁时，那笔失败的写压根没出现，
-// 事后才查明 SIL 被编进了多个 DLL。by= 这一列就是用来直接点名的。
+// 同时记下【是哪个模块】在写、以及【这次调用【成功还是失败】】。
+//
+// ⚠ 最初版本只记"请求了什么路径"，不记返回状态 —— 结果看到日志里那笔写确实带着
+// 离线前缀，却仍然无法判断"到底哪一次调用返回了 ACCESS_DENIED"。
+// 返回状态必须记：它才是把"请求"和"失败"对应起来的那一环。
+//   st=0x00000000 成功；st=0xC0000022 = STATUS_ACCESS_DENIED
 static NTSTATUS NTAPI Hook_NtSetValueKey(HANDLE h, PUNICODE_STRING name,
                                          ULONG titleIdx, ULONG type, PVOID data, ULONG size)
 {
     InterlockedIncrement(&g_callCount);
     std::wstring mod = CallerModule();
-    if (ShouldLog(mod, true))
+    bool logIt = ShouldLog(mod, true);
+
+    NTSTATUS st = Real_NtSetValueKey(h, name, titleIdx, type, data, size);
+
+    if (logIt || st < 0)
     {
         std::wstring kp = HandleToPath(h);
-        LogW(L"[NtSetValueKey] by=%s  key=%s  value=%s  type=%lu  size=%lu",
+        // 失败的一律记（即使被过滤器挡掉）—— 那正是我们要找的东西
+        LogW(L"[NtSetValueKey] st=0x%08X%s  by=%s  key=%s  value=%s  type=%lu  size=%lu",
+             (unsigned)st, (st < 0 ? L" <=FAIL" : L""),
              mod.c_str(), kp.c_str(), UsToStr(name).c_str(), type, size);
     }
-    return Real_NtSetValueKey(h, name, titleIdx, type, data, size);
+    return st;
 }
 
 static NTSTATUS NTAPI Hook_NtDeleteKey(HANDLE h)
 {
     InterlockedIncrement(&g_callCount);
     std::wstring mod = CallerModule();
-    if (ShouldLog(mod, true))
-        LogW(L"[NtDeleteKey] by=%s  key=%s", mod.c_str(), HandleToPath(h).c_str());
-    return Real_NtDeleteKey(h);
+    NTSTATUS st = Real_NtDeleteKey(h);
+    if (ShouldLog(mod, true) || st < 0)
+        LogW(L"[NtDeleteKey] st=0x%08X%s  by=%s  key=%s",
+             (unsigned)st, (st < 0 ? L" <=FAIL" : L""), mod.c_str(), HandleToPath(h).c_str());
+    return st;
 }
 
 static NTSTATUS NTAPI Hook_NtDeleteValueKey(HANDLE h, PUNICODE_STRING name)
 {
     InterlockedIncrement(&g_callCount);
     std::wstring mod = CallerModule();
-    if (ShouldLog(mod, true))
-        LogW(L"[NtDeleteValueKey] by=%s  key=%s  value=%s",
-             mod.c_str(), HandleToPath(h).c_str(), UsToStr(name).c_str());
-    return Real_NtDeleteValueKey(h, name);
+    NTSTATUS st = Real_NtDeleteValueKey(h, name);
+    if (ShouldLog(mod, true) || st < 0)
+        LogW(L"[NtDeleteValueKey] st=0x%08X%s  by=%s  key=%s  value=%s",
+             (unsigned)st, (st < 0 ? L" <=FAIL" : L""), mod.c_str(),
+             HandleToPath(h).c_str(), UsToStr(name).c_str());
+    return st;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -414,18 +432,34 @@ static void* PatchIAT(HMODULE mod, const char* dllName, const char* funcName, vo
 // ─────────────────────────────────────────────────────────────────────────────
 // 导出
 // ─────────────────────────────────────────────────────────────────────────────
-// 遍历【本进程所有已加载模块】逐个打补丁。
+// 只打【服务栈家族】的模块 —— 它们的 SIL 才是我们要观察的对象。
+//
+// ⚠⚠ 这是踩过坑之后加的约束：最初"遍历所有模块"把 KERNEL32 / KERNELBASE / ADVAPI32 /
+// USER32 / combase / SETUPAPI 这些**系统 DLL** 也打了补丁 ⇒ 等于截获了
+// **整个进程**的注册表流量（包括 .NET 运行时自己的），结果把 CBS 都搞坏了 ——
+// 连包 manifest 都解析失败（`CBS_E_MANIFEST_INVALID_ITEM`，"line 71"），
+// 而 manifest 解析跟我们的目标毫无关系。
+//
+// ⇒ 用白名单，而不是"全部减黑名单"：服务栈家族的模块名是可枚举、稳定的。
+static bool IsTargetModule(const wchar_t* name)
+{
+    static const wchar_t* allow[] = {
+        L"wcp.dll", L"cbscore.dll", L"cbsapi.dll", L"cbsprovider.dll",
+        L"drupdate.dll", L"drvstore.dll", L"drvstoreex.dll",
+        L"smiengine.dll", L"updateagent.dll", L"cmiv2.dll",
+        L"wcmtypes.dll", L"wcpn.dll", L"sxscore.dll",
+    };
+    for (int i = 0; i < (int)(sizeof(allow) / sizeof(allow[0])); ++i)
+        if (_wcsicmp(name, allow[i]) == 0) return true;
+    return false;
+}
+
+// 遍历【本进程所有已加载模块】，但只打白名单里的那些。
 //
 // 【为什么不是只打 wcp.dll】实测：只打 wcp.dll 时截获了 231,006 次注册表调用，
 // **全部**带离线前缀（`{bf1a281b-…}<drive>:/…`），一次活路径都没有 —— 也就是说
-// wcp.dll 这条路的路径解析本来就是对的。而那笔真正失败的写
-// （`SOFTWARE\Classes\Unknown\shell` 默认值）**根本没出现在日志里**；
-// 失败栈是 SIL 的 `DirectRegistryProvider::SysSetValueKey`
-// ⇒ 那次调用是从**别的模块**发出的（cbscore.dll / 其它 SIL 组件 / 或 NtCreateKeyTransacted）。
-// ⇒ 所以必须遍历所有模块。
-//
-// 注意：跳过我们自己（我们最终调的是保存下来的真身指针，正常情况下不会绕回来，
-// 但跳过能彻底避免递归的隐患）。
+// wcp.dll 这条路的路径解析本来就是对的。而那笔真正失败的写后来查明是有的，
+// 只是不在 wcp.dll 那次日志里 ⇒ 需要覆盖服务栈家族的其它模块（尤其 cbscore.dll）。
 static int PatchAllModules(const char* dllName,
                            const char* const* funcs,
                            void* const* hooks,
@@ -444,6 +478,7 @@ static int PatchAllModules(const char* dllName,
     for (BOOL ok = Module32FirstW(snap, &me); ok; ok = Module32NextW(snap, &me))
     {
         if (_wcsicmp(me.szModule, L"OcidRegHook.dll") == 0) continue;   // 跳过自己
+        if (!IsTargetModule(me.szModule)) continue;                     // 只打服务栈家族
 
         int hit = 0;
         for (int i = 0; i < count; ++i)
