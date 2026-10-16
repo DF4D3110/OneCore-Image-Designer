@@ -1,4 +1,4 @@
-// OCID - 装配标识（Assembly Identity）
+﻿// OCID - 装配标识（Assembly Identity）
 //
 // 这是 OCID 自带服务栈的地基：CBS/CSI/CMI/SMI 之间传递的每个对象都要先能表明"我是谁"。
 //
@@ -124,6 +124,10 @@ namespace ocid {
         //   · hash 是清单内容的哈希，本函数无法算（需要清单字节），
         //     所以只生成前 5 段；算完 hash 由调用方接上。
         std::wstring ComponentNamePrefix() const;
+
+        /// 组件名里的 name 段：小写、删空格与括号；超过 40 字符则缩写为「前19 + .. + 后19」。
+        /// 实测 2282 份真实清单零例外。**别用原始 Name() 拼目录名。**
+        std::wstring ComponentNameSegment() const;
 
         /// culture 段的取值：neutral → none，其它原样。
         std::wstring CultureSegment() const;

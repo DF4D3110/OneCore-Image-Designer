@@ -186,21 +186,94 @@ namespace ocid {
 
     std::wstring AssemblyIdentity::CultureSegment() const
     {
-        // 实测：identity 里 language="neutral"，而目录名里该段是 `none`。
+        // culture 段有两条规则叠在一起：
+        //
+        // ① `neutral` → `none`（实测：identity 里 language="neutral"，目录名里是 `none`）
+        //
+        // ② **按 `-` 分段，≥3 段时保留【首段 + ".." + 末段】**（去掉中间的脚本段）
+        //    实测：`sr-Latn-CS` → `sr-..-cs`
+        //    ⚠ 这一条只有 1 个样本（2500 份里其余都是 `none` 或 5 字符的 `xx-yy`），
+        //      但规则形态是自洽的：`en-us` 只有 2 段 ⇒ 不动；`none` 只有 1 段 ⇒ 不动。
+        //      所以**不需要长度阈值**，用段数判断即可。若将来遇到别的样本再修。
         std::wstring lang = Language();
         if (lang.empty() || _wcsicmp(lang.c_str(), L"neutral") == 0) return L"none";
-        return lang;
+
+        std::vector<std::wstring> parts;
+        size_t start = 0;
+        while (true) {
+            size_t p = lang.find(L'-', start);
+            if (p == std::wstring::npos) { parts.push_back(lang.substr(start)); break; }
+            parts.push_back(lang.substr(start, p - start));
+            start = p + 1;
+        }
+        if (parts.size() >= 3) {
+            // ⚠ 分隔符形态与 name 段不同：culture 用 **`-..-`**（把中间段换成 `..`，但保留两侧连字符）。
+            //    实测：`sr-Latn-CS` → `sr-..-cs`（**不是** `sr..cs`）。
+            //    而 name 段是无分隔符的 `..`（如 `microsoft-windows-a..-experience-apphelp`，
+            //    注意那里的 `-` 是原名自带的，不是我们加的分隔符）。
+            std::wstring out = parts.front() + L"-..-" + parts.back();
+            for (auto& c : out) c = (wchar_t)std::towlower(c);
+            return out;
+        }
+
+        std::wstring out = lang;
+        for (auto& c : out) c = (wchar_t)std::towlower(c);
+        return out;
+    }
+
+    std::wstring AssemblyIdentity::ComponentNameSegment() const
+    {
+        // 组件名里的 name 段有它自己的一套规范化 + 缩写规则。
+        //
+        // ⚠ **不能直接把 identity 的 name 拿来做目录名**。实测 2282 份真实清单反验，
+        //   规则如下（**吻合 2282/2282，零例外**）：
+        //
+        //     1. 转小写
+        //     2. 删除【空格】
+        //     3. 删除【括号】( )
+        //     4. 若长度 > 40：取【前 19】+ ".." + 【后 19】   （结果恰好 40）
+        //
+        //   实例：
+        //     "Microsoft-Windows-Application-Experience-Apphelp" (48)
+        //       → "microsoft-windows-a..-experience-apphelp"        （前19 + .. + 后19）
+        //     "Microsoft-Windows-Base Technologies-BCD" (39)
+        //       → "microsoft-windows-basetechnologies-bcd"          （删空格后 38 ≤ 40，不缩写）
+        //     "Microsoft-Windows-Base Technologies-File Systems (Core)"
+        //       → "microsoft-windows-b..ies-filesystemscore"        （空格+括号都删，再缩写）
+        //
+        //   反编译里的对应实现是 wcp.dll 的
+        //   `?xpid_ConvertNamePrime@?A0x5daba7c2@@…@0x1008FEFB`（见 sym8061x86_wcp.c 约 L41972），
+        //   那里的 `v13 - 2` 就是"给 `..` 留两位"。⚠ 代码里初值写的是 64，
+        //   但**实测生效上限是 40**（2282 份数据，未缩写的最长正好 40，被缩写的最短是"删空格后 41"）。
+        //   ⇒ 以实测为准：**40**。
+        std::wstring s;
+        s.reserve(Name().size());
+        for (wchar_t c : Name()) {
+            if (c == L' ' || c == L'(' || c == L')') continue;   // 删空格与括号
+            s += (wchar_t)std::towlower(c);                       // 顺便转小写
+        }
+
+        const size_t kMax = 40;
+        const size_t kKeep = 19;
+        if (s.size() > kMax) {
+            s = s.substr(0, kKeep) + L".." + s.substr(s.size() - kKeep);
+        }
+        return s;
     }
 
     std::wstring AssemblyIdentity::ComponentNamePrefix() const
     {
-        // <arch>_<name>_<token>_<version>_<culture>
-        // 真实例：arm_acpi.inf_31bf3856ad364e35_6.2.8061.0_none
-        // ⚠ 注意顺序与标识字符串【不同】：这里 arch 在最前，version 在第 4 段。
+        // <arch>_<name段>_<token>_<version>_<culture>
+        //
+        // ⚠ 版本用**真实** Version()，不是 EffectiveVersion()：
+        //   目录名里是 `6.2.8061.0`，即使该组件是 nonSxS
+        //   （`EffectiveVersion()` 的 0.0.0.0 只用于 KeyForm 类语义）。
+        //
+        // ⚠ 只有 name 段会缩写，arch/token/version/culture 原样。
         std::wstring s;
         s += Architecture();
         s += L"_";
-        s += Name();
+        s += ComponentNameSegment();
         s += L"_";
         s += PublicKeyToken();
         s += L"_";
