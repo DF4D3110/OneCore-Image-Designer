@@ -747,6 +747,19 @@ namespace OneCore_Image_Designer.Services
                 _ret1 = _ => 1;
                 _nop = () => { };
 
+                // ★★ 必须在 `CbsCoreInitialize` **之前**装钩子。
+                //
+                // 调试器（cdb x86）给出的真实调用栈：
+                //     wcp!WcpInitialize
+                //     cbscore!SetRebootInProgressFlag+0x30f94
+                //     cbscore!CbsCoreInitialize+0x2f5        ← 就在这一句里面
+                // ⇒ `WcpInitialize` 是 `CbsCoreInitialize` **内部直接调用**的，
+                //   而且 cbscore 是**直接导入** `wcp.dll!WcpInitialize`（不是 GetProcAddress 动态取）。
+                // ⇒ 所以：
+                //   ① 钩 `GetProcAddress` 是错的方向（那个钩子一次都没触发，正是这个原因）；
+                //   ② 安装时机必须在这里 —— 之前放在 `CbsCoreInitialize` 之后，那时它已经被调过了。
+                TryInstallRegHook(log);
+
                 hr = init(malloc, _ret1, _nop, _nop, _nop, _nop, _nop, out IClassFactory factory);
 
                 // ── 回退：镜像自带的栈可能初始化不了 ──

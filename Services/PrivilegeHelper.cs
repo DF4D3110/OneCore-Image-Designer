@@ -134,6 +134,40 @@ namespace OneCore_Image_Designer.Services
                           + "需要上面的特权才能读写其 hive。");
         }
 
+        // ─────────────────────────────────────────────────────────────────────
+        // 离线 hive 的挂载/卸载（共享给 OCID 自带的 SMI 等组件用）
+        // ─────────────────────────────────────────────────────────────────────
+
+        private static readonly IntPtr HKEY_LOCAL_MACHINE = new IntPtr(unchecked((int)0x80000002));
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int RegLoadKey(IntPtr hKey, string lpSubKey, string lpFile);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int RegUnLoadKey(IntPtr hKey, string lpSubKey);
+
+        /// <summary>
+        /// 把 hive 文件挂到 <c>HKLM\&lt;mountName&gt;</c>，返回 Win32 错误码（0 = 成功）。
+        ///
+        /// ⚠ 调用方必须保证 <paramref name="mountName"/> **不以 `SOFTWARE` 结尾**
+        /// （也不含会拼出 `SOFTWARE\Classes` 的段）。宿主机 `UCPD.sys` 硬编码了
+        /// `SOFTWARE\Classes\Unknown\shell` 这条键并按完整路径拦写；只要路径里不出现那个子串，
+        /// 同一笔写就能成功落到同一个 hive。
+        /// 详见 <see cref="OcidSmiService"/> 的类注释。
+        /// </summary>
+        public static int RegLoadKeyLocalMachine(string mountName, string hiveFile)
+        {
+            EnableServicingPrivileges();
+            return RegLoadKey(HKEY_LOCAL_MACHINE, mountName, hiveFile);
+        }
+
+        /// <summary>卸载 <c>HKLM\&lt;mountName&gt;</c>，返回 Win32 错误码（0 = 成功）。</summary>
+        public static int RegUnLoadKeyLocalMachine(string mountName)
+        {
+            EnableServicingPrivileges();
+            return RegUnLoadKey(HKEY_LOCAL_MACHINE, mountName);
+        }
+
         /// <summary>
         /// 把常见 HRESULT 翻译成人话（供错误信息使用）。
         /// </summary>

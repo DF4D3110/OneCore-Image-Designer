@@ -1141,25 +1141,50 @@ int __stdcall OcidRegHook_Install(const wchar_t* logPath,
     LogW(L"[install] done: %d patched, scope=%s, rewrite=%s, mappings=%zu",
          patched, (onlyWcp ? L"wcp.dll only" : L"all loaded modules"),
          (g_enableRewrite ? L"ON" : L"off"), g_mappings.size());
-    // ★ 观察 WcpInitialize：cbscore 是用 GetProcAddress 取它的，
-    //   所以只在 cbscore/CbsCore 的 IAT 里把 GetProcAddress 换成我们的包装。
+    // ★ 钩 `wcp.dll!WcpInitialize`（不是 GetProcAddress —— 那是错的方向）。
+    //
+    // 调试器（cdb x86）给的真实调用栈：
+    //     wcp!WcpInitialize
+    //     cbscore!SetRebootInProgressFlag+0x30f94
+    //     cbscore!CbsCoreInitialize+0x2f5
+    // ⇒ cbscore 是**直接导入** `wcp.dll!WcpInitialize` 的，位于它的 IAT 里
+    //   ⇒ 直接改 cbscore 导入表里那一项即可（比钩 GetProcAddress 可靠得多）。
+    // ⇒ 而且调用发生在 `CbsCoreInitialize` **内部**，
+    //   所以 C# 那边必须在调 `CbsCoreInitialize` **之前**就装好钩子。
     if (g_observeWcpInit)
     {
-        HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
-        if (k32 && !Real_GetProcAddress)
-            Real_GetProcAddress = (PFN_GetProcAddress)GetProcAddress(k32, "GetProcAddress");
-        LogW(L"[install] Real_GetProcAddress=%p", Real_GetProcAddress);
+        // wcp.dll 必须先被加载，否则 IAT 里这一项还不存在
+        if (!GetModuleHandleW(L"wcp.dll"))
+            LogW(L"[install] WARNING: wcp.dll not loaded yet; WcpInitialize IAT patch will miss");
 
-        const wchar_t* names[] = { L"cbscore.dll", L"CbsCore.dll" };
-        for (int i = 0; i < 2; ++i)
+        // 在所有已加载模块里找哪些导入了 wcp!WcpInitialize，逐个换掉
+        
+        
         {
-            HMODULE m = GetModuleHandleW(names[i]);
-            if (!m) { LogW(L"[install] %s not loaded", names[i]); continue; }
-            void* real = PatchIAT(m, "kernel32.dll", "GetProcAddress",
-                                  (void*)Hook_GetProcAddress, (void**)&Real_GetProcAddress);
-            LogW(L"[install] %s GetProcAddress patched: %s", names[i], real ? L"YES" : L"no (not imported?)");
-            if (real) ++patched;
+            // 用 Toolhelp 快照枚举（避免依赖 psapi）
+            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+            if (snap != INVALID_HANDLE_VALUE)
+            {
+                MODULEENTRY32W me; me.dwSize = sizeof(me);
+                if (Module32FirstW(snap, &me))
+                {
+                    do
+                    {
+                        if (_wcsicmp(me.szModule, L"OcidRegHook.dll") == 0) continue;
+                        void* real = PatchIAT(me.hModule, "wcp.dll", "WcpInitialize",
+                                              (void*)Hook_WcpInitialize, (void**)&Real_WcpInitialize);
+                        if (real)
+                        {
+                            ++patched;
+                            LogW(L"[install] patched wcp!WcpInitialize in %s (real=0x%08X)",
+                                 me.szModule, (unsigned)(DWORD_PTR)real);
+                        }
+                    } while (Module32NextW(snap, &me));
+                }
+                CloseHandle(snap);
+            }
         }
+        LogW(L"[install] WcpInitialize hook: Real_WcpInitialize=%p", Real_WcpInitialize);
     }
 
     return patched;
