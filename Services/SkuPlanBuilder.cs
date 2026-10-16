@@ -179,7 +179,7 @@ namespace OneCore_Image_Designer.Services
             try
             {
                 // ⚠ BuildGraph 只扫【顶层】（外加 Manifests 子目录）。而实际拿到的
-                // "SxS 存储根"（例 E:\rc_store）下面是一层包目录，mum 在包目录里 ——
+                // "SxS 存储根"（例：某个解包出来的 rc_store 目录）下面是一层包目录，mum 在包目录里 ——
                 // 直接传根目录会得到 0 个节点。所以这里把每个来源展开成
                 // 「自身 + 其一级子目录」。
                 var dirs = new List<string>();

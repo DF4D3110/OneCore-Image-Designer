@@ -42,7 +42,7 @@
 //   ⇒ 本模块的 owner/operationHint 决策**只对 ①（`mechanism == "registryKeys"`）套用**。
 //     把 ② 也按 owner 规则跳过，会静默丢掉 WCM 的设置项。
 //
-// 实测规模（`E:\sxs_lib` 70224 份清单）：operationHint `replace` 122722 │
+// 实测规模（70224 份真实组件清单）：operationHint `replace` 122722 │
 // `append` 24 │ `prepend` 1。也就是说 append/prepend 极少但**真实存在**，
 // 不能因为"几乎见不到"就当成不会发生。
 

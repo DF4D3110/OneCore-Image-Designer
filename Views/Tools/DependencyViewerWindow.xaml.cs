@@ -37,6 +37,11 @@ namespace OneCore_Image_Designer.Views.Tools
             InitializeComponent();
             DataContext = this;
             LstPackages.ItemsSource = _filteredPackages;
+
+            // 默认目录相对当前用户的桌面推导，避免把某台机器上的绝对路径写死在 XAML 里。
+            TxtDirectory.Text = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                "MobilePackageGen_Output", "component", "_temp_manifests");
         }
 
         private void Analyze_Click(object sender, RoutedEventArgs e)

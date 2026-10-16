@@ -15,7 +15,7 @@
 //
 // ── 证据 ──────────────────────────────────────────────────────────────────
 //
-// [语料] `E:\sxs_lib` 全部 70219 份真实清单里 `$(…)` 形态统计：
+// [语料] 全部 70219 份真实组件清单里 `$(…)` 形态统计：
 //   34353 个不同的"宏"，但绝大多数根本不是路径：
 //     $(string.*) 39771 · $(resourceString.*) 43990   ← 本地化字符串表引用
 //     $(build.nttree) 77097                           ← 构建期源路径（importPath 用）
@@ -48,8 +48,8 @@
 //     / `$(runtime.ProgramFiles)`、`$(runtime.bootDrive)` / `$(runtime.bootdrive)`
 //     ⇒ 查表必须归一小写，否则会漏掉几千处。
 //
-// [表] `winsockai.dll` 里有一张 12 项的"宏 → 替换串"权威表（反编译：
-//   `E:\ocid_decomp\sym8061x86_winsockai.c` 约 L4182-L4231，`v13[3i+2]` 是宏字面量、
+// [表] `winsockai.dll` 里有一张 12 项的"宏 → 替换串"权威表（反编译 dump：
+//   约 L4182-L4231，`v13[3i+2]` 是宏字面量、
 //   `v47[i]` 是替换串 LUNICODE_STRING）。它直接印证了前 9 个：
 //     $(runtime.system32)                  → %SystemRoot%\system32
 //     $(runtime.windows)                   → %SystemRoot%
@@ -70,7 +70,7 @@
 //   `\SystemRoot` 是内核侧前缀，开机才解析 —— 说明服务栈在"离线但要用宿主 API"时
 //   会退化成这种可延后解析的形式。
 //
-// [实测] 目标镜像（`E:\ocid_master.vhd`，8061 ARM 构建产物）挂成 `P:` 后逐个探目录：
+// [实测] 目标镜像（8061 ARM 构建产物的 VHD，挂成 `P:`）逐个探目录：
 //     P:\Windows                     ✓  ← runtime.windows
 //     P:\Windows\System32            ✓  ← runtime.system32
 //     P:\Windows\System32\drivers    ✓

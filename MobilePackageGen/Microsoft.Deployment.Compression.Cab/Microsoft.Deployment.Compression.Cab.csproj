@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
@@ -9,6 +9,19 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Microsoft.Deployment.Compression\Microsoft.Deployment.Compression.csproj" />
+  </ItemGroup>
+
+  <!--
+    CabException.ErrorResources 用 ResourceManager 按
+    "Microsoft.Deployment.Compression.Cab.Errors" 查找错误串。
+
+    上游 WiX 的旧式工程把编译好的 Errors.resources 直接提交进仓库；SDK 风格工程不会自动嵌入
+    .resources（默认只收 **/*.resx），所以那份预编译副本既不会被用上、又成了仓库里的二进制编译
+    产物。这里改为在编译期从 Errors.txt（name=value 纯文本，resgen 格式）生成资源并显式指定逻辑
+    名，仓库只保留可编辑的文本源。
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="Errors.txt" LogicalName="Microsoft.Deployment.Compression.Cab.Errors.resources" />
   </ItemGroup>
 
 </Project>

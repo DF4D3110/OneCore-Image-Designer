@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
         <TargetFramework>net8.0</TargetFramework>
@@ -16,24 +16,20 @@
 	</ItemGroup>
     
     <ItemGroup>
-      <None Update="RemakeAppxTestContent\i386\appxpackaging.dll">
-        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-      </None>
-      <None Update="RemakeAppxTestContent\i386\makeappx.exe">
-        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-      </None>
-      <None Update="RemakeAppxTestContent\i386\Microsoft.Diagnostics.Tracing.EventSource.dll">
-        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-      </None>
-      <None Update="RemakeAppxTestContent\i386\Microsoft.Windows.Build.Appx.AppxPackaging.dll.manifest">
-        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-      </None>
-      <None Update="RemakeAppxTestContent\i386\Microsoft.Windows.Build.Appx.OpcServices.dll.manifest">
-        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-      </None>
-      <None Update="RemakeAppxTestContent\i386\opcservices.dll">
-        <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-      </None>
+      <!--
+        上游把一整套 Microsoft Windows SDK 的 makeappx 二进制夹具（makeappx.exe、opcservices.dll、
+        appxpackaging.dll、Microsoft.Diagnostics.Tracing.EventSource.dll 及其 .dll.manifest）连同
+        Minimal 内容样例一起放在 RemakeAppxTestContent\i386 下并复制到输出目录。
+
+        这些是**微软的预编译二进制**（不是本仓库能重建的东西），把它们放进公开仓库属于再分发；
+        而且 MakeAppxDeflate.USE_EXTERNAL_DEFLATE_VIA_MAKEAPPX 当前为 false，
+        MsixEntryFactory / MsixPackager 走的是自带的 DeflateBlockCompressor 实现，这条外部
+        makeappx 路径在本仓库里根本不参与打包。
+
+        因此这几个二进制已从仓库移除（Minimal\Contents 的文本/图片样例保留，它是自造的测试内容）。
+        若确实需要复现外部 makeappx 对照，请自行从 Windows SDK 取得该 i386 夹具放回
+        RemakeAppxTestContent\i386 并打开上面的开关。
+      -->
       <None Update="RemakeAppxTestContent\Minimal\Contents\AppxManifest.xml">
         <CopyToOutputDirectory>Always</CopyToOutputDirectory>
       </None>

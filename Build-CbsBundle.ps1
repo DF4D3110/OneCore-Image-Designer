@@ -1,4 +1,4 @@
-﻿# Build-CbsBundle.ps1 —— 生成与 OCID 同级的 `CBS` 文件夹（控制台程序 + 依赖）
+# Build-CbsBundle.ps1 —— 生成与 OCID 同级的 `CBS` 文件夹（控制台程序 + 依赖）
 #
 # 为什么要这一步：`bin\Release\` 是构建产物，`dotnet clean` / 重新构建会把它清掉。
 # 这个脚本把「CBS 控制台 + 提权 DLL」重新组装回去，所以随时可重建。
@@ -15,7 +15,10 @@
 [CmdletBinding()]
 param(
     [string]$Configuration = 'Release',
-    [string]$NSudoBinaries = 'D:\UUP-Project\NSudo-master\Source\Native\Output\Binaries\Release',
+    # NSudo 构建产物根目录（其下应有 x64\ / Win32\ / ARM64\ 三个子目录，各含 NSudoAPI.dll）。
+    # 默认读环境变量 OCID_NSUDO_BINARIES，未设置则用脚本同级的 NSudo 目录；
+    # 都不存在时下面只会告警并跳过放置（提权退化为不做提权），不写死任何开发机路径。
+    [string]$NSudoBinaries = $(if ($env:OCID_NSUDO_BINARIES) { $env:OCID_NSUDO_BINARIES } else { Join-Path $PSScriptRoot 'NSudo' }),
     [switch]$NoBuild
 )
 

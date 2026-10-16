@@ -35,7 +35,39 @@ $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $src  = Join-Path $root 'OcidServicing'
 
-$vcRoot = 'D:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build'
+# Locate the MSVC build environment. Prefer vswhere.exe (shipped with every Visual
+# Studio 2017+ installer), then fall back to the usual install roots. Deliberately not
+# hardcoded to one machine's drive layout, so this also works when VS lives on C: or
+# is a Build Tools / Professional / Enterprise edition.
+function Find-VcRoot {
+    $pf86 = ${env:ProgramFiles(x86)}
+    if ($pf86) {
+        $vswhere = Join-Path $pf86 'Microsoft Visual Studio\Installer\vswhere.exe'
+        if (Test-Path $vswhere) {
+            $inst = & $vswhere -latest -products * -property installationPath 2>$null
+            if ($inst) {
+                $p = Join-Path $inst 'VC\Auxiliary\Build'
+                if (Test-Path $p) { return $p }
+            }
+        }
+    }
+    $editions = @('Enterprise', 'Professional', 'Community', 'BuildTools')
+    $drives = @($env:SystemDrive, 'C:', 'D:', 'E:') | Where-Object { $_ }
+    foreach ($drive in $drives) {
+        foreach ($year in @('2022', '2019')) {
+            foreach ($ed in $editions) {
+                $p = Join-Path $drive "Program Files\Microsoft Visual Studio\$year\$ed\VC\Auxiliary\Build"
+                if (Test-Path $p) { return $p }
+            }
+        }
+    }
+    return $null
+}
+
+$vcRoot = Find-VcRoot
+if (-not $vcRoot) {
+    throw "MSVC build environment not found. Install Visual Studio (or Build Tools) with the C++ workload, or set `$vcRoot manually."
+}
 
 function Get-Toolchain {
     param([string]$Arch)

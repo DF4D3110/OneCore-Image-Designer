@@ -95,19 +95,28 @@ MobilePackageGen.exe <Path to image file(s)> <Output folder CBSs>
 
 | 组件 | 来源 | 许可证 | 本仓库位置 |
 |---|---|---|---|
-| LTRData.DiscUtils | [LTRData/DiscUtils](https://github.com/LTRData/DiscUtils)（NuGet，升级版） | MIT | NuGet 包 |
-| WPMT.Core（压缩/哈希/目录库） | 自 WPMT（Windows Package Management Tool）迁移，以 `D:\wpmtcli\Compression` 修正版为权威 | - | `WPMT.Core` |
-| NSudo（TrustedInstaller 提权） | [UUP-Project/NSudo](https://github.com/UUP-Project/NSudo) | MIT | `MobilePackageGen.Common/NSudo` |
-| msdelta.dll（DCM 压缩 API） | Windows 系统 DLL | 系统组件 | 运行期调用（不随仓库分发） |
-| Img2Ffu | [WOA-Project/Img2Ffu](https://github.com/WOA-Project/Img2Ffu) | MIT | `Img2Ffu.Library`（本地版，含压缩实现） |
-| StorageSpace | [gus33000/StorageSpace](https://github.com/gus33000/StorageSpace) | MIT | `StorageSpace`（本地版） |
-| DotnetPackaging.Msix | [dotnet-packaging/MSIX](https://github.com/dotnet-packaging/MSIX) | MIT | `DotnetPackaging.Msix` |
-| DeflateBlockCompressor | 随 WSK Tools 分发 | - | `DeflateBlockCompressor` |
-| Cabinet | 随 UUPMediaCreator / WPMT 分发 | MIT | `Cabinet`（`Cabinet.Net.csproj`） |
-| Microsoft.Deployment.Compression | WiX 工具集 | MS-RL | `Microsoft.Deployment.Compression(.Cab)` |
-| LibSxS | 随 WSK Tools 分发 | - | `LibSxS` |
-| SevenZipExtractor / 7-Zip | [adoconnection/SevenZipExtractor](https://github.com/adoconnection/SevenZipExtractor) | LGPL-2.1 | `Archives.DiscUtils/SevenZipExtractor` |
-| RawDiskLib | NuGet 0.2.1 | - | NuGet 包 |
+| **MobilePackageGen**（上游） | [MobileTooling/MobilePackageGen](https://github.com/MobileTooling/MobilePackageGen) | MIT | 本目录是它的 fork（[DF4D3110/MobilePackageGen](https://github.com/DF4D3110/MobilePackageGen)）随产品内置的副本 |
+| **WSK Tools** v1.0.4 | [gus33000/WSK](https://github.com/gus33000/WSK) | MIT | 该 fork 的原始基线（目录布局与部分实现来自它） |
+| **NSudo**（TrustedInstaller 提权） | 原始项目 [M2TeamArchived/NSudo](https://github.com/M2TeamArchived/NSudo)（M2-Team / Mouri_Naruto，已归档）；编译 `NSudoAPI.dll` 用的是 [UUP-Project/NSudo](https://github.com/UUP-Project/NSudo) 分支 | MIT | `MobilePackageGen.Common/NSudo`（C# 绑定 `M2.NSudo`）；`NSudoAPI.dll` 本身不随仓库分发，需自行编译 |
+| **LTRData.DiscUtils**（Vhd / Vhdx / Wim / Ntfs / FileSystems / Streams / Registry，1.0.85 与 1.0.55） | [LTRData/DiscUtils](https://github.com/LTRData/DiscUtils) | MIT | NuGet 包 |
+| **RawDiskLib** 0.2.1 | [LTRData/RawDiskLib](https://github.com/LTRData/RawDiskLib) | 见包内许可 | NuGet 包 |
+| **SharpZipLib** 1.4.2 | [icsharpcode/SharpZipLib](https://github.com/icsharpcode/SharpZipLib) | MIT | NuGet 包（`Cabinet`） |
+| **System.Reactive** 6.0.1 | [dotnet/reactive](https://github.com/dotnet/reactive) | MIT | NuGet 包（`DeflateBlockCompressor`） |
+| **ZLibDotNet** 0.1.1 | [NN---/ZLibDotNet](https://github.com/NN---/ZLibDotNet) | MIT | NuGet 包（`DeflateBlockCompressor`） |
+| **System.IO.Hashing** 8.0.0 / 10.0.0 | [dotnet/runtime](https://github.com/dotnet/runtime) | MIT | NuGet 包 |
+| **Zafiro.DivineBytes** 41.2.10 | [SuperJMN/Zafiro](https://github.com/SuperJMN/Zafiro) | MIT | NuGet 包（`DotnetPackaging.Msix`） |
+| **System.Net.Http / System.Private.Uri / System.Text.RegularExpressions** | [dotnet/runtime](https://github.com/dotnet/runtime) | MIT | NuGet 包（`Adapters` 的兼容引用） |
+| **DotnetPackaging.Msix** | [dotnet-packaging/MSIX](https://github.com/dotnet-packaging/MSIX) | MIT | `DotnetPackaging.Msix` |
+| **DeflateBlockCompressor** | 随 [WSK Tools](https://github.com/gus33000/WSK) 分发 | 见包内许可 | `DeflateBlockCompressor` |
+| **Img2Ffu** | [WOA-Project/Img2Ffu](https://github.com/WOA-Project/Img2Ffu) | MIT | `Img2Ffu.Library`（本地版，含压缩实现） |
+| **StorageSpace** | [gus33000/StorageSpace](https://github.com/gus33000/StorageSpace) | MIT | `StorageSpace`（本地版） |
+| **EDLProgram2VHDX** | [gus33000/EDLProgram2VHDX](https://github.com/gus33000/EDLProgram2VHDX) | 见项目内许可 | 上游 fork 里的子模块；本目录**不包含**，也未引用 |
+| **LibSxS** | 随 [WSK Tools](https://github.com/gus33000/WSK) 分发 | 见源码内说明 | `LibSxS` |
+| **Cabinet / XNA LzxDecoder** | 随 UUPMediaCreator / WPMT 分发；`LzxDecoder` 源自 libmspack（Stuart Caie），经 Ali Scissons 改写 | `Cabinet/LICENSE`（MIT）；`Cabinet/Xna/LzxDecoder.cs` 头部为 LGPL-2.1 或 MS-PL 双许可 | `Cabinet`、`Cabinet/Xna/LzxDecoder.cs` |
+| **Microsoft.Deployment.Compression(.Cab)** | WiX 工具集 | MS-RL | `Microsoft.Deployment.Compression(.Cab)` |
+| **SevenZipExtractor / 7-Zip** | [adoconnection/SevenZipExtractor](https://github.com/adoconnection/SevenZipExtractor) | LGPL-2.1 | `Archives.DiscUtils/SevenZipExtractor` |
+| **WPMT.Core**（压缩 / 哈希 / 目录库） | 自 WPMT（Windows Package Management Tool）迁移 | 见源码内说明 | `WPMT.Core` |
+| **msdelta.dll**（DCM 压缩 API） | Windows 系统组件 | 系统组件 | 运行期从系统加载，不分发 |
 
 > **没有子模块**：上游 fork 曾在 `.gitmodules` 里声明 `thirdparty/StorageSpace`、`thirdparty/Img2Ffu`、`thirdparty/EDLProgram2VHDX`，但本仓库实际编译使用的是平铺在 `MobilePackageGen/` 下的本地代码（`StorageSpace`、`Img2Ffu.Library`）。该失效的 `.gitmodules` 与其子模块声明已删除，克隆后直接编译即可。
 >

@@ -27,7 +27,7 @@ namespace OneCore_Image_Designer.Services
     /// 导致后续安装失败。因此本服务对**每个包单独调用一次** <see cref="UpdatePackageService.Extract"/>，
     /// 并把输出目录一并作为源目录，使每一次调用都重新索引"当前已解出的一切"。
     ///
-    /// 【实测目标集】E:\windesktop\8400_x86_repair_content：39 psf + 40 cab，
+    /// 【实测目标集】8400 x86 的 repair content 样本：39 psf + 40 cab，
     /// 其中 neutral-mergedcomponents 1 个（psf 6.6 MB / cab 217 KB），
     /// 语言包 19 个，neutral 组件包 19 个。
     /// </summary>

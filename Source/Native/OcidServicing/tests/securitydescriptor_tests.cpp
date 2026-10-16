@@ -1,7 +1,7 @@
 // OCID - 安全描述符（SDDL）测试
 //
-// 用的 SDDL 全是**从 8400 x86 语料里抓出来的原文**（`E:\sxs_lib` 的
-// `<securityDescriptorDefinition>`），不是编的：
+// 用的 SDDL 全是**从真实组件清单（8400 x86，70219 份 .manifest）的
+// `<securityDescriptorDefinition>` 里抓出来的原文**，不是编的：
 //   WRP_REGKEY_DEFAULT_SDDL / WRP_DIR_DEFAULT_SDDL / WRP_FILE_DEFAULT_SDDL
 //   SHORTCUT_REGISTRY_DEFAULT_SDDL / WRP_PARENT_DIR_DEFAULT_SDDL / WRP_FILE_DIR_DEFAULT_SDDL
 //   ADMIN_SDDL / PARENT_ADMIN_SDDL / EHOME_EXTENSIBILITY_KEY_SDDL

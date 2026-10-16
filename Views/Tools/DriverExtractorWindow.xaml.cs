@@ -62,6 +62,11 @@ namespace OneCore_Image_Designer.Views.Tools
             InitializeComponent();
             DataContext = this;
             LstDrivers.ItemsSource = _filteredDrivers;
+
+            // 默认目录相对当前用户的桌面推导，避免把某台机器上的绝对路径写死在 XAML 里。
+            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            TxtImagePath.Text = Path.Combine(desktop, "MobilePackageGen_Output", "component");
+            TxtOutputPath.Text = Path.Combine(desktop, "Drivers_Extracted");
         }
 
         public DriverExtractorWindow(string imagePath) : this()

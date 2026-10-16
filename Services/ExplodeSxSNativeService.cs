@@ -608,7 +608,8 @@ namespace OneCore_Image_Designer.Services
                 // ── 步骤 7：收尾（State.ini + imagestate.reg） ──
                 L("=== 步骤 7/7：收尾（State.ini + imagestate.reg + 卸载 hive） ===");
                 // 优先用【独立进程】执行收尾 —— CBS 服务会持有目标镜像的 hive 直到
-                // 调用方进程退出，同一进程内收尾必然失败（见 CBS_TECHNICAL_NOTES 第 11 节）。
+                // 调用方进程退出，同一进程内收尾必然失败（实测：同进程重试 6 次全失败，
+                // 换新进程一次成功）。
                 var fin = RunFinishOutOfProcess(win, log) ?? FinishImageService.Finish(win, log);   // 注意：要传【Windows 目录】而不是镜像根 —— 收尾找的是 <win>\System32\config\SOFTWARE
                 Step("finishimg", fin.ok, fin.detail);
                 if (!fin.ok) { res.Error = fin.detail; return res; }

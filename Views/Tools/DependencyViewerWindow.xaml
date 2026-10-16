@@ -26,8 +26,7 @@
                         Background="#FF4CAF50" Foreground="White" BorderThickness="0"
                         Click="Export_Click"/>
                 <TextBlock Text="Manifest目录:" VerticalAlignment="Center" Margin="0,0,8,0" FontSize="12"/>
-                <TextBox x:Name="TxtDirectory" Height="28" VerticalContentAlignment="Center"
-                         Text="C:\Users\DELL\Desktop\MobilePackageGen_Output\component\_temp_manifests"/>
+                <TextBox x:Name="TxtDirectory" Height="28" VerticalContentAlignment="Center"/>
             </DockPanel>
         </Border>
 

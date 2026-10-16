@@ -31,13 +31,11 @@
                 </Grid.ColumnDefinitions>
 
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="镜像目录:" VerticalAlignment="Center" Margin="0,0,8,4" FontSize="12"/>
-                <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtImagePath" Height="28" VerticalContentAlignment="Center" Margin="0,0,8,4"
-                         Text="C:\Users\DELL\Desktop\MobilePackageGen_Output\component"/>
+                <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtImagePath" Height="28" VerticalContentAlignment="Center" Margin="0,0,8,4"/>
                 <Button Grid.Row="0" Grid.Column="2" Content="📂" Width="32" Height="28" Margin="0,0,0,4" Click="BrowseImage_Click"/>
 
                 <TextBlock Grid.Row="1" Grid.Column="0" Text="输出目录:" VerticalAlignment="Center" Margin="0,0,8,0" FontSize="12"/>
-                <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtOutputPath" Height="28" VerticalContentAlignment="Center" Margin="0,0,8,0"
-                         Text="C:\Users\DELL\Desktop\Drivers_Extracted"/>
+                <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtOutputPath" Height="28" VerticalContentAlignment="Center" Margin="0,0,8,0"/>
                 <Button Grid.Row="1" Grid.Column="2" Content="📂" Width="32" Height="28" Click="BrowseOutput_Click"/>
             </Grid>
         </Border>

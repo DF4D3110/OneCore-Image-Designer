@@ -32,7 +32,7 @@ namespace OneCore_Image_Designer.ViewModels
     /// （<see cref="CbsSafety"/> 门禁），且所有写入操作默认「试运行」。
     ///
     /// 【产品线】本页属 **desktop**。DeviceLayout / FeatureManifest / OEMInput / FFU
-    /// 均属 WCOS 侧，不在此页出现。见 PRODUCT_LINES.md。
+    /// 均属 WCOS 侧，不在此页出现（desktop 与 WCOS/Phone 两侧不得互相引用）。
     /// </summary>
     public partial class SxsViewModel : ObservableObject
     {

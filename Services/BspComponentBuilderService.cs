@@ -9,7 +9,7 @@ namespace OneCore_Image_Designer.Services
     /// <summary>
     /// BSP 组件生成请求：OEMDevicePlatform 包、DeviceInfo 注册表包、machineinfo.xml、
     /// SMBIOS 源包（IoT）、各自 FIP 桩包，以及整合全部组件的统一 FM。
-    /// 所有模板逐字段抄自真实样本（E:\wcos 的 QEMU ARM64 BSP / 15254 QC8960 / 官方 QCDB410C），
+    /// 所有模板逐字段抄自真实样本（QEMU ARM64 BSP / 15254 QC8960 / 官方 QCDB410C 的样本集），
     /// keyform 哈希与打包复用 DeviceLayoutBuilderService 的 internal 工具链。
     /// </summary>
     public class BspComponentRequest

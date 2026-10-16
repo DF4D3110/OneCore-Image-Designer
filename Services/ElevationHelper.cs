@@ -13,7 +13,7 @@ namespace OneCore_Image_Designer.Services
     /// 在严格环境下还需要 TrustedInstaller 身份。
     ///
     /// 【实现选择】项目里已经移植了 NSudo（<c>MobilePackageGen.Common\NSudo</c>，
-    /// 以及 <c>D:\UUP-Project\NSudo-master</c> 的 <c>NSudoAPI.dll</c>）。
+    /// 或由环境变量 <c>OCID_NSUDO_BINARIES</c> 指向的自建产物目录）。
     /// 为了避免对 NSudo 的命名空间/版本产生硬依赖，这里**动态加载**
     /// <c>NSudoAPI.dll</c> 的 <c>NSudoCreateProcess</c> 导出；找不到时，
     /// 退化为标准 UAC 提权（ShellExecute "runas"）。
@@ -127,7 +127,7 @@ namespace OneCore_Image_Designer.Services
         /// 查找顺序刻意把**【与当前进程架构匹配的子目录】放在最前** ——
         /// NSudo 官方约定是 `&lt;程序目录&gt;\x64\NSudoAPI.dll` / `Win32\` / `ARM64\`
         /// （见 <c>M2.NSudo.NSudoInstance</c> 的默认 BinaryPaths）。
-        /// 若不查子目录就直接回落到 D:\UUP-Project 的 x64 版本，
+        /// 若不查子目录就直接回落到某个固定架构的版本，
         /// **x86 进程会去加载 x64 的 DLL 而失败**。
         /// </summary>
         static string? FindNSudoApi()
@@ -150,10 +150,14 @@ namespace OneCore_Image_Designer.Services
             // ③ 依次回落到全部架构子目录（同架构的优先，其次其它）
             foreach (var d in new[] { archDir, "x64", "Win32", "ARM64" }.Distinct())
                 candidates.Add(Path.Combine(baseDir, d, "NSudoAPI.dll"));
-            // ④ 开发机上的 NSudo 构建产物
-            candidates.Add(@"D:\UUP-Project\NSudo-master\Source\Native\Output\Binaries\Release\x64\NSudoAPI.dll");
-            candidates.Add(@"D:\UUP-Project\NSudo-master\Source\Native\Output\Binaries\Release\Win32\NSudoAPI.dll");
-            candidates.Add(@"D:\UUP-Project\NSudo-master\Source\Native\Output\Binaries\Release\ARM64\NSudoAPI.dll");
+            // ④ 可选：自建的 NSudo 产物目录。用环境变量指定，源码里不写死任何开发机路径
+            //    （OCID_NSUDO_BINARIES 指向含 x64\ / Win32\ / ARM64\ 的根目录）。
+            string? nsudoRoot = Environment.GetEnvironmentVariable("OCID_NSUDO_BINARIES");
+            if (!string.IsNullOrWhiteSpace(nsudoRoot))
+            {
+                foreach (var d in new[] { archDir, "x64", "Win32", "ARM64" }.Distinct())
+                    candidates.Add(Path.Combine(nsudoRoot, d, "NSudoAPI.dll"));
+            }
 
             foreach (var c in candidates) if (File.Exists(c)) return c;
             return null;

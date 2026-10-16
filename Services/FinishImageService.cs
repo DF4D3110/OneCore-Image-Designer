@@ -9,7 +9,7 @@ namespace OneCore_Image_Designer.Services
     /// 镜像收尾：写 State.ini + 写 imagestate 注册表值 + 卸载 hive。
     ///
     /// 【为什么单独成类】收尾**必须与 CBS 步骤分进程执行**。
-    /// 实测（见 CBS_TECHNICAL_NOTES.md 第 11 节）：
+    /// 实测（同一镜像、同一条命令，只改进程边界）：
     ///   同一进程内（刚跑完 CBS）释放残留 hive → 9 → 9，重试 6 次（约 42 秒）全失败；
     ///   新进程 → 9 → 0，收尾完整成功（imagestate 写入 2 处）。
     /// 持有者是 CBS 的【服务】而非调用进程，要等调用方进程退出才放。

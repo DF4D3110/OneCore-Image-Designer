@@ -1,274 +1,258 @@
 # OneCore Image Designer
 
+> English version: [README.en-US.md](README.en-US.md)
+
 ![OneCore Image Designer](Assets/banner.png)
 
-OneCore Image Designer (OCID) is an independent Windows workbench for preparing and servicing
-Windows Core OS / OneCore / IoT Core images. It covers project-based OEMInput authoring, device
-layout authoring, image build, reconstruction of a system package set from an image, FFU browsing,
-Microsoft UUP query/download, an addonkit front end, and a set of offline registry, driver,
-firmware and component-store tools.
+OneCore Image Designer（OCID）是一个独立的 Windows 工作台，用于准备与服务 Windows Core OS /
+OneCore / IoT Core 镜像。它覆盖：基于工程的 OEMInput 编写、设备布局编写、镜像构建、从镜像反推系统包集、
+FFU 浏览、微软 UUP 查询与下载、addonkit 前端，以及一整套离线注册表、驱动、固件与组件存储工具。
 
-It is **not** a Microsoft product and is not affiliated with Microsoft. It does not redistribute
-the Windows servicing stack it is replacing (`CbsCore.dll`, `wcp.dll`, CMI/CSI/DMI, KTM), nor any
-Microsoft package sample. A small number of Microsoft utility binaries are retained as runtime
-inputs — the `Tools/wcpex` pair used to decompress DCM-compressed manifests, the `makeappx.exe`
-fixture used by the package-generation sources, and the tools shipped inside the vendored
-`addonkit/` — see [Third-party code and licensing](#third-party-code-and-licensing). Workflows that
-need Microsoft tooling otherwise use the ADK, DISM or Windows 10 IoT Core Kits installation already
-present on the machine; the parts of the servicing stack this project needs are being
-re-implemented as project-owned C++ (see
-[Self-contained servicing stack](#self-contained-servicing-stack-in-progress)).
+本项目**不是**微软产品，与微软没有从属关系。它不重分发自己所替换的 Windows 服务栈
+（`CbsCore.dll`、`wcp.dll`、CMI/CSI/DMI、KTM），也不重分发任何微软包样例。只有少量工具二进制作为
+**运行期输入**保留：用于解压 DCM 压缩清单的 `Tools/wcpex` 一对文件，以及内置 `addonkit/` 中随附的
+工具——完整清单见[第三方代码与许可](#第三方代码与许可)。需要微软工具链的流程，其余一律使用机器上
+已安装的 ADK、DISM 或 Windows 10 IoT Core Kits；本项目所需要的那部分服务栈，正在被重写为项目自有的
+C++（见[自带服务栈](#自带服务栈进行中)）。
 
-The application UI is in Chinese.
+应用界面为中文。
 
-## Requirements
+## 运行要求
 
-- Windows 10 / 11, x64.
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) — builds the WPF application, the
-  `UupBridge` helper, and the offline test harness.
-- Optional, depending on the workflow used:
-  - Administrator rights for anything that mounts, services or writes an image.
-  - Windows ADK (Deployment Tools) for the image-build and package-generation workflows; the ADK
-    build to use is selectable in-app.
-  - Windows 10 IoT Core Kits 1809 (10.0.17763.x) for the bundled addonkit shell, per the upstream
-    addonkit README.
-  - An image source: FFU, VHD/VHDX, WIM, or a mounted directory.
-  - Visual Studio 2022 with the C++ workload to build the native servicing stack.
-- The optional UUP-to-ISO workflow needs a separately built `UUPMediaConverter.exe` **and** a
-  .NET 10 runtime. Neither is shipped here (see [Third-party code and licensing](#third-party-code-and-licensing)).
+- Windows 10 / 11，x64。
+- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) —— 用于构建 WPF 主程序、
+  `UupBridge` 辅助进程和离线测试工具。
+- 视所用流程而定，另需：
+  - 管理员权限：任何挂载、服务或写入镜像的操作都需要。
+  - Windows ADK（Deployment Tools）：镜像构建与包生成流程需要；可在应用内选择使用哪个 ADK 版本。
+  - Windows 10 IoT Core Kits 1809（10.0.17763.x）：内置 addonkit shell 需要，见上游 addonkit README。
+  - 一个镜像来源：FFU、VHD/VHDX、WIM，或已挂载的目录。
+  - Visual Studio 2022 与 C++ 工作负载：构建原生服务栈需要。
+- 可选的「UUP 转 ISO」流程需要单独构建的 `UUPMediaConverter.exe`**以及**.NET 10 运行时；
+  两者都不随本仓库分发（见[第三方代码与许可](#第三方代码与许可)）。
 
-UUP queries and downloads run only when the user asks for them; nothing is queried or downloaded at
-startup.
+UUP 的查询与下载只会在用户主动发起时进行；启动时不查询、不下载任何东西。
 
-## Build and run
+## 构建与运行
 
 ```powershell
 git clone https://github.com/DF4D3110/OneCore-Image-Designer.git
 cd OneCore-Image-Designer
 ```
 
-Build and launch the application from the repository root. This also builds the repository-local
-`UupBridge` and copies its runtime files into the application output.
+在仓库根目录构建并启动主程序。这一步同时会构建仓库本地的 `UupBridge`，并把它的运行期文件复制进主程序
+输出目录。
 
 ```powershell
 dotnet build ".\OneCore Image Designer.csproj" --configuration Release
 bin\Release\net8.0-windows\OneCore Image Designer.exe
 ```
 
-The native servicing stack is separate and needs the Visual Studio C++ build environment. It
-cross-builds both architectures on purpose: the application is x64, while the servicing binaries it
-replaces are frequently x86.
+原生服务栈是独立的，需要 Visual Studio 的 C++ 构建环境。它刻意交叉构建两个架构：主程序是 x64，而它所
+替换的服务栈二进制往往是 x86。
 
 ```powershell
 .\Source\Native\build-servicing.ps1
 ```
 
-That writes `Source/Native/Output/x86/` and `Source/Native/Output/x64/` — the `OcidServicing`
-library, the `ocid_manifest.exe` console tool, and the native unit tests. These are build outputs
-and are not checked in: run the script once after cloning before using the servicing pages.
-`Services/OcidServicingNative.cs` locates the library relative to the application output, so no
-copy step is involved.
+该脚本输出到 `Source/Native/Output/x86/` 与 `Source/Native/Output/x64/`：`OcidServicing` 库、
+`ocid_manifest.exe` 控制台工具，以及原生单元测试。这些都是构建产物，**不**入库：克隆后需先跑一次该
+脚本，才能使用服务相关的页面。`Services/OcidServicingNative.cs` 会相对主程序输出目录定位该库，无需额外
+拷贝。
 
-Assemble the standalone CBS console bundle (the CLI plus its elevation helper):
+组装独立的 CBS 控制台包（CLI 加其提权辅助）：
 
 ```powershell
-.\Build-CbsBundle.ps1          # add -NoBuild to reuse an existing CLI build
+.\Build-CbsBundle.ps1          # 加 -NoBuild 可复用已有的 CLI 构建
 # -> bin\Release\net8.0-windows\CBS\
 ```
 
-Run the offline regression harness (no network, no UUP download):
+运行离线回归测试（不联网、不下载 UUP）：
 
 ```powershell
 dotnet run --project ".\Tests\OneCore.Image.Designer.OfflineTests.csproj" --configuration Release
 ```
 
-The main build also copies the bundled `addonkit/` tree into the output directory. That copy is
-additive — anything the in-app downloader has already placed under `addonkit\adk\` is left in place.
+主程序构建还会把内置的 `addonkit/` 目录树复制到输出目录。这一复制是增量的：应用内下载器已经放到
+`addonkit\adk\` 下的内容会原样保留。
 
-## Application overview
+## 应用概览
 
-| Area | View | What it does |
+| 区域 | 视图 | 功能 |
 | --- | --- | --- |
-| Start | `Views/StartPage.xaml` | Entry point; a tile per workflow, plus recent-artifact shortcuts. |
-| OEMInput | `Views/OEMInput/` | Discover FM and DeviceLayout inputs, edit V1/V2 OEMInput documents, validate them against the bundled schemas, and save `.cwproj` projects. |
-| Device layout | `Views/DeviceLayout/` | Inspect and author device layouts, generate the companion BSP components, and build PkgGen driver packages from a directory of INFs. |
-| Image build | `Views/ImageBuild/` | Drive the selected ADK build's `imageapp.exe` / `imggen.cmd`, discovering the tool set that matches the OS package build number. |
-| Reconstruction | `Views/SystemReconstruct/` | Rebuild a system package set from an image, with per-node XML preview. |
-| CBS | `Views/Cbs/` | CBS servicing against a mounted image. |
-| FFU browser | `Views/FFUBrowser/` | Browse FFU partitions, with a hex viewer. |
-| updateapp | `Views/UpdateAppView.xaml` | Dispatch the version-specific `updateapp.exe` commands, rendered per build from that build's official usage text, with per-command argument template, category and risk level. |
-| UUP | `Views/UupView.xaml` | Query Microsoft UUP by SKU/architecture/ring/branch, pick an update, save and reload snapshots, download it, and optionally convert to ISO through an external converter. |
-| SxS | `Views/SxsView.xaml` | Non-executing preflight/preview of a selected image and output directory. It runs no scripts and creates no output. |
-| addonkit | `Views/AddonKitView.xaml` | Microsoft `iot-adk-addonkit` front end: module/ADK status, sample workspace discovery, preflight gating, and elevated one-click build commands with live transcript logging. |
-| Tools | `Views/Tools/` | Offline registry editor, driver extractor, firmware parser, WinSxS hash calculator, dependency viewer, component-store verifier, and the ADK tool downloader. |
+| 起始页 | `Views/StartPage.xaml` | 入口；每个流程一个磁贴，另有最近使用产物快捷入口。 |
+| OEMInput | `Views/OEMInput/` | 发现 FM 与 DeviceLayout 输入，编辑 V1/V2 OEMInput 文档，用内置 schema 校验，并保存为 `.cwproj` 工程。 |
+| 设备布局 | `Views/DeviceLayout/` | 查看与编写设备布局，生成配套 BSP 组件，并从目录中的 INF 构建 PkgGen 驱动包。 |
+| 镜像构建 | `Views/ImageBuild/` | 驱动所选 ADK 版本的 `imageapp.exe` / `imggen.cmd`，自动发现与目标包版本号匹配的工具集。 |
+| 系统重建 | `Views/SystemReconstruct/` | 从镜像重建系统包集，支持逐节点 XML 预览。 |
+| CBS | `Views/Cbs/` | 对已挂载镜像做 CBS 服务。 |
+| FFU 浏览 | `Views/FFUBrowser/` | 浏览 FFU 分区，带十六进制查看器。 |
+| updateapp | `Views/UpdateAppView.xaml` | 派发各版本专属的 `updateapp.exe` 命令：按该版本的官方用法文本逐版本渲染，每个命令带参数模板、分类与风险等级。 |
+| UUP | `Views/UupView.xaml` | 按 SKU/架构/通道/分支查询微软 UUP，挑选更新，保存与重载快照，下载，并可选地经外部转换器转成 ISO。 |
+| SxS | `Views/SxsView.xaml` | 对选定镜像与输出目录做**不执行**的预检/预览：不跑脚本，不产生输出。 |
+| addonkit | `Views/AddonKitView.xaml` | 微软 `iot-adk-addonkit` 前端：模块/ADK 状态、示例工作区发现、预检门禁，以及提权的一键构建命令并实时回传日志。 |
+| 工具 | `Views/Tools/` | 离线注册表编辑器、驱动提取器、固件解析器、WinSxS 哈希计算器、依赖查看器、组件存储校验器，以及 ADK 工具下载器。 |
 
-Cross-cutting behaviour:
+贯穿全局的行为：
 
-- **Long-running work never blocks the UI.** Task output streams into a shared log window
-  (`Views/TaskLogWindow.xaml`) through a worker-thread queue drained on a batch timer instead of a
-  dispatcher call per line; logs are also persisted to temp files with copy/open controls.
-- **Elevation is explicit.** Operations that need it are launched through the bundled NSudo helper
-  (`Services/ElevationHelper.cs`) rather than requiring the whole application to run elevated.
-- **Destructive commands require confirmation** and are labelled by risk in the UI.
+- **长任务绝不阻塞 UI。** 任务输出经工作线程队列汇入统一日志窗口
+  （`Views/TaskLogWindow.xaml`），按批定时排空，而不是每行一次 dispatcher 调用；日志同时落盘到临时
+  文件，并提供复制/打开控件。
+- **提权是显式的。** 需要提权的操作经内置的 NSudo 辅助启动（`Services/ElevationHelper.cs`），而不是
+  要求整个应用以管理员身份运行。
+- **破坏性命令需要确认**，并在界面上按风险等级标注。
 
-## How it is put together
+## 代码组织
 
-- `OneCore Image Designer.csproj` — the WPF application (`net8.0-windows`, x64): MVVM with
-  `ViewModels/` + `Views/`, domain models in `Models/`, and the workflow logic in `Services/`.
-- `Services/` — ~75 single-purpose services (image build, CBS and SxS servicing, drivers, firmware,
-  component store, offline registry, UUP, addonkit, validation, logging). Most user-visible
-  behaviour lives here; the views stay thin.
-- `UupShared/` — offline UUP query parsing and payload contracts, shared by the app and the bridge.
-- `UupBridge/` — a separate `net8.0` adapter executable over the vendored UUP core; the application
-  builds it and copies it into the output rather than referencing it directly.
-- `MobilePackageGen/` — the package-generation toolchain (CLI, WinForms GUI, FFU/VHDX/WIM/raw-FS/
-  storage-pool adapters, CAB and DCM compression, cat/signature rebuilding, the `CbsxCli` and
-  `SxSFounderCli` command-line tools). It has its own README at `MobilePackageGen/readme.md`.
-- `Source/Native/` — the project-owned C++ servicing stack and the diagnostic registry hook.
-- `ThirdParty/` — the vendored UUP source closure and the consolidated third-party notice.
-- `Schemas/`, `Assets/` — the OEMInput XML schemas and the UI assets, project templates and
-  device-layout validation rule sets.
+- `OneCore Image Designer.csproj` —— WPF 主程序（`net8.0-windows`，x64）：MVVM，`ViewModels/` +
+  `Views/`，领域模型在 `Models/`，流程逻辑在 `Services/`。
+- `Services/` —— 约 75 个单一职责服务（镜像构建、CBS 与 SxS 服务、驱动、固件、组件存储、离线注册表、
+  UUP、addonkit、校验、日志）。绝大多数可见行为都在这里，视图层保持薄。
+- `UupShared/` —— 离线 UUP 查询解析与负载契约，由主程序与桥接进程共用。
+- `UupBridge/` —— 独立的 `net8.0` 适配可执行文件，包在内置 UUP 核心之上；主程序构建它并把结果复制进
+  输出目录，而不是直接引用。
+- `MobilePackageGen/` —— 包生成工具链（CLI、WinForms GUI、FFU/VHDX/WIM/裸文件系统/存储池适配器、
+  CAB 与 DCM 压缩、cat/签名重建，以及 `CbsxCli`、`SxSFounderCli` 两个命令行工具）。它有自己的
+  README：`MobilePackageGen/readme.md`。
+- `Source/Native/` —— 项目自有的 C++ 服务栈，以及诊断用的注册表钩子。
+- `ThirdParty/` —— `UupBridge` 使用的内置 UUP 源码闭包（`ThirdParty/UUPMediaCreator/`）。
+- `Schemas/`、`Assets/` —— OEMInput XML schema，以及界面资源、工程模板与设备布局校验规则集。
 
-### Era-aware OEMInput validation
+### 按年代选择的 OEMInput 校验
 
-OEMInput documents are validated with the schema family that matches the target OS build: 11
-schemas are bundled (`Schemas/OEMInput.V1.*.xsd`, `V2.*.xsd`) and the optional target build —
-auto-detected from the selected package root when possible — selects one of them. Field-level era
-gating adds warnings for fields that do not exist in every generation (AppX optional packages,
-MachineInfoFile, TestContent/DevicePlatformIDs, V2-only and V2-obsolete fields). The device-layout
-rule sets under `Assets/ValidationRules/` are likewise stored per ADK build family, so the rule set
-matches whichever ADK the user has installed.
+OEMInput 文档会用与目标系统版本匹配的 schema 家族来校验：仓库内置 11 个 schema
+（`Schemas/OEMInput.V1.*.xsd`、`V2.*.xsd`），可选的目标版本——在可能时从所选包根自动识别——决定用哪一个。
+字段级的年代门禁会为并非每一代都存在的字段给出警告（AppX 可选包、MachineInfoFile、
+TestContent/DevicePlatformIDs、V2 专有与 V2 已废弃字段）。`Assets/ValidationRules/` 下的设备布局规则集
+同样按 ADK 版本家族存放，因此规则集与用户实际安装的 ADK 相符。
 
-## Self-contained servicing stack (in progress)
+## 自带服务栈（进行中）
 
-The long-term goal is to assemble a Windows image from a package set **without depending on the
-operating system's own servicing components**. Upstream that work is done by `CbsCore.dll` (CBS),
-`wcp.dll` (WCP/SMI), the CMI engine, the CSI/DMI providers and KTM. Those components are
-architecture-specific, version-locked, and partly encumbered by independent licenses, so OCID
-re-implements the behaviour it needs as project-owned C++ under `Source/Native/OcidServicing/`, and
-exposes it to the application through a small C ABI.
+长期目标：**在不依赖操作系统自身服务组件的前提下**，从包集组装 Windows 镜像。上游这件事由
+`CbsCore.dll`（CBS）、`wcp.dll`（WCP/SMI）、CMI 引擎、CSI/DMI 提供程序与 KTM 完成。这些组件与架构绑
+定、与版本锁定，且部分受独立许可约束，因此 OCID 把所需行为重写为项目自有的 C++
+（`Source/Native/OcidServicing/`），并通过一个小型 C ABI 暴露给应用。
 
-| Module | Responsibility |
+| 模块 | 职责 |
 | --- | --- |
-| `Identity` | Assembly identity: the canonical `name~version~arch~token~language` string, `versionScope` handling, the forced `0.0.0.0` version of non-SxS packages, and component-name derivation including Windows' long-name abbreviation rule. |
-| `Manifest` | Self-contained pull parser for component manifests: identity, both registry declaration mechanisms (`registryKeys` and `configurationSchema`), security descriptor definitions, trust info and directories. |
-| `WcmSchema` | WCM (`smiengine`) schema declarations — `wcm:handler`, `wcm:legacyName`, `wcm:legacyType`, `default` — and the key-level attributes (`securityDescriptor`, `perUserVirtualization`, `mapDesiredAccessToMaxAllowedAccess`). |
-| `RegistryValue` | Registry value encoding (declaration text to raw bytes, per value type) and type-correct merging. |
-| `CmiInstaller` | CMI write decisions: `owner`, `operationHint` (replace / append / prepend), `InternalInstall`, and the per-type merge rules. |
-| `MacroExpander` | Expansion of `$(runtime.*)` path macros and `$(runtime.host.*)` registry-root macros, including WOW64 variants and unresolved-macro reporting. |
-| `SecurityDescriptor` | SDDL resolution and description, `(inherit)` pass-through, and SDDL ↔ self-relative binary conversion. |
+| `Identity` | 装配标识：规范字符串 `name~version~arch~token~language`、`versionScope` 处理、非 SxS 包强制 `0.0.0.0` 版本，以及组件名推导（含 Windows 的长名缩写规则）。 |
+| `Manifest` | 自带的组件清单拉取式解析器：标识、两套注册表声明机制（`registryKeys` 与 `configurationSchema`）、安全描述符定义、trustInfo 与 directories。 |
+| `WcmSchema` | WCM（`smiengine`）schema 声明——`wcm:handler`、`wcm:legacyName`、`wcm:legacyType`、`default`——以及键级属性（`securityDescriptor`、`perUserVirtualization`、`mapDesiredAccessToMaxAllowedAccess`）。 |
+| `RegistryValue` | 注册表值编码（声明文本到原始字节，按值类型）与类型正确的合并。 |
+| `CmiInstaller` | CMI 写入决策：`owner`、`operationHint`（replace / append / prepend）、`InternalInstall`，以及分类型的合并规则。 |
+| `MacroExpander` | `$(runtime.*)` 路径宏与 `$(runtime.host.*)` 注册表根宏的展开，含 WOW64 变体与未展开宏上报。 |
+| `SecurityDescriptor` | SDDL 解析与描述、`(inherit)` 直通，以及 SDDL ↔ 自相对二进制互转。 |
 
-The same code backs both the console tool and the application. The managed side binds through
-`Services/OcidServicingNative.cs` and applies the decisions in `Services/OcidSmiService.cs`. The
-application deliberately never falls back to a managed re-implementation of value encoding: when the
-native library is unavailable it skips the operation and reports it, because a silently wrong byte
-image is worse than a reported failure.
+同一份代码同时支撑控制台工具与主程序。托管侧经 `Services/OcidServicingNative.cs` 绑定，并在
+`Services/OcidSmiService.cs` 中应用决策。应用刻意**不**回退到托管版的值编码实现：原生库不可用时跳过该
+操作并如实上报——一个静默写错的字节映像比一次明确的失败更糟。
 
-`Source/Native/OcidServicing/tools/ocid_manifest.cpp` builds `ocid_manifest.exe`, a console entry
-point for inspecting and exporting the same decisions (`info`, `ops`, `scan`, `export-ops`,
-`verify-names`, `expand`, `macros`, `dump-xsd`), used for corpus-wide verification.
+`Source/Native/OcidServicing/tools/ocid_manifest.cpp` 构建出 `ocid_manifest.exe`，这是查看与导出同一
+批决策的控制台入口（`info`、`ops`、`scan`、`export-ops`、`verify-names`、`expand`、`macros`、
+`dump-xsd`），用于全语料验证。
 
-`Source/Native/OcidRegHook/` is a separate x86 DLL that patches `wcp.dll`'s import table so the
-registry calls the upstream servicing stack makes can be observed — and optionally redirected to an
-offline hive — instead of hitting the host registry. It is loaded only by the legacy
-`wcp.dll`-driven CBS path, is off-limits to the target design, and defaults to log-only
-(`OCID_REGHOOK`, `OCID_REGHOOK_LOG`, `OCID_REGHOOK_MAP`, `OCID_REGHOOK_REWRITE`). It is an interim
-research instrument, not part of the self-contained servicing stack.
+`Source/Native/OcidRegHook/` 是一个独立的 x86 DLL，它给 `wcp.dll` 的导入表打补丁，使上游服务栈发出的
+注册表调用可以被观察——并可选地重定向到离线 hive——而不是直接落到宿主注册表。它只被遗留的、由
+`wcp.dll` 驱动的 CBS 路径加载，不属于目标设计，且默认只记日志（`OCID_REGHOOK`、`OCID_REGHOOK_LOG`、
+`OCID_REGHOOK_MAP`、`OCID_REGHOOK_REWRITE`）。它是过渡期的研究工具，不是自带服务栈的一部分。
 
-## Repository layout
+## 仓库布局
 
 ```text
-Assets/                   UI assets, templates, and per-ADK-build device-layout validation rules
-Models/                   Domain and project models
-Services/                 Workflow services (image, CBS, SxS, drivers, firmware, offline registry, UUP, validation)
-ViewModels/               WPF view models
-Views/                    WPF pages, steps and dialogs
-Schemas/                  Bundled OEMInput V1/V2 schemas
-MobilePackageGen/         Package-generation toolchain, CLIs and GUI (own README)
-UupBridge/                Separate .NET 8 adapter over the vendored UUP core
-UupShared/                Offline UUP query parsing and payload contracts shared by app and bridge
-Tests/                    Offline regression harness
-Source/Native/OcidServicing/  Project-owned C++ servicing stack: library, console tool and native tests
-Source/Native/OcidRegHook/    Diagnostic registry interception DLL for the legacy CBS path
-Tools/wcpex/              Vendored wcpex.exe + wcp.dll, used to decompress DCM-compressed manifests
-ThirdParty/               Vendored UUP source closure and the third-party notice inventory
-addonkit/                 Bundled Microsoft iot-adk-addonkit 17763-v7 (PowerShell toolchain + sample workspace)
-Build-CbsBundle.ps1       Assembles the standalone CBS console bundle
+Assets/                   UI 资源、模板，以及分 ADK 版本的设备布局校验规则
+Models/                   领域与工程模型
+Services/                 流程服务（镜像、CBS、SxS、驱动、固件、离线注册表、UUP、校验）
+ViewModels/               WPF 视图模型
+Views/                    WPF 页面、步骤与对话框
+Schemas/                  内置 OEMInput V1/V2 schema
+MobilePackageGen/         包生成工具链、命令行工具与 GUI（自带 README）
+UupBridge/                独立 .NET 8 适配进程，包在内置 UUP 核心之上
+UupShared/                离线 UUP 查询解析与负载契约，主程序与桥接共用
+Tests/                    离线回归测试
+Source/Native/OcidServicing/  项目自有 C++ 服务栈：库、控制台工具与原生测试
+Source/Native/OcidRegHook/    遗留 CBS 路径用的诊断注册表拦截 DLL
+Tools/wcpex/              内置 wcpex.exe + wcp.dll，用于解压 DCM 压缩的清单
+ThirdParty/               UupBridge 使用的内置 UUP 源码闭包
+addonkit/                 内置的微软 iot-adk-addonkit 17763-v7（PowerShell 工具链 + 示例工作区）
+Build-CbsBundle.ps1       组装独立的 CBS 控制台包
 ```
 
-Generated `bin`, `obj`, `build`, `intermediate` and `Source/Native/Output` trees, debug symbols and
-generated Appx files are not tracked; release packages belong on GitHub Releases. The checked-in
-`7z.dll` architecture variants, the `makeappx.exe` fixture and its support DLLs, and `Tools/wcpex`
-are retained **runtime** inputs (consumed by the package-generation sources or embedded into the
-application), not build outputs.
+生成的 `bin`、`obj`、`build`、`intermediate` 与 `Source/Native/Output` 目录、调试符号、生成的 Appx
+文件都不入库；发布包放在 GitHub Releases。作为**运行期**输入保留的是 `Tools/wcpex/` 与 `addonkit/`
+目录树，二者都是运行期被消费，而不是由构建产出。
 
-The per-build ADK tool zips consumed by the in-app downloader (`addonkit\adk\<build>\`) are hosted
-as assets on this repository's GitHub Release tagged `adktool`.
+应用内下载器消费的分 ADK 版本工具 zip（落在 `addonkit\adk\<build>\`）作为资源托管在本仓库的 GitHub
+Release 上，标签为 `adktool`。
 
-## Tests
+## 测试
 
-`Tests/` is an offline regression harness (`Tests/Program.cs`, no network, no image required). It
-groups checks for UUP query parsing and snapshot round-trip, payload lookup and path-traversal
-rejection, bridge cancellation and error propagation, conversion input/output/tool validation,
-overwrite protection, same-drive free-space accounting, safe CLI argument construction, artifact
-preflight, the SxS no-execution gate, XML capability detection, and the managed-to-native servicing
-bindings.
+`Tests/` 是离线回归工具（`Tests/Program.cs`，不联网、不需要镜像）。其中分组覆盖：UUP 查询解析与快照
+往返、负载定位与路径穿越拒绝、桥接取消与错误传播、转换输入/输出/工具校验、覆盖保护、同盘剩余空间核算、
+命令行参数安全构造、产物预检、SxS 不执行门禁、XML 能力探测，以及托管到原生的服务绑定。
 
-The native modules have their own assertion suites, built and run by `build-servicing.ps1`:
-`identity`, `manifest`, `wcm`, `registryvalue`, `cmiinstaller`, `macroexpander`,
-`securitydescriptor`.
+原生模块各有断言套件，由 `build-servicing.ps1` 构建并运行：`identity`、`manifest`、`wcm`、
+`registryvalue`、`cmiinstaller`、`macroexpander`、`securitydescriptor`。
 
-## Third-party code and licensing
+## 第三方代码与许可
 
-The repository root `LICENSE` (MIT) applies to this project's own code only; it does not relicense
-vendored software. Preserve the per-component notices when redistributing.
+仓库根目录的 `LICENSE`（MIT）只适用于本项目自有的代码，不会重新许可内置的第三方软件；再分发时请保留
+各组件自带的声明。下表是本仓库所引用、内置或随附的全部第三方代码与二进制清单；其余部分要么是项目自有，
+要么取自用户自行提供的安装。
 
-- **[UUPMediaCreator](https://github.com/OSTooling/UUPMediaCreator)** — MIT. Its original license and
-  upstream README are retained under `ThirdParty/UUPMediaCreator/`. Only the source projects needed
-  by `UupBridge` are included; no converter or `cdimage.exe` binary is redistributed.
-- **Cabinet LZX decoder** — dual-licensed LGPL-2.1 or MS-PL; the source header and license are
-  retained. **SevenZipExtractor / 7-Zip** — LGPL-2.1. **Microsoft.Deployment.Compression** (WiX) —
-  MS-RL.
-- **`addonkit/`** — Microsoft's open-source `iot-adk-addonkit` (release 17763-v7), MIT; its
-  `LICENSE` is retained at `addonkit/LICENSE`. The sample certificates and `.pfx` files inside it
-  are Microsoft's publicly published sample keys shipped with the official toolkit, not private
-  credentials.
-- **`MobilePackageGen/`** — a fork/rework of WSK Tools v1.0.4 and upstream MobilePackageGen. Its
-  component inventory, including DiscUtils (MIT), NSudo (MIT), Img2Ffu (MIT), StorageSpace (MIT)
-  and DotnetPackaging.Msix (MIT), is documented in `MobilePackageGen/readme.md` and
-  `MobilePackageGen/license.md`.
-- **Tooling binaries** — `Tools/wcpex/` and the package-generation support DLLs are third-party
-  binaries retained as runtime inputs; see `ThirdParty/THIRD-PARTY-NOTICES.md`.
+### 主程序直接依赖的库
 
-Not distributed, and therefore not usable from a clean clone:
+| 组件 | 位置 | 许可证 |
+| --- | --- | --- |
+| [CommunityToolkit.Mvvm](https://github.com/CommunityToolkit/dotnet) 8.4.2 | `OneCore Image Designer.csproj` 的 NuGet 引用 | MIT |
+| [RawDiskLib](https://github.com/LTRData/RawDiskLib) 0.2.1 | NuGet 引用 | 见包内许可 |
+| [LTRData.DiscUtils](https://github.com/LTRData/DiscUtils) 1.0.55 | NuGet 引用 | MIT |
+| [System.Management](https://github.com/dotnet/runtime) 8.0.0 | NuGet 引用 | MIT |
 
-- `CbsExploder` and `SxSFounder` executables — their independent redistribution terms have not been
-  established. Microsoft package samples are not included either.
-- The GPL-3.0 `pureSxS` / `explodeSxS` script trees that were previously vendored under
-  `ThirdParty/SxS/` have been **removed** from the repository. The behaviours they documented are
-  re-implemented in project code (`Services/PureSxsService.cs`,
-  `Services/ExplodeSxSNativeService.cs`, both of which record their provenance in their file
-  headers). The SxS page remains a read-only preflight and executes nothing.
-- A UUP-to-ISO converter and its .NET 10 runtime — the user must supply a separately built one.
+### 内置的源码树与二进制
 
-`ThirdParty/THIRD-PARTY-NOTICES.md` is an inventory of provenance, not a legal opinion on
-distribution of a combined work.
+| 组件 | 上游 | 本仓库位置 | 许可证 |
+| --- | --- | --- | --- |
+| iot-adk-addonkit 17763-v7 | [microsoft/iot-adk-addonkit](https://github.com/microsoft/iot-adk-addonkit) | `addonkit/` —— PowerShell 版 IoT Core 镜像工具链及其示例工作区 | MIT（`addonkit/LICENSE`）；微软自带的第三方声明清单见 `addonkit/TPN`。其中的示例证书与 `.pfx` 是微软随官方工具链公开发布的示例密钥，**不是**私密凭据。 |
+| MobilePackageGen（fork） | [MobileTooling/MobilePackageGen](https://github.com/MobileTooling/MobilePackageGen) → [DF4D3110/MobilePackageGen](https://github.com/DF4D3110/MobilePackageGen) | `MobilePackageGen/` —— CLI、WinForms GUI、`CbsxCli`、`SxSFounderCli`、各类镜像适配器、CAB/DCM 压缩、cat/签名重建 | MIT。完整组件表见 `MobilePackageGen/readme.md`，许可正文见 `MobilePackageGen/license.md`。 |
+| WSK Tools v1.0.4 | [gus33000/WSK](https://github.com/gus33000/WSK) | MobilePackageGen fork 的原始基线 | MIT |
+| UUPMediaCreator | [OSTooling/UUPMediaCreator](https://github.com/OSTooling/UUPMediaCreator) | `ThirdParty/UUPMediaCreator/` —— 源码闭包；只含 `UupBridge` 需要的工程，保留上游许可与 README | MIT。`src/Cabinet/Xna/LzxDecoder.cs` 为 LGPL-2.1 或 MS-PL 双许可，保留其原始文件头。不重分发任何转换器或 `cdimage.exe` 二进制。 |
+| NSudo（提权） | [M2TeamArchived/NSudo](https://github.com/M2TeamArchived/NSudo)（已归档；`NSudoAPI.dll` 用 [UUP-Project/NSudo](https://github.com/UUP-Project/NSudo) 分支构建） | C# 绑定位于 `MobilePackageGen/MobilePackageGen.Common/NSudo`；DLL 本身**不**随仓库分发 | MIT |
+| wcpex | [smx-smx/wcpex](https://github.com/smx-smx/wcpex) | `Tools/wcpex/wcpex.exe` + `wcp.dll`，以内嵌资源方式打包、运行期释放，用于解压 DCM 压缩的清单 | 预编译二进制；上游未随附许可文件，因此这里按原样保留、不参与构建。 |
+| DevImgGen | [mediaexplorer74/DevImgGen](https://github.com/mediaexplorer74/DevImgGen)（fork：[DF4D3110/DevImgGen](https://github.com/DF4D3110/DevImgGen)） | 镜像构建页入口的**设计参考**，记录在 `ViewModels/ImageBuild/ImageBuildViewModel.cs` 的文件头注释里 | MIT。未复制任何代码，也未分发其中任何内容。 |
 
-## Status
+内置的 `MobilePackageGen/` 子树的完整组件清单——LTRData.DiscUtils、RawDiskLib、SharpZipLib、
+System.Reactive、ZLibDotNet、System.IO.Hashing、Zafiro.DivineBytes、SevenZipExtractor / 7-Zip
+（LGPL-2.1）、Microsoft.Deployment.Compression（WiX，MS-RL）、Cabinet 与 XNA LzxDecoder、
+DotnetPackaging.Msix、DeflateBlockCompressor、LibSxS、Img2Ffu、StorageSpace、WPMT.Core，以及系统组件
+`msdelta.dll`——在 `MobilePackageGen/readme.md` 中逐条列出。
 
-This is an active work in progress. Two things are worth stating plainly:
+### 被引用或使用，但不随本仓库分发
 
-1. **The servicing stack rewrite is incomplete.** The modules listed above are implemented and
-   tested, but the application still drives upstream servicing binaries for CBS/CSI work. The
-   direction is to replace them module by module rather than to redistribute them, so that
-   assembling an image from a package set no longer requires the operating system's own servicing
-   components.
-2. **Some workflows depend on software the user must provide** — the ADK, the IoT Core Kits, a
-   separately built UUP converter, and administrator rights. Where a workflow cannot run it says so
-   instead of silently degrading.
+- 从机器上取用的微软工具与组件：ADK、DISM、Windows 10 IoT Core Kits、微软包样例，以及
+  `msdelta.dll`。
+- 应用内下载器使用的分版本 ADK 工具 zip，作为资源托管在本仓库的 GitHub Release 上（标签
+  `adktool`）。
+- `CbsExploder` 与 `SxSFounder` 可执行文件——其独立的再分发条款尚未确定。
+- UUP 转 ISO 转换器及其 .NET 10 运行时——需用户自行提供单独构建的版本。
+- 曾在 `ThirdParty/SxS/` 下内置的 GPL-3.0 `pureSxS` / `explodeSxS` 脚本树已从仓库中**移除**；它们
+  所记录的行为已在项目代码中重写（`Services/PureSxsService.cs`、
+  `Services/ExplodeSxSNativeService.cs`，两者都在文件头注明了来源）。SxS 页面仍是只读预检，不执行
+  任何东西。
+- 包生成源码曾经携带的微软 `makeappx.exe` 夹具及其支持 DLL
+  （`MobilePackageGen/DotnetPackaging.Msix/RemakeAppxTestContent/`）已**移除**；这些源码改用自有的托管
+  实现，仅保留纯托管的测试内容。
 
-## About
+## 状态
 
-The Help → About entry opens the Windows-provided Shell About dialog through
-`rundll32 shell32.dll,ShellAbout`; the application does not display a separately authored About
-description.
+本项目仍在积极开发中。有两点值得直说：
+
+1. **服务栈的重写尚未完成。** 上表所列模块已实现并有测试覆盖，但应用在 CBS/CSI 相关工作中仍会驱动上游
+   服务栈二进制。方向是**逐模块替换**它们，而不是重分发它们，最终使「从包集组装镜像」不再需要操作系统
+   自身的服务组件。
+2. **部分流程依赖用户自备的软件** —— ADK、IoT Core Kits、单独构建的 UUP 转换器，以及管理员权限。
+   流程跑不起来时会明确说明，而不是静默降级。
+
+## 关于
+
+「帮助 → 关于」通过 `rundll32 shell32.dll,ShellAbout` 打开 Windows 自带的 Shell About 对话框；应用
+自身不显示另行撰写的关于信息。

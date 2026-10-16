@@ -23,7 +23,7 @@ namespace OneCore_Image_Designer.Services
     ///     · 进程退出兜底（AppDomain.ProcessExit）。
     ///
     /// 【提权】需要管理员/TrustedInstaller 权限时走已移植的 NSudo
-    ///   （MobilePackageGen.Common\NSudo，或外部 D:\UUP-Project\NSudo-master）。
+    ///   （`MobilePackageGen.Common\NSudo`，或由 `OCID_NSUDO_BINARIES` 指向的自建产物目录）。
     /// </summary>
     public static class CbsSafety
     {

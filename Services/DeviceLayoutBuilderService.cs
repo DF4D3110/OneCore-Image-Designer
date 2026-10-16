@@ -69,7 +69,7 @@ namespace OneCore_Image_Designer.Services
 
     /// <summary>
     /// 「设备布局创建」核心服务：从零造 DeviceLayout FM + CAB（打包→makecat→可选签名）。
-    /// 打包工具链按 E:\wcos\Tool README 的重打包流程；两种时代的包/FM/manifest/mum 模板全部取自真实样本，
+    /// 打包工具链按本地样本集里 Tool README 的重打包流程；两种时代的包/FM/manifest/mum 模板全部取自真实样本，
     /// keyform 文件名哈希复用已实测 100% 命中的 WinSxSHashCalculator。
     /// </summary>
     public static class DeviceLayoutBuilderService
@@ -631,10 +631,27 @@ CATATTR3=0x00010001:PE:TRUSTED
         internal static string? FindTool(string? explicitPath, string fileName)
         {
             if (!string.IsNullOrWhiteSpace(explicitPath) && File.Exists(explicitPath)) return explicitPath;
-            string[] roots = { @"E:\wcos\Tool", @"E:\Assessment and Deployment Kit\adk-src\adk", @"E:\Assessment and Deployment Kit\build_tools", @"F:\Program Files", @"C:\Program Files (x86)\Windows Kits\10\bin", @"D:\Windows Kits\10\bin", @"D:\Windows Kits\10\tools\bin\i386" };
+
+            // 搜索根按"可移植"的方式拼出来，不写死任何开发机盘符布局：
+            //   ① 环境变量 OCID_TOOL_ROOT（可用 ';' 分隔多个根）
+            //   ② 常规的 Windows Kits 位置（Program Files / Program Files (x86)）
+            //   ③ 应用目录下的 addonkit\adk（AdkToolService 把下载的 ADK 工具解到这里）
+            var roots = new List<string>();
+            string? extra = Environment.GetEnvironmentVariable("OCID_TOOL_ROOT");
+            if (!string.IsNullOrWhiteSpace(extra))
+                roots.AddRange(extra.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+
+            string pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            string pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            if (!string.IsNullOrWhiteSpace(pf86)) roots.Add(Path.Combine(pf86, @"Windows Kits\10\bin"));
+            if (!string.IsNullOrWhiteSpace(pf)) roots.Add(Path.Combine(pf, @"Windows Kits\10\bin"));
+            if (!string.IsNullOrWhiteSpace(pf86)) roots.Add(Path.Combine(pf86, @"Windows Kits\10\Tools\bin\i386"));
+
+            roots.Add(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "addonkit", "adk"));
+
             foreach (var r in roots)
             {
-                if (!Directory.Exists(r)) continue;
+                if (string.IsNullOrWhiteSpace(r) || !Directory.Exists(r)) continue;
                 try { var hit = Directory.EnumerateFiles(r, fileName, SearchOption.AllDirectories).FirstOrDefault(); if (hit != null) return hit; }
                 catch { }
             }

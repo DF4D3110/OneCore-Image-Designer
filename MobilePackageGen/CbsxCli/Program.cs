@@ -111,7 +111,7 @@ internal static class Program
 
             // /finish：以【独立进程】执行收尾（写 State.ini + imagestate）。
             // 必须独立成进程 —— CBS 服务会持有目标镜像的 hive 直到调用方进程退出，
-            // 同一进程内收尾必然失败（详见 CBS_TECHNICAL_NOTES.md 第 11 节）。
+            // 同一进程内收尾必然失败（实测：同进程重试 6 次全失败，换新进程一次成功）。
             if (o.Finish)
             {
                 // 如果指定了 /waitfor:<pid>，先等那个进程退出再收尾。
