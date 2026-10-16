@@ -13,6 +13,7 @@
 //
 // 输出约定：**数据走 stdout，诊断走 stderr** —— 这样 C# 侧可以干净地消费 stdout。
 
+#include "ocid/ConsoleUtf8.h"
 #include "ocid/Manifest.h"
 #include "ocid/RegistryValue.h"
 #include "ocid/WcmSchema.h"
@@ -22,62 +23,16 @@
 #include <string>
 #include <vector>
 
-#ifdef _WIN32
-#include <windows.h>
-#include <io.h>
-#include <fcntl.h>
-#endif
-
 using namespace ocid;
 
 // ── 窄/宽字符串与控制台输出 ─────────────────────────────────────────────
 //
-// 控制台是 GBK 的话直接打宽字符会乱码，所以统一转成 UTF-8 再写 stdout。
-// 关键：把 stdout 设成 **二进制模式**（避免 CRLF 被再转换、也避免 0x1A 之类被当 EOF）。
+// UTF-8 控制台设置与宽→UTF-8 转换都在 `ocid/ConsoleUtf8.h`（测试也用同一份，
+// 见那里的说明：CRT 的 `printf("%ls")` 在 C locale 下会把中文变成 `?` 或直接吞掉）。
 
 namespace {
 
-    void SetupConsole()
-    {
-#ifdef _WIN32
-        _setmode(_fileno(stdout), _O_BINARY);
-        SetConsoleOutputCP(CP_UTF8);
-#endif
-    }
-
-    std::string ToUtf8(const std::wstring& w)
-    {
-#ifdef _WIN32
-        if (w.empty()) return std::string();
-        int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
-        std::string out((size_t)n, '\0');
-        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &out[0], n, nullptr, nullptr);
-        return out;
-#else
-        return std::string(w.begin(), w.end());
-#endif
-    }
-
-    std::wstring FromUtf8OrAnsi(const char* s)
-    {
-#ifdef _WIN32
-        if (!s) return L"";
-        int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, nullptr, 0);
-        if (n > 0) {
-            std::wstring w((size_t)(n - 1), L'\0');
-            MultiByteToWideChar(CP_UTF8, 0, s, -1, &w[0], n);
-            return w;
-        }
-        // 不是合法 UTF-8：按 ANSI 处理（命令行参数常见来源）
-        n = MultiByteToWideChar(CP_ACP, 0, s, -1, nullptr, 0);
-        std::wstring w((size_t)(n - 1), L'\0');
-        MultiByteToWideChar(CP_ACP, 0, s, -1, &w[0], n);
-        return w;
-#else
-        std::string t(s ? s : "");
-        return std::wstring(t.begin(), t.end());
-#endif
-    }
+    void SetupConsole() { SetupConsoleUtf8(); }
 
     void Out(const std::string& s)   { fwrite(s.data(), 1, s.size(), stdout); }
     void OutLn(const std::string& s) { Out(s); Out("\n"); }
