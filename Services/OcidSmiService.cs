@@ -1,8 +1,10 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
 
 namespace OneCore_Image_Designer.Services
 {
@@ -131,6 +133,30 @@ namespace OneCore_Image_Designer.Services
             public string Component = "";
             /// <summary>来源机制：`registryKeys`（清单里第一套声明）或 `wcm`（configurationSchema）。两套是不同集合。</summary>
             public string Mechanism = "";
+
+            // ── 由 C++ 侧（ocid_manifest.exe）预先编码好的最终字节 ─────────────────
+            //
+            // ⚠ 为什么不在这里解释 valueType：把"清单文本 → hive 字节"当成**服务栈语义**
+            //   只有一份实现（在 Source/Native/OcidServicing/src/RegistryValue.cpp）。
+            //   这些规则不是格式偏好，是从反编译 + 70224 份真实清单 + 本机活注册表
+            //   三重证据里钉出来的，例如：
+            //     · REG_QWORD 的 16 个 hex 字符是【8 字节内存镜像】，不是数值。
+            //       按数值解析 `0001000000000000` 会得到 0x0001000000000000，
+            //       而活注册表里它是 0x100 —— 差 2^48 倍，而且**不报错**。
+            //     · REG_MULTI_SZ 的 `"a","b"` 里那对引号是【列表项定界符】，不是数据。
+            //   之前 C# 侧的 ConvertData() 正是这两条都做错了（加上 REG_NONE 与
+            //   REG_LINK/REG_RESOURCE_* 落成 REG_SZ 一共四个 bug），只是那两份清单里
+            //   恰好没有这些类型，所以一直没暴露。
+            /// <summary>原生工具是否成功把值编码成字节。false ⇒ **不要写**，应报错。</summary>
+            public bool Encoded;
+            /// <summary>真实 Win32 `REG_*` 类型码（写 <c>RegSetValueExW</c> 用的那个）。</summary>
+            public uint TypeCode;
+            /// <summary>要写进 hive 的**精确字节**（大写 hex，无前缀）。</summary>
+            public string DataHex = "";
+            /// <summary>值里含未展开的 <c>$(…)</c> 宏 —— 写下去一定是错的，需上层决策。</summary>
+            public bool HasMacro;
+            /// <summary>编码失败原因（<see cref="Encoded"/> 为 false 时有效）。</summary>
+            public string EncodeError = "";
         }
 
         /// <summary>
@@ -269,7 +295,25 @@ namespace OneCore_Image_Designer.Services
                 // （实测 `owner="true"/"false"`、`operationHint="replace"`）。
                 Owner = line.Contains("\"owner\":true"),
                 OperationHint = Get("operationHint") is { Length: > 0 } oh ? oh : "replace",
+                // 编码结果由 C++ 侧给出（见 RegSetting 里的说明）。
+                Encoded = line.Contains("\"encoded\":true"),
+                TypeCode = ParseUIntField(line, "typeCode"),
+                DataHex = Get("dataHex") ?? "",
+                HasMacro = line.Contains("\"hasMacro\":true"),
+                EncodeError = Get("encodeError") ?? "",
             };
+        }
+
+        /// <summary>取 JSON 里的无引号数字字段（`"typeCode":11`）。</summary>
+        private static uint ParseUIntField(string line, string key)
+        {
+            string pat = "\"" + key + "\":";
+            int i = line.IndexOf(pat, StringComparison.Ordinal);
+            if (i < 0) return 0;
+            i += pat.Length;
+            int start = i;
+            while (i < line.Length && char.IsDigit(line[i])) i++;
+            return start == i ? 0 : uint.Parse(line.AsSpan(start, i - start));
         }
 
         /// <summary>
@@ -338,10 +382,45 @@ namespace OneCore_Image_Designer.Services
                 return false;
             }
 
-            object? value = ConvertData(s.ValueType, s.Data);
-            key.SetValue(s.ValueName, value ?? "", ToRegistryKind(s.ValueType));
+            // ⚠ 这里**必须**走 RegSetValueExW 写原始字节，不能再用 RegistryKey.SetValue。
+            //   原因见 RegSetting 里那段：.NET 的 SetValue 会按它自己的类型系统重新解释数据，
+            //   REG_QWORD 的 8 字节内存镜像与 REG_MULTI_SZ 的引号定界符都会被它改掉或抛错。
+            //   C++ 侧已经把最终字节算好了（`DataHex`），这里只做"搬运"，不再有第二份解释逻辑。
+            if (!s.Encoded)
+            {
+                log?.Invoke($"[SMI] ✗ 值无法编码，**跳过不写**（宁缺勿错）：" +
+                            $"{s.Root}\\{s.SubKey} [{valueDisplay}] {s.ValueType} — {s.EncodeError}");
+                return false;
+            }
+
+            if (s.HasMacro)
+            {
+                // 值里含 `$(...)` 宏（真实数据里 5715 处，如 `$(runtime.system32)`）。
+                // 这类值原样写下去一定是错的，但**我们还没有宏展开器**，所以先显式告警再写，
+                // 让上层能看见，而不是假装成功。⚠ 未完成项，勿当成已解决。
+                log?.Invoke($"[SMI] ⚠ 值含未展开的 $(…) 宏：{s.Root}\\{s.SubKey} [{valueDisplay}] = {Truncate(s.Data, 80)}");
+            }
+
+            byte[] bytes = HexToBytes(s.DataHex);
+            int rc = RegSetValueExW(key.Handle, s.ValueName, 0, s.TypeCode, bytes, (uint)bytes.Length);
+            if (rc != 0)
+            {
+                log?.Invoke($"[SMI] ✗ RegSetValueExW 失败 rc={rc}（{new System.ComponentModel.Win32Exception(rc).Message}）：" +
+                            $"{fullPath} [{valueDisplay}] type={s.TypeCode} len={bytes.Length}");
+                return false;
+            }
             return true;
         }
+
+        // 直接写原始字节（绕开 .NET 的类型解释）。lpValueName 传空串即**默认值**。
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int RegSetValueExW(
+            SafeRegistryHandle hKey,
+            string lpValueName,
+            uint reserved,
+            uint dwType,
+            byte[] lpData,
+            uint cbData);
 
         /// <summary>
         /// 逻辑路径（清单里写的）→（离线 hive 名, hive 内相对路径）。
@@ -414,52 +493,33 @@ namespace OneCore_Image_Designer.Services
         private static string Combine(string a, string b)
             => string.IsNullOrEmpty(a) ? b : (string.IsNullOrEmpty(b) ? a : a + "\\" + b);
 
-        private static object? ConvertData(string type, string data)
-        {
-            switch ((type ?? "").ToUpperInvariant())
-            {
-                case "REG_DWORD":
-                    if (data.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-                        return unchecked((int)Convert.ToUInt32(data.Substring(2), 16));
-                    return int.TryParse(data, out var d) ? d : 0;
-                case "REG_QWORD":
-                    if (data.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-                        return unchecked((long)Convert.ToUInt64(data.Substring(2), 16));
-                    return long.TryParse(data, out var q) ? q : 0L;
-                case "REG_BINARY":
-                    return HexToBytes(data);
-                case "REG_MULTI_SZ":
-                    return data.Length == 0 ? Array.Empty<string>() : data.Split('\0');
-                default:
-                    return data ?? "";
-            }
-        }
-
-        private static RegistryValueKind ToRegistryKind(string type)
-        {
-            switch ((type ?? "").ToUpperInvariant())
-            {
-                case "REG_DWORD": return RegistryValueKind.DWord;
-                case "REG_QWORD": return RegistryValueKind.QWord;
-                case "REG_BINARY": return RegistryValueKind.Binary;
-                case "REG_MULTI_SZ": return RegistryValueKind.MultiString;
-                case "REG_EXPAND_SZ": return RegistryValueKind.ExpandString;
-                default: return RegistryValueKind.String;
-            }
-        }
-
         private static byte[] HexToBytes(string hex)
         {
-            if (string.IsNullOrWhiteSpace(hex)) return Array.Empty<byte>();
-            var sb = new StringBuilder(hex.Length);
-            foreach (char c in hex)
-                if (Uri.IsHexDigit(c)) sb.Append(c);
-            string h = sb.ToString();
-            if (h.Length % 2 != 0) h = "0" + h;
-            var bytes = new byte[h.Length / 2];
+            // ⚠ 严格解析，**故意不宽容**。
+            //   原来的版本会 `if (Uri.IsHexDigit(c)) sb.Append(c)` 把非 hex 字符静默丢掉、
+            //   奇数长度还会前置补 '0' —— 那正是"看起来成功、字节全错"的典型故障。
+            //   现在这个输入来自 C++ 侧算好的 `dataHex`（大写 hex、无前缀、偶数长度），
+            //   出现异常就说明上游坏了，必须炸出来而不是猜。
+            if (string.IsNullOrEmpty(hex)) return Array.Empty<byte>();
+            if ((hex.Length & 1) != 0)
+                throw new FormatException($"dataHex 长度必须为偶数，实际 {hex.Length}：\"{hex}\"");
+            var bytes = new byte[hex.Length / 2];
             for (int i = 0; i < bytes.Length; i++)
-                bytes[i] = Convert.ToByte(h.Substring(i * 2, 2), 16);
+            {
+                int hi = HexVal(hex[i * 2]), lo = HexVal(hex[i * 2 + 1]);
+                if (hi < 0 || lo < 0)
+                    throw new FormatException($"dataHex 含非 hex 字符：\"{hex}\"");
+                bytes[i] = (byte)((hi << 4) | lo);
+            }
             return bytes;
+
+            static int HexVal(char c) => c switch
+            {
+                >= '0' and <= '9' => c - '0',
+                >= 'a' and <= 'f' => c - 'a' + 10,
+                >= 'A' and <= 'F' => c - 'A' + 10,
+                _ => -1,
+            };
         }
 
         private static string Truncate(string s, int n)

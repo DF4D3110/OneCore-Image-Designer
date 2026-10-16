@@ -1,4 +1,4 @@
-﻿// OCID - WCM 配置模式实现
+// OCID - WCM 配置模式实现
 
 #include "ocid/WcmSchema.h"
 
@@ -68,6 +68,16 @@ namespace ocid {
                 if (_wcsicmp(head.c_str(), r) == 0) {
                     root = head;
                     sub = (sep == std::wstring::npos) ? L"" : full.substr(sep + 1);
+                    // ⚠ 真实数据里 handler **会以反斜杠结尾**，而且这不是笔误：
+                    //     wcm:handler="regkey('HKEY_CLASSES_ROOT\htmlfile\shell\print\command\')"
+                    //     wcm:handler="regkey('HKEY_CLASSES_ROOT\xhtmlfile\shell\print\command\')"
+                    //   （ie-htmlrendering 清单实测；已确认原文如此，不是我解析出来的）。
+                    //   尾随 `\` 在注册表路径记法里就是"就是这个键"，但留着会让下游多拼出
+                    //   一个空路径段（`…\command\` + `\` + 值名），所以在这里统一去掉。
+                    //   ① registryKeys 那套也有一模一样的问题（`HKEY_CLASSES_ROOT\BMPFilter…\`），
+                    //   已在 RegistryKeyToOperations 里同样处理。
+                    while (!sub.empty() && (sub.back() == L'\\' || sub.back() == L' '))
+                        sub.pop_back();
                     return true;
                 }
             }

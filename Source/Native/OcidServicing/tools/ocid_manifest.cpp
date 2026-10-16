@@ -14,6 +14,7 @@
 // 输出约定：**数据走 stdout，诊断走 stderr** —— 这样 C# 侧可以干净地消费 stdout。
 
 #include "ocid/Manifest.h"
+#include "ocid/RegistryValue.h"
 #include "ocid/WcmSchema.h"
 
 #include <cstdio>
@@ -406,6 +407,10 @@ static int CmdExportOps(const std::wstring& dir, const std::wstring& listFile, i
 
     size_t totalOps = 0, okManifests = 0, badManifests = 0, noSchema = 0;
     size_t fromRegistryKeys = 0, fromWcm = 0;
+    // 编码统计：这是"数据真正能不能写进 hive"的判据，必须报出来。
+    //   encodeFailed > 0 ⇒ 有值我们解不了，**不能当成功**（宁可显式失败，也不写错字节）
+    //   macroOps     > 0 ⇒ 有 $(…) 宏未展开，写下去一定是错的，需要上层决策
+    size_t encodedOps = 0, encodeFailed = 0, macroOps = 0;
     for (const auto& path : files) {
         std::wstring text, err;
         if (!ReadFileUtf8(path, text, err)) { ++badManifests; continue; }
@@ -425,6 +430,11 @@ static int CmdExportOps(const std::wstring& dir, const std::wstring& listFile, i
         fromWcm          += batch.fromWcmSchema;
 
         for (const auto& o : batch.operations) {
+            // 值数据在这里就**编码成最终字节**，不把"怎么解释 valueType"这件事留给下游。
+            // 理由：这是服务栈语义（见 RegistryValue.h 的三重证据），只允许有一份实现；
+            // C# 侧只负责把 typeCode + bytes 原样交给 RegSetValueExW。
+            RegValueBlob blob = EncodeRegValue(o.valueType, o.data);
+
             // 一行一个对象，带上来源（组件名 + 机制 + 设置项名），排障时能直接定位到哪份清单的哪一条
             std::string line = "{\"component\":\"" + JsonEscape(compName)
                              + "\",\"identity\":\"" + JsonEscape(m.identity.ToString())
@@ -437,9 +447,16 @@ static int CmdExportOps(const std::wstring& dir, const std::wstring& listFile, i
                              + "\",\"scope\":\"" + JsonEscape(o.scope)
                              + "\",\"owner\":" + (o.owner ? "true" : "false")
                              + ",\"operationHint\":\"" + JsonEscape(o.operationHint)
-                             + "\",\"sourceItem\":\"" + JsonEscape(o.sourceItem) + "\"}";
+                             + "\",\"sourceItem\":\"" + JsonEscape(o.sourceItem)
+                             + "\",\"encoded\":" + (blob.ok ? "true" : "false")
+                             + ",\"typeCode\":" + std::to_string(blob.ok ? blob.typeCode : 0u)
+                             + ",\"dataHex\":\"" + ToUtf8(BytesToHex(blob.bytes)) + "\""
+                             + ",\"hasMacro\":" + (blob.hasUnresolvedMacro ? "true" : "false")
+                             + ",\"encodeError\":\"" + JsonEscape(blob.error) + "\"}";
             OutLn(line);
             ++totalOps;
+            if (blob.ok) ++encodedOps; else ++encodeFailed;
+            if (blob.hasUnresolvedMacro) ++macroOps;
         }
     }
 
@@ -448,8 +465,12 @@ static int CmdExportOps(const std::wstring& dir, const std::wstring& listFile, i
       + " noSchema=" + std::to_string(noSchema)
       + " ops=" + std::to_string(totalOps)
       + " (registryKeys=" + std::to_string(fromRegistryKeys)
-      + " wcm=" + std::to_string(fromWcm) + ")");
-    return badManifests == 0 ? 0 : 1;
+      + " wcm=" + std::to_string(fromWcm) + ")"
+      + " encoded=" + std::to_string(encodedOps)
+      + " encodeFailed=" + std::to_string(encodeFailed)
+      + " macro=" + std::to_string(macroOps));
+    // 编码失败就是失败：不能返回 0 让上层以为这一批都能写。
+    return (badManifests == 0 && encodeFailed == 0) ? 0 : 1;
 #else
     (void)dir; (void)listFile; (void)maxFiles; return 2;
 #endif
