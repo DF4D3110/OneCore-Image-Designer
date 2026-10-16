@@ -1,4 +1,4 @@
-﻿// OCID - 组件清单解析实现
+// OCID - 组件清单解析实现
 //
 // 自带一个"够用且正确"的 XML 拉取解析器，而不是引入 MSXML/Expat。
 // 理由：清单是**机器生成的规范 XML**（无 DTD、无实体、无混合内容），问题域很窄；
@@ -56,6 +56,7 @@ namespace ocid {
             if (const auto* x = n.FindAttr(L"id"))     v.id = *x;
             if (const auto* x = n.FindAttr(L"LinkId")) v.linkId = *x;
             if (const auto* x = n.FindAttr(L"Ext"))    v.ext = *x;
+            if (const auto* x = n.FindAttr(L"IEDownlevelValue")) v.ieDownlevelValue = *x;
             return true;
         }
 
@@ -63,6 +64,17 @@ namespace ocid {
         {
             if (const auto* kn = n.FindAttr(L"keyName")) k.keyName = *kn;
             k.owner = ParseBoolAttr(n, L"owner", false);
+
+            // ★ 这几个是**键自己的**属性，与键下的值无关。别漏 ——
+            //   `perUserVirtualization` 会影响这个键在用户 hive 里的虚拟化行为，
+            //   `securityDescriptor`（子元素）决定键的 ACL，两样都在真实清单里出现。
+            if (const auto* x = n.FindAttr(L"perUserVirtualization"))
+                k.perUserVirtualization = *x;
+            if (const auto* x = n.FindAttr(L"mapDesiredAccessToMaxAllowedAccess"))
+                k.mapDesiredAccessToMaxAllowedAccess = *x;
+            if (const auto* x = n.FindAttr(L"id"))      k.id = *x;
+            if (const auto* x = n.FindAttr(L"version")) k.version = *x;
+            if (const auto* x = n.FindAttr(L"profile")) k.profile = *x;
 
             for (const auto& c : n.children) {
                 std::wstring ln = c.LocalName();
@@ -72,6 +84,12 @@ namespace ocid {
                 } else if (_wcsicmp(ln.c_str(), L"registryKey") == 0) {
                     RegistryKeySpec sk; ParseRegistryKey(c, sk);
                     k.subKeys.push_back(std::move(sk));
+                } else if (_wcsicmp(ln.c_str(), L"securityDescriptor") == 0) {
+                    // 只带出**引用名**与 buildFilter；SDDL 文本在
+                    // <securityDescriptorDefinition> 里按名字定义，由调用方解析。
+                    if (const auto* v = c.FindAttr(L"name")) k.securityDescriptorName = *v;
+                    if (const auto* v = c.FindAttr(L"buildFilter"))
+                        k.securityDescriptorBuildFilter = *v;
                 }
             }
         }

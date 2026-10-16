@@ -246,31 +246,71 @@ namespace ocid {
     // ── 两套声明机制的统一收集 ──────────────────────────────────────────────
 
     void RegistryKeyToOperations(const RegistryKeySpec& key,
-                                 std::vector<WcmRegistryOperation>& out)
+                                 std::vector<WcmRegistryOperation>& out,
+                                 const SddlDefinitions* defs)
     {
         std::wstring root, sub;
         if (SplitRoot(key.keyName, root, sub)) {
-            for (const auto& v : key.values) {
+            // 清单里 keyName 可能带尾随反斜杠（如 "HKEY_CLASSES_ROOT\Foo\"），
+            // 直接拿去拼路径会多出一个空段。统一去掉尾部反斜杠与空白。
+            // （原来这段在 for 循环里，每写一条值都重算一次；键级属性一多就更该只算一遍。）
+            while (!sub.empty() && (sub.back() == L'\\' || sub.back() == L' ')) sub.pop_back();
+
+            // 键级属性只算一次，键下的每条值都共享。
+            // SD 是**引用名**，要拿清单的 <securityDescriptorDefinition> 表解析成 SDDL 原文；
+            // 解析不到就保持为空（宁可不动 ACL，也不能瞎设一个）。
+            std::wstring sdText;
+            if (!key.securityDescriptorName.empty() && defs != nullptr) {
+                std::wstring sdErr;
+                ResolveSddl(*defs, key.securityDescriptorName, sdText, sdErr);
+            }
+
+            auto applyKeyAttrs = [&](WcmRegistryOperation& op) {
+                op.keySddl              = sdText;
+                op.keySdName            = key.securityDescriptorName;
+                op.keySdBuildFilter     = key.securityDescriptorBuildFilter;
+                op.perUserVirtualization = key.perUserVirtualization;
+            };
+
+            if (key.values.empty()) {
+                // ★★ 只带 ACL（或只带 perUserVirtualization）、**一个值都没有**的键也必须产出 op。
+                //    实测：带 `<securityDescriptor>` 的键里 **18.3%** 就是这种。
+                //    如果只在"有值"时才产 op，这些键会连键带 ACL **一条都不产生**，
+                //    日志全绿、计数正常，只有拿真实镜像对比才会发现少了一片键。
                 WcmRegistryOperation op;
                 op.root       = root;
-                // 清单里 keyName 可能带尾随反斜杠（如 "HKEY_CLASSES_ROOT\Foo\"），
-                // 直接拿去拼路径会多出一个空段。统一去掉尾部反斜杠与空白。
-                while (!sub.empty() && (sub.back() == L'\\' || sub.back() == L' ')) sub.pop_back();
                 op.subKey     = sub;
-                op.valueName  = v.name;                       // 空 = 默认值
-                op.valueType  = v.valueType.empty() ? L"REG_SZ" : v.valueType;
-                op.data       = v.value;
-                op.owner      = v.owner;
-                op.operationHint = v.operationHint;
-                op.scope      = L"";                          // ① 不带 scope，由 handler 根决定落点
+                op.valueName  = L"";
+                op.valueType  = L"";
+                op.data       = L"";
+                op.owner      = key.owner;
+                op.scope      = L"";
                 op.mechanism  = L"registryKeys";
-                op.sourceItem = key.keyName + (v.name.empty() ? L"\\defaultValue" : (L"\\" + v.name));
+                op.sourceItem = key.keyName;
+                op.keyOnly    = true;
+                applyKeyAttrs(op);
                 out.push_back(std::move(op));
+            } else {
+                for (const auto& v : key.values) {
+                    WcmRegistryOperation op;
+                    op.root       = root;
+                    op.subKey     = sub;
+                    op.valueName  = v.name;                       // 空 = 默认值
+                    op.valueType  = v.valueType.empty() ? L"REG_SZ" : v.valueType;
+                    op.data       = v.value;
+                    op.owner      = v.owner;
+                    op.operationHint = v.operationHint;
+                    op.scope      = L"";                          // ① 不带 scope，由 handler 根决定落点
+                    op.mechanism  = L"registryKeys";
+                    op.sourceItem = key.keyName + (v.name.empty() ? L"\\defaultValue" : (L"\\" + v.name));
+                    applyKeyAttrs(op);
+                    out.push_back(std::move(op));
+                }
             }
         }
         // 真实数据里 registryKey 是扁平的（每个 keyName 都写全路径），
         // 但万一出现嵌套写法也一并处理，免得静默丢设置。
-        for (const auto& sk : key.subKeys) RegistryKeyToOperations(sk, out);
+        for (const auto& sk : key.subKeys) RegistryKeyToOperations(sk, out, defs);
     }
 
     RegistryOperationBatch CollectManifestRegistryOperations(
@@ -280,9 +320,11 @@ namespace ocid {
         RegistryOperationBatch batch;
 
         // ① `<registryKeys>`（5282 条量级，带 owner/operationHint）
+        //    要把清单自己的 SD 定义表传下去：键上的 `<securityDescriptor name="…" />`
+        //    只有引用名，SDDL 原文在这里。
         for (const auto& k : manifest.registryKeys) {
             size_t before = batch.operations.size();
-            RegistryKeyToOperations(k, batch.operations);
+            RegistryKeyToOperations(k, batch.operations, &manifest.securityDescriptorDefinitions);
             batch.fromRegistryKeys += batch.operations.size() - before;
         }
 

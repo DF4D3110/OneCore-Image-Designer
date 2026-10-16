@@ -13,7 +13,8 @@
 #   Output\x86\ocid_value_tests.exe
 #   Output\x86\ocid_cmi_tests.exe
 #   Output\x86\ocid_macro_tests.exe
-#   Output\x86\ocid_manifest.exe       identity + manifest + wcm + registryvalue + cmi + macros
+#   Output\x86\ocid_sd_tests.exe      security descriptors (SDDL text <-> self-relative)
+#   Output\x86\ocid_manifest.exe       identity + manifest + wcm + registryvalue + cmi + macros + SDDL
 #
 # Why both DLL bitnesses: the C# app (OneCore Image Designer) is built with
 # <Platforms>x64;x86;ARM64</Platforms>, so the process may be 64-bit while the
@@ -129,7 +130,7 @@ function Build-Dll {
 Get-Toolchain 'x86' | ForEach-Object { New-Dirs -Out $_.Out -Obj $_.Obj }
 Get-Toolchain 'x64' | ForEach-Object { New-Dirs -Out $_.Out -Obj $_.Obj }
 
-$core = @('src\Identity.cpp', 'src\Manifest.cpp', 'src\WcmSchema.cpp', 'src\RegistryValue.cpp', 'src\CmiInstaller.cpp', 'src\MacroExpander.cpp')
+$core = @('src\Identity.cpp', 'src\Manifest.cpp', 'src\WcmSchema.cpp', 'src\RegistryValue.cpp', 'src\CmiInstaller.cpp', 'src\MacroExpander.cpp', 'src\SecurityDescriptor.cpp')
 $api  = $core + @('src\OcidServicingApi.cpp')
 $def  = Join-Path $src 'src\OcidServicing.def'
 
@@ -138,10 +139,11 @@ Build-Dll 'x64' $api $def
 
 Build-Target 'ocid_identity_tests.exe' @('src\Identity.cpp', 'tests\identity_tests.cpp')
 Build-Target 'ocid_manifest_tests.exe' @('src\Identity.cpp', 'src\Manifest.cpp', 'tests\manifest_tests.cpp')
-Build-Target 'ocid_wcm_tests.exe'      @('src\Identity.cpp', 'src\Manifest.cpp', 'src\WcmSchema.cpp', 'tests\wcm_tests.cpp')
+Build-Target 'ocid_wcm_tests.exe'      @('src\Identity.cpp', 'src\Manifest.cpp', 'src\WcmSchema.cpp', 'src\SecurityDescriptor.cpp', 'tests\wcm_tests.cpp')
 Build-Target 'ocid_value_tests.exe'    @('src\RegistryValue.cpp', 'tests\registryvalue_tests.cpp')
 Build-Target 'ocid_cmi_tests.exe'      @('src\RegistryValue.cpp', 'src\CmiInstaller.cpp', 'tests\cmiinstaller_tests.cpp')
 Build-Target 'ocid_macro_tests.exe'    @('src\MacroExpander.cpp', 'tests\macroexpander_tests.cpp')
+Build-Target 'ocid_sd_tests.exe'       @('src\SecurityDescriptor.cpp', 'tests\securitydescriptor_tests.cpp')
 Build-Target 'ocid_manifest.exe'       ($core + @('tools\ocid_manifest.cpp'))
 
 Write-Host "[build] done -> $(Join-Path $root 'Output')"

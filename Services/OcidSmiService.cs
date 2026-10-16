@@ -157,6 +157,35 @@ namespace OneCore_Image_Designer.Services
             public bool HasMacro;
             /// <summary>编码失败原因（<see cref="Encoded"/> 为 false 时有效）。</summary>
             public string EncodeError = "";
+
+            // ── 键级属性（ACL 属于**键**，不属于值）───────────────────────────
+            //
+            // ⚠ 为什么 ACL 搭在"值设置"上：一条设置代表"落到某个键"，键级属性只能跟着走。
+            //   而且必须允许**只有键、没有值**的那种（<see cref="KeyOnly"/>）——
+            //   实测带安全描述符的键里有 18.3% 一个 `<registryValue>` 都没有。
+
+            /// <summary>
+            /// 这条设置只建键、不写值（原生侧 <c>keyOnly</c>）。
+            /// ⚠ **绝不能**当成"把默认值写成空串" —— 那会在镜像里凭空多出一条
+            /// <c>(Default)=""</c>，而且看起来像成功。
+            /// </summary>
+            public bool KeyOnly;
+
+            /// <summary>
+            /// 该键引用的安全描述符**原文**（原生侧已按清单里的
+            /// <c>&lt;securityDescriptorDefinition&gt;</c> 表把引用名解析成 SDDL）。
+            /// 空串 = 这个键没有引用 SD，**不要动它的 ACL**。
+            /// </summary>
+            public string KeySddl = "";
+            /// <summary>SD 的引用名（如 <c>WRP_REGKEY_DEFAULT_SDDL</c>），排障用。</summary>
+            public string KeySdName = "";
+            /// <summary><c>&lt;securityDescriptor&gt;</c> 上的 <c>buildFilter</c>（实测 7177 处）。</summary>
+            public string KeySdBuildFilter = "";
+            /// <summary>
+            /// <c>&lt;registryKey perUserVirtualization="Disable|DisableRecurse"&gt;</c> ——
+            /// 控制这个机器级键要不要被"按用户虚拟化"（实测 577 处）。
+            /// </summary>
+            public string PerUserVirtualization = "";
         }
 
         /// <summary>
@@ -260,7 +289,9 @@ namespace OneCore_Image_Designer.Services
         }
 
         /// <summary>解析一行 export-ops 的 JSON。字段固定，用手写解析避免引入 JSON 依赖。</summary>
-        private static RegSetting? ParseOpJson(string line)
+        // internal 而非 private：Tests 里要拿**真实 export-ops 输出**钉住这条线格式契约
+        // （字段名/语义一改，测试就得红，而不是等到写坏镜像才发现）。
+        internal static RegSetting? ParseOpJson(string line)
         {
             string? Get(string key)
             {
@@ -308,6 +339,11 @@ namespace OneCore_Image_Designer.Services
                 DataHex = Get("dataHex") ?? "",
                 HasMacro = line.Contains("\"hasMacro\":true"),
                 EncodeError = Get("encodeError") ?? "",
+                KeyOnly = line.Contains("\"keyOnly\":true"),
+                KeySddl = Get("keySddl") ?? "",
+                KeySdName = Get("keySdName") ?? "",
+                KeySdBuildFilter = Get("keySdBuildFilter") ?? "",
+                PerUserVirtualization = Get("perUserVirtualization") ?? "",
             };
         }
 
@@ -352,13 +388,14 @@ namespace OneCore_Image_Designer.Services
             log?.Invoke($"[SMI] 待应用注册表设置 {list.Count} 条（镜像 {imageRoot}）");
 
             int written = 0;
+            int aclPending = 0;
             using var mount = new OfflineHiveMountScope(configDir, log);
 
             foreach (var s in list)
             {
                 try
                 {
-                    if (ApplyOne(mount, s, windowsDir, log, dryRun)) written++;
+                    if (ApplyOne(mount, s, windowsDir, log, dryRun, ref aclPending)) written++;
                 }
                 catch (Exception ex)
                 {
@@ -367,12 +404,21 @@ namespace OneCore_Image_Designer.Services
                 }
             }
 
+            // ⚠ 未做的部分必须报出来。ACL 没写却一声不响，等于"看起来全绿但镜像不对"，
+            //   而这一类键占全部键的 38.6%（30712/79572，8400 x86 语料实测）。
+            if (aclPending > 0)
+            {
+                log?.Invoke($"[SMI] ⚠ 其中 {aclPending} 条带安全描述符（ACL）的键**本版本不写 ACL**：" +
+                            $"SDDL 的解析与编码已就绪（SecurityDescriptor.cpp），落盘（RegSetKeySecurity）尚未接。" +
+                            $"这些键的安全属性会继承父键。");
+            }
+
             log?.Invoke($"[SMI] 完成：写入 {written}/{list.Count} 条");
             return written;
         }
 
         private static bool ApplyOne(OfflineHiveMountScope mount, RegSetting s, string windowsDir,
-                                     Action<string>? log, bool dryRun)
+                                     Action<string>? log, bool dryRun, ref int aclPending)
         {
             var (hive, relPath) = MapLogicalToHive(s.Root, s.SubKey);
             if (hive == null)
@@ -383,7 +429,9 @@ namespace OneCore_Image_Designer.Services
 
             string mountKey = mount.Ensure(hive);
             string fullPath = mountKey + (string.IsNullOrEmpty(relPath) ? "" : "\\" + relPath);
-            string valueDisplay = string.IsNullOrEmpty(s.ValueName) ? "(默认值)" : s.ValueName;
+            string valueDisplay = s.KeyOnly
+                ? "(仅键，无值)"
+                : (string.IsNullOrEmpty(s.ValueName) ? "(默认值)" : s.ValueName);
 
             log?.Invoke($"[SMI]   {s.Root}\\{s.SubKey} [{valueDisplay}] {s.ValueType}={Truncate(s.Data, 60)}  ⇒  {fullPath}");
             if (dryRun) return true;
@@ -393,6 +441,22 @@ namespace OneCore_Image_Designer.Services
             {
                 log?.Invoke($"[SMI] ✗ 建/开键失败：{fullPath}");
                 return false;
+            }
+
+            // ★ 键级属性：安全描述符（ACL）属于**键**。
+            //   本版本只把 SDDL 解析/编码做完了（Source/Native/…/SecurityDescriptor.*），
+            //   **还没有**把它写下去（RegSetKeySecurity + SeRestorePrivilege/SeSecurityPrivilege）。
+            //   这里只计数、在末尾汇总告警：绝不能让它看起来"已经做过了" ——
+            //   实测带 SD 引用的键有 30712 个（占全部键的 38.6%），静默不做就是一大片错。
+            if (s.KeySddl.Length > 0) aclPending++;
+
+            // ★ 只有键、没有值的设置（实测带安全描述符的键里 18.3% 是这种）：
+            //   到这里"建键"已经做完了，**绝不能**再往下走 —— 下面会把 valueName="" 当成
+            //   默认值、把空的 data 编码后写一条 `(Default)=""` 出来，凭空多一个值。
+            if (s.KeyOnly)
+            {
+                log?.Invoke($"[SMI]   + 建键（无值）：{fullPath}");
+                return true;
             }
 
             // ⚠ 这里**必须**走 RegSetValueExW 写原始字节，不能再用 RegistryKey.SetValue。

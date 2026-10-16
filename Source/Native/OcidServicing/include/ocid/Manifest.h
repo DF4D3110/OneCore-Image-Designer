@@ -64,9 +64,17 @@ namespace ocid {
         std::wstring value;
         bool         owner = true;
         std::wstring operationHint = L"replace";
-        std::wstring id;                         // 罕见
-        std::wstring linkId;                     // 罕见
-        std::wstring ext;                        // 罕见
+        std::wstring id;                         // 罕见（26）
+        std::wstring linkId;                     // 罕见（108）
+        std::wstring ext;                        // 罕见（2）
+
+        /// ★ `IEDownlevelValue`（实测 280 处，全是 IE 相关组件）。
+        /// 它**不是布尔**，而是"低版本 IE 用的**另一份值数据**"：
+        ///   `<registryValue name="DisplayName" value="Computer" IEDownlevelValue="My Computer"/>`
+        /// 也就是说同一个值有两个数据版本，写哪个由镜像里 IE 的版本决定。
+        /// 这个判定属于 IE 的 Installer AI（`RegisterIEPKeysAI.dll`），**不在 CMI 里**，
+        /// 所以本结构只把它带出来，不在 CMI 决策里使用。
+        std::wstring ieDownlevelValue;
 
         /// 是否是默认值（`name` 为空）。
         bool IsDefault() const { return name.empty(); }
@@ -84,6 +92,37 @@ namespace ocid {
         bool         owner = false;
         std::vector<RegistryValueSpec> values;
         std::vector<RegistryKeySpec>   subKeys;  // 真实数据里为空
+
+        /// ★ 键上的安全描述符**引用名**（实测 3057 处键直接内嵌、30712 个键块里有）。
+        ///
+        ///     <registryKey keyName="HKEY_CLASSES_ROOT\CLSID\{…}" owner="false">
+        ///       <securityDescriptor name="WRP_REGKEY_DEFAULT_SDDL" />
+        ///     </registryKey>
+        ///
+        /// ⚠ 这里只有**名字**，真正的 SDDL 文本要拿它去
+        ///   `ManifestDocument::securityDescriptorDefinitions` 里查（那 47986 条定义）。
+        std::wstring securityDescriptorName;
+
+        /// `<securityDescriptor>` 上的 `buildFilter`（实测 7177 处，任意元素上都可能有）。
+        std::wstring securityDescriptorBuildFilter;
+
+        /// `perUserVirtualization`（实测 577 处）——是个**字符串枚举**，不是布尔：
+        /// 实测取值 `Disable` / `DisableRecurse`（对偶的是 `Enable` / `EnableRecurse`）。
+        ///
+        /// 它控制这个**机器级**键要不要被"按用户虚拟化"：即用户首次访问时把该键
+        /// 复制进自己的 hive。`DisableRecurse` = 连同子键一起不虚拟化。
+        /// ⚠ 实测里 SMI 侧（`smiengine!AttributeInfo::ValidatePerUserVirtualization`）
+        ///   要求带这个属性的节点必须同时声明 `wcm:scope="perUser"`，否则校验报错。
+        std::wstring perUserVirtualization;
+
+        /// `mapDesiredAccessToMaxAllowedAccess`（实测 4 处，取值 `"False"`，是字符串不是布尔）。
+        /// 与键的访问掩码有关，属 ACL 语义。
+        std::wstring mapDesiredAccessToMaxAllowedAccess;
+
+        /// 罕见：`id`(15) / `version`(9) / `profile`(5)。
+        std::wstring id;
+        std::wstring version;
+        std::wstring profile;
     };
 
     // ─────────────────────────────────────────────────────────────────────────

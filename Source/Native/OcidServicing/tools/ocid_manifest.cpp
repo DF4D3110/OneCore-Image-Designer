@@ -367,6 +367,7 @@ static int CmdExportOps(const std::wstring& dir, const std::wstring& listFile, i
     //   encodeFailed > 0 ⇒ 有值我们解不了，**不能当成功**（宁可显式失败，也不写错字节）
     //   macroOps     > 0 ⇒ 有 $(…) 宏未展开，写下去一定是错的，需要上层决策
     size_t encodedOps = 0, encodeFailed = 0, macroOps = 0;
+    size_t keyOnlyOps = 0, sdOps = 0;
     for (const auto& path : files) {
         std::wstring text, err;
         if (!ReadFileUtf8(path, text, err)) { ++badManifests; continue; }
@@ -389,7 +390,16 @@ static int CmdExportOps(const std::wstring& dir, const std::wstring& listFile, i
             // 值数据在这里就**编码成最终字节**，不把"怎么解释 valueType"这件事留给下游。
             // 理由：这是服务栈语义（见 RegistryValue.h 的三重证据），只允许有一份实现；
             // C# 侧只负责把 typeCode + bytes 原样交给 RegSetValueExW。
-            RegValueBlob blob = EncodeRegValue(o.valueType, o.data);
+            // ★ `keyOnly`（只有键、没有值，实测占带 ACL 的键的 18.3%）**不能**送去编码：
+            //   那会把"建一个空键"变成"把默认值写成空串"，在镜像里凭空多出一条
+            //   `(Default)=""`，而且看起来像成功。
+            RegValueBlob blob{};
+            if (o.keyOnly) {
+                blob.ok = true;
+                blob.typeCode = 0;
+            } else {
+                blob = EncodeRegValue(o.valueType, o.data);
+            }
 
             // 一行一个对象，带上来源（组件名 + 机制 + 设置项名），排障时能直接定位到哪份清单的哪一条
             std::string line = "{\"component\":\"" + JsonEscape(compName)
@@ -404,7 +414,14 @@ static int CmdExportOps(const std::wstring& dir, const std::wstring& listFile, i
                              + "\",\"owner\":" + (o.owner ? "true" : "false")
                              + ",\"operationHint\":\"" + JsonEscape(o.operationHint)
                              + "\",\"sourceItem\":\"" + JsonEscape(o.sourceItem)
-                             + "\",\"encoded\":" + (blob.ok ? "true" : "false")
+                             // 键级属性：ACL 属于键、不属于值，所以随每条 op 带出去。
+                             // `keySddl` 为空 = 这个键没引用安全描述符，落盘层不要动 ACL。
+                             + ",\"keyOnly\":" + (o.keyOnly ? "true" : "false")
+                             + ",\"keySddl\":\"" + JsonEscape(o.keySddl) + "\""
+                             + ",\"keySdName\":\"" + JsonEscape(o.keySdName) + "\""
+                             + ",\"keySdBuildFilter\":\"" + JsonEscape(o.keySdBuildFilter) + "\""
+                             + ",\"perUserVirtualization\":\"" + JsonEscape(o.perUserVirtualization) + "\""
+                             + ",\"encoded\":" + (blob.ok ? "true" : "false")
                              + ",\"typeCode\":" + std::to_string(blob.ok ? blob.typeCode : 0u)
                              + ",\"dataHex\":\"" + ToUtf8(BytesToHex(blob.bytes)) + "\""
                              + ",\"hasMacro\":" + (blob.hasUnresolvedMacro ? "true" : "false")
@@ -413,6 +430,8 @@ static int CmdExportOps(const std::wstring& dir, const std::wstring& listFile, i
             ++totalOps;
             if (blob.ok) ++encodedOps; else ++encodeFailed;
             if (blob.hasUnresolvedMacro) ++macroOps;
+            if (o.keyOnly) ++keyOnlyOps;
+            if (!o.keySddl.empty()) ++sdOps;
         }
     }
 
@@ -424,7 +443,9 @@ static int CmdExportOps(const std::wstring& dir, const std::wstring& listFile, i
       + " wcm=" + std::to_string(fromWcm) + ")"
       + " encoded=" + std::to_string(encodedOps)
       + " encodeFailed=" + std::to_string(encodeFailed)
-      + " macro=" + std::to_string(macroOps));
+      + " macro=" + std::to_string(macroOps)
+      + " keyOnly=" + std::to_string(keyOnlyOps)
+      + " withSd=" + std::to_string(sdOps));
     // 编码失败就是失败：不能返回 0 让上层以为这一批都能写。
     return (badManifests == 0 && encodeFailed == 0) ? 0 : 1;
 #else

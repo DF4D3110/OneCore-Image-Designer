@@ -20,7 +20,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("OS generation XML regressions", () => { GenerationRegression(); return Task.CompletedTask; }),
     ("Validation rule families wire-up and hard-intercept templates", () => { RuleFamiliesRegression(); return Task.CompletedTask; }),
     ("Ocid servicing native library (ABI, value encoding, CMI decisions)", () => { OcidServicingNativeAbi(); return Task.CompletedTask; }),
-    ("Ocid $(runtime.*) macro expansion through the native library", () => { OcidMacroExpansion(); return Task.CompletedTask; })
+    ("Ocid $(runtime.*) macro expansion through the native library", () => { OcidMacroExpansion(); return Task.CompletedTask; }),
+    ("Ocid registryKeys wire format (key-only keys and key SDDL)", () => { OcidRegistryOpShape(); return Task.CompletedTask; })
 };
 
 var failures = new List<string>();
@@ -424,6 +425,75 @@ static void OcidMacroExpansion()
     True(names.Contains("runtime.system32"), "⑨ 缺少 runtime.system32：" + names);
     True(names.Contains("runtime.public"), "⑨ 缺少 runtime.public：" + names);
     Equal(23, names.Split(';', StringSplitOptions.RemoveEmptyEntries).Length);
+}
+
+// registryKeys 那一套（原生 `ocid_manifest.exe export-ops` 吐的 JSONL）是 C++ → C# 的
+// **线格式契约**。下面这几行是 4000 份真实清单跑出来的原样文本（不是手写的），
+// 字段名或语义一改，这里就该红 —— 而不是等到把错误的字节写进镜像才发现。
+static void OcidRegistryOpShape()
+{
+    // ① 普通的"有值"设置：必须能认出类型码与编码好的字节。
+    const string WithValue = """
+    {"component":"x","identity":"i","mechanism":"registryKeys","root":"HKEY_LOCAL_MACHINE",
+    "subKey":"SOFTWARE\\Foo","valueName":"Bar","valueType":"REG_SZ","data":"baz",
+    "scope":"allUsers","owner":false,"operationHint":"replace","sourceItem":"s",
+    "keyOnly":false,"keySddl":"","keySdName":"","keySdBuildFilter":"","perUserVirtualization":"",
+    "encoded":true,"typeCode":1,"dataHex":"620061007A000000","hasMacro":false,"encodeError":""}
+    """;
+    var a = OcidSmiService.ParseOpJson(WithValue);
+    True(a != null, "①解析失败");
+    Equal("HKEY_LOCAL_MACHINE", a!.Root);
+    Equal(@"SOFTWARE\Foo", a.SubKey);
+    Equal("Bar", a.ValueName);
+    Equal("REG_SZ", a.ValueType);
+    True(a.Encoded, "①encoded 应为 true");
+    Equal(1u, a.TypeCode);
+    True(!a.KeyOnly, "①不该被判成 key-only");
+    Equal("", a.KeySddl);
+
+    // ② ★ 只建键、不写值（4000 份实测 41 条）。认不出来就会去写 `(Default)=""`，
+    //    镜像里凭空多一条值、而且看起来像成功。
+    //    同时它带 SDDL —— 键级 ACL 与"没有值"是两件独立的事，必须都能带出来。
+    const string KeyOnlyWithSd = """
+    {"component":"msil_ipamauc_31bf3856ad364e35_6.2.8400.0_none","identity":"IpamAuc~6.2.8400.0~msil~31bf3856ad364e35~neutral","mechanism":"registryKeys","root":"HKEY_CLASSES_ROOT","subKey":"CLSID\\{A9A1821A-65B2-4F99-80A6-337C4549815C}\\Implemented Categories\\{62C8FE65-4EBB-45E7-B440-6E39B2CDBF29}","valueName":"","valueType":"","data":"","scope":"","owner":false,"operationHint":"","sourceItem":"HKEY_CLASSES_ROOT\\CLSID\\{A9A1821A-65B2-4F99-80A6-337C4549815C}\\Implemented Categories\\{62C8FE65-4EBB-45E7-B440-6E39B2CDBF29}","keyOnly":true,"keySddl":"O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464G:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464D:P(A;CI;GA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)(A;CI;GR;;;SY)(A;CI;GR;;;BA)(A;CI;GR;;;BU)(A;CI;GR;;;S-1-15-2-1)","keySdName":"WRP_REGKEY_DEFAULT_SDDL","keySdBuildFilter":"","perUserVirtualization":"","encoded":true,"typeCode":0,"dataHex":"","hasMacro":false,"encodeError":""}
+    """;
+    var b = OcidSmiService.ParseOpJson(KeyOnlyWithSd);
+    True(b != null, "②解析失败");
+    True(b!.KeyOnly, "②没认出 keyOnly —— 会写出一条 (Default)=\"\"");
+    Equal("", b.ValueName);
+    Equal("", b.ValueType);
+    Equal("", b.Data);
+    Equal(0u, b.TypeCode);
+    Equal(@"HKEY_CLASSES_ROOT", b.Root);
+    Equal(@"CLSID\{A9A1821A-65B2-4F99-80A6-337C4549815C}\Implemented Categories\{62C8FE65-4EBB-45E7-B440-6E39B2CDBF29}", b.SubKey);
+    Equal("WRP_REGKEY_DEFAULT_SDDL", b.KeySdName);
+    True(b.KeySddl.StartsWith("O:S-1-5-80-956008885", StringComparison.Ordinal), "②SDDL 没带出来：" + b.KeySddl);
+
+    // ③ "有值 + 带 SD" 与 "只有键" 是两种；别把前者也吞掉。
+    const string ValueWithSd = """
+    {"root":"HKEY_LOCAL_MACHINE","subKey":"SOFTWARE\\Foo","valueName":"Bar",
+    "valueType":"REG_DWORD","operationHint":"replace","keyOnly":false,
+    "keySddl":"D:P(A;;GA;;;SY)","keySdName":"N","perUserVirtualization":"Disable",
+    "encoded":true,"typeCode":5,"dataHex":"01000000","hasMacro":false,"encodeError":""}
+    """;
+    var c = OcidSmiService.ParseOpJson(ValueWithSd);
+    True(c != null, "③解析失败");
+    True(!c!.KeyOnly, "③有值的设置被误判成 key-only");
+    Equal("Bar", c.ValueName);
+    Equal("Disable", c.PerUserVirtualization);
+    Equal("D:P(A;;GA;;;SY)", c.KeySddl);
+
+    // ④ 编码失败必须传上来（Encoded=false ⇒ 上层不许写）。
+    const string Bad = """
+    {"root":"HKEY_LOCAL_MACHINE","subKey":"SOFTWARE\\Foo","valueName":"Bar",
+    "valueType":"REG_SZ","encoded":false,"typeCode":0,"dataHex":"",
+    "hasMacro":true,"encodeError":"boom"}
+    """;
+    var d = OcidSmiService.ParseOpJson(Bad);
+    True(d != null, "④解析失败");
+    True(!d!.Encoded, "④encoded=false 没传出来");
+    True(d.HasMacro, "④hasMacro 没传出来");
+    Equal("boom", d.EncodeError);
 }
 
 static byte[] Bytes(string s)

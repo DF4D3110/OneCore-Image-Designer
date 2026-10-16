@@ -19,8 +19,7 @@
 //      wcm:subScope="machineIndependent" />
 //
 // ⇒ **一条注册表操作 = handler(键) + legacyName(值名) + legacyType(类型) + default(数据)**。
-//   这四个字段是权威的；`name` 只是标识符。
-//
+//   这四个字段是权威的；`name` 只是标识符。//
 // ⚠⚠ **`name` 不能从 `displayName` 推导！** 我试过规则（把 `\ { }` 换成 `_`、去掉空格），
 //    533 条里有 **47 条不吻合**，而且是语义性的：
 //      disp=HKEY_CLASSES_ROOT\.bmp\Content Type        → name=…_Content_Type      （空格→_）
@@ -47,6 +46,10 @@
 #pragma once
 
 #include "ocid/Manifest.h"
+// 键上的 `<securityDescriptor name="…" />` 只是**引用**，SDDL 原文在
+// `<trustInfo>` 的 `<securityDescriptorDefinition>` 表里。这里要那个表的类型
+// （`ocid::SddlDefinitions`）来把引用解析成原文。
+#include "ocid/SecurityDescriptor.h"
 
 #include <cstdint>
 #include <map>
@@ -133,6 +136,29 @@ namespace ocid {
         bool         owner = true;
         /// `operationHint`（实测几乎全是 `replace`）。
         std::wstring operationHint;
+
+        // ── 键自己的属性（与"写哪个值"无关，但要随 op 带下去给落盘层）──────────
+        //
+        // ★ 为什么 ACL 挂在"值操作"上：安全描述符属于**键**，不属于值；而一条 op
+        //   代表"落到某个键"这件事，所以键级属性只能跟着 op 走。
+        //   同时必须允许**只有键、没有值**的 op（见 `keyOnly`），否则纯 ACL 键
+        //   会一条 op 都不产生 —— 实测带 SD 的键里有 18.3% 就是这种。
+
+        /// 该键引用的安全描述符**原文**，已从 `<securityDescriptorDefinition>` 解析出来。
+        /// 空 = 这个键没有引用 SD，落盘层**不要动 ACL**（动了就是凭空改镜像的安全设置）。
+        std::wstring keySddl;
+        /// SD 的引用名（如 `WRP_REGKEY_DEFAULT_SDDL`），排障用。
+        std::wstring keySdName;
+        /// `<securityDescriptor>` 上的 `buildFilter`（实测 7177 处）。
+        std::wstring keySdBuildFilter;
+        /// `perUserVirtualization`（实测 577 处，取值 `Disable` / `DisableRecurse` 等）。
+        std::wstring perUserVirtualization;
+
+        /// ★ **只有键、没有值**的操作（实测：带 SD 的键里 18.3% 一个 `<registryValue>` 都没有）。
+        /// 这种 op 的 `valueName` / `valueType` / `data` 全为空，落盘层**只能建键**，
+        /// 绝不能当成"把默认值写成空串" —— 那会在镜像里凭空多出一条 `(Default)=""`，
+        /// 而且看起来像成功。
+        bool keyOnly = false;
     };
 
     /// 把一份模式里的全部注册表设置转成操作列表。
@@ -168,8 +194,13 @@ namespace ocid {
     };
 
     /// ① 单个 `<registryKey>` 下的值 → 操作（含嵌套子键）。
+    ///
+    /// `defs` 是清单的 `<securityDescriptorDefinition>` 表（`name → SDDL`），
+    /// 用来把键上的 `<securityDescriptor name="…" />` **引用**解析成 SDDL 原文。
+    /// 传空指针表示调用方不要 ACL（此时 `keySddl` 留空，但 `keySdName` 仍会带出来）。
     void RegistryKeyToOperations(const RegistryKeySpec& key,
-                                 std::vector<WcmRegistryOperation>& out);
+                                 std::vector<WcmRegistryOperation>& out,
+                                 const SddlDefinitions* defs = nullptr);
 
     /// 从整份清单收集**两套机制**的全部注册表操作。
     /// `hasSchema=false` 表示清单没有 configurationSchema（② 没有内容，属正常）。
