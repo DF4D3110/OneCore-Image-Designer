@@ -35,7 +35,7 @@ static void CheckEq(const std::wstring& got, const std::wstring& want, const cha
 
 int main()
 {
-    printf("=== 规范字符串形式 ===\n");
+    printf("=== 规范字符串形式（5 段，versionScope 不入串） ===\n");
     {
         AssemblyIdentity id;
         id.SetName(L"Microsoft-Windows-Shell32");
@@ -46,36 +46,57 @@ int main()
         id.SetScope(VersionScope::NonSxS);
 
         CheckEq(id.ToString(),
-                L"Microsoft-Windows-Shell32~6.2.8061.0~arm~31bf3856ad364e35~zh-CN~1",
-                "完整六段");
+                L"Microsoft-Windows-Shell32~6.2.8061.0~arm~31bf3856ad364e35~zh-CN",
+                "5 段：name~version~arch~token~language（无 versionScope）");
         CheckEq(id.ToString(false),
-                L"Microsoft-Windows-Shell32~~arm~31bf3856ad364e35~zh-CN~1",
+                L"Microsoft-Windows-Shell32~~arm~31bf3856ad364e35~zh-CN",
                 "versionless（版本段留空但分隔符保留）");
+        CheckEq(id.ScopeString(), L"nonSxS",
+                "versionScope 存的是字符串 nonSxS（不是数字 1）");
     }
 
-    printf("\n=== 中立语言 / SxS ===\n");
+    printf("\n=== nonSxS 的版本按 0.0.0.0 处理（真实实现规则） ===\n");
     {
         AssemblyIdentity id;
-        id.SetName(L"Microsoft-Windows-Foundation");
-        id.SetVersion(L"10.0.19041.1");
-        id.SetArchitecture(L"amd64");
+        id.SetName(L"acpi.inf");
+        id.SetVersion(L"6.2.8061.0");
+        id.SetArchitecture(L"arm");
         id.SetPublicKeyToken(L"31bf3856ad364e35");
-        id.SetScope(VersionScope::SxS);
-        CheckEq(id.ToString(),
-                L"Microsoft-Windows-Foundation~10.0.19041.1~amd64~31bf3856ad364e35~~2",
-                "language 留空、scope=2");
+        id.SetLanguage(L"neutral");
+        id.SetScope(VersionScope::NonSxS);
+        CheckEq(id.EffectiveVersion(), L"0.0.0.0", "nonSxS ⇒ EffectiveVersion = 0.0.0.0");
+
+        AssemblyIdentity sx = id;
+        sx.SetScope(VersionScope::SxS);
+        CheckEq(sx.EffectiveVersion(), L"6.2.8061.0", "SxS ⇒ EffectiveVersion 用真实版本");
+    }
+
+    printf("\n=== 组件名格式（目录名用，与标识字符串不同） ===\n");
+    {
+        // 镜像里的真实目录：arm_acpi.inf_31bf3856ad364e35_6.2.8061.0_none_a991cf7a419448c9
+        AssemblyIdentity id;
+        id.SetName(L"acpi.inf");
+        id.SetVersion(L"6.2.8061.0");
+        id.SetArchitecture(L"arm");
+        id.SetPublicKeyToken(L"31bf3856ad364e35");
+        id.SetLanguage(L"neutral");
+        id.SetScope(VersionScope::NonSxS);
+
+        CheckEq(id.CultureSegment(), L"none", "culture：neutral → none");
+        CheckEq(id.ComponentNamePrefix(),
+                L"arm_acpi.inf_31bf3856ad364e35_6.2.8061.0_none",
+                "组件名前缀（arch 在最前、version 在第 4 段）");
+        // 真实目录名 = 前缀 + "_" + hash
     }
 
     printf("\n=== 解析回环 ===\n");
     {
-        const std::wstring s = L"Microsoft-Windows-Shell32~6.2.8061.0~arm~31bf3856ad364e35~zh-CN~1";
+        const std::wstring s = L"Microsoft-Windows-Shell32~6.2.8061.0~arm~31bf3856ad364e35~zh-CN";
         AssemblyIdentity id;
         Check(AssemblyIdentity::TryParse(s, id), "TryParse 成功");
         CheckEq(id.ToString(), s, "解析后再输出，字符串完全一致（回环）");
-        Check(id.Scope() == VersionScope::NonSxS, "scope 解析为 NonSxS");
     }
     {
-        // 只有名字（moniker 形式）也要能解析
         AssemblyIdentity id;
         Check(AssemblyIdentity::TryParse(L"Some-Package", id), "单段 moniker 可解析");
         Check(id.IsMoniker() == false, "有名字就不算 IsMoniker");

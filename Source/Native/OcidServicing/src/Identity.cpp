@@ -3,6 +3,7 @@
 #include "ocid/Identity.h"
 
 #include <algorithm>
+#include <cwchar>
 #include <cwctype>
 
 namespace ocid {
@@ -93,41 +94,47 @@ namespace ocid {
 
     VersionScope AssemblyIdentity::Scope() const
     {
+        // 清单里写的是字符串 "nonSxS" / "SxS"（不区分大小写）。
+        // 早期真实实现里也有过数字形式，所以两种都认。
         std::wstring s = Attr(L"versionscope");
-        if (s == L"1") return VersionScope::NonSxS;
-        if (s == L"2") return VersionScope::SxS;
+        if (s.empty()) return VersionScope::Neutral;
+        if (s == L"1" || _wcsicmp(s.c_str(), L"nonSxS") == 0) return VersionScope::NonSxS;
+        if (s == L"2" || _wcsicmp(s.c_str(), L"SxS") == 0)    return VersionScope::SxS;
         return VersionScope::Neutral;
     }
 
     void AssemblyIdentity::SetScope(VersionScope s)
     {
+        // ⚠ 存**字符串**（与清单一致），不是数字 —— 反编译里是
+        //   `__wcsicmp(String1, L"nonSxS")` 这样比的。
         switch (s) {
-            case VersionScope::NonSxS: SetAttribute(L"versionscope", L"1"); break;
-            case VersionScope::SxS:    SetAttribute(L"versionscope", L"2"); break;
-            default:                   RemoveAttribute(L"versionscope");   break;
+            case VersionScope::NonSxS: SetAttribute(L"versionscope", L"nonSxS"); break;
+            case VersionScope::SxS:    SetAttribute(L"versionscope", L"SxS");    break;
+            default:                   RemoveAttribute(L"versionscope");         break;
         }
     }
 
-    // ── 规范字符串形式 ──────────────────────────────────────────────────────
+    std::wstring AssemblyIdentity::EffectiveVersion() const
+    {
+        // 真实实现（GetKeyFormFromDefinitionIdentityLessVersion @0x10095203）：
+        //     if (versionScope == L"nonSxS") version := L"0.0.0.0";
+        //     else                           version := 解析 version 属性;
+        // ⇒ nonSxS 的版本一律当 0.0.0.0。
+        if (Scope() == VersionScope::NonSxS) return L"0.0.0.0";
+        return Version();
+    }
+
+    // ── 规范字符串形式（5 段） ──────────────────────────────────────────────
 
     //
-    // 六个位置段，用 `~` 连接：
-    //     name ~ version ~ processorArchitecture ~ publicKeyToken ~ language ~ versionScope
+    // 依据 `CCbsIdentity::SaveAsStringId` @0x100A4303 的 `L"%s%c%s%c%s%c%s%c%s"`：
+    //     5 段、4 个分隔符 —— name~version~arch~publicKeyToken~language
+    // **versionScope 不入串。**
     //
-    // 段为空时留空（分隔符仍要在），例如中立语言：
-    //     Foo~1.0.0.0~x86~31bf3856ad364e35~~1
-    //
-    // versionScope 只写 1/2（neutral 留空）—— 这与镜像里目录名/清单名的实际写法一致。
+    // 分隔符用 `~`（镜像里目录/清单名普遍用 `~` 连接 identity 的这几段）。
     //
     std::wstring AssemblyIdentity::ToString(bool includeVersion) const
     {
-        std::wstring scope;
-        switch (Scope()) {
-            case VersionScope::NonSxS: scope = L"1"; break;
-            case VersionScope::SxS:    scope = L"2"; break;
-            default:                   scope.clear(); break;
-        }
-
         std::wstring s;
         s += Name();
         s += L"~";
@@ -138,15 +145,11 @@ namespace ocid {
         s += PublicKeyToken();
         s += L"~";
         s += Language();
-        s += L"~";
-        s += scope;
         return s;
     }
 
     bool AssemblyIdentity::TryParse(const std::wstring& s, AssemblyIdentity& out)
     {
-        // 至少要有 6 段才是完整形式；但真实世界里有只给部分的（如 "Foo~1.0.0.0"），
-        // 所以少于 6 段时按顺序填已知的前缀，剩下的留空，而不是直接失败。
         out.Clear();
 
         std::vector<std::wstring> seg;
@@ -158,21 +161,53 @@ namespace ocid {
             start = p + 1;
         }
         if (seg.size() < 2) {
-            // 只有名字也算合法（moniker 形式）
             if (!Trim(seg[0]).empty()) { out.SetName(Trim(seg[0])); return true; }
             return false;
         }
 
+        // 5 段形式：name~version~arch~token~language
         out.SetName(seg[0]);
         if (seg.size() > 1) out.SetVersion(seg[1]);
         if (seg.size() > 2) out.SetArchitecture(seg[2]);
         if (seg.size() > 3) out.SetPublicKeyToken(seg[3]);
         if (seg.size() > 4) out.SetLanguage(seg[4]);
-        if (seg.size() > 5) {
-            if (seg[5] == L"1") out.SetScope(VersionScope::NonSxS);
-            else if (seg[5] == L"2") out.SetScope(VersionScope::SxS);
-        }
         return true;
+    }
+
+    std::wstring AssemblyIdentity::KeyFormLessVersion() const
+    {
+        // 语义：去掉版本的规范字符串；版本按 EffectiveVersion 处理 ——
+        // 对 nonSxS 来说 EffectiveVersion()=="0.0.0.0"，而"LessVersion"把它也省掉，
+        // 所以这里统一输出 versionless 形式。
+        return ToString(false);
+    }
+
+    // ── "组件名"格式（目录名/清单名用） ────────────────────────────────────
+
+    std::wstring AssemblyIdentity::CultureSegment() const
+    {
+        // 实测：identity 里 language="neutral"，而目录名里该段是 `none`。
+        std::wstring lang = Language();
+        if (lang.empty() || _wcsicmp(lang.c_str(), L"neutral") == 0) return L"none";
+        return lang;
+    }
+
+    std::wstring AssemblyIdentity::ComponentNamePrefix() const
+    {
+        // <arch>_<name>_<token>_<version>_<culture>
+        // 真实例：arm_acpi.inf_31bf3856ad364e35_6.2.8061.0_none
+        // ⚠ 注意顺序与标识字符串【不同】：这里 arch 在最前，version 在第 4 段。
+        std::wstring s;
+        s += Architecture();
+        s += L"_";
+        s += Name();
+        s += L"_";
+        s += PublicKeyToken();
+        s += L"_";
+        s += Version();
+        s += L"_";
+        s += CultureSegment();
+        return s;
     }
 
     // ── 比较 ────────────────────────────────────────────────────────────────

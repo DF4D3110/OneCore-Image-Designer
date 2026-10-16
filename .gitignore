@@ -20,3 +20,6 @@ UupBridge/obj/
 !addonkit/**
 !addonkit/**/Build/
 !addonkit/**/bin/
+
+# 编译中间产物（构建输出目录 Output/x86 仍按既有约定保留）
+Source/Native/Output/build_*/

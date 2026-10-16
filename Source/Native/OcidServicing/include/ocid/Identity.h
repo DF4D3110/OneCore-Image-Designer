@@ -9,13 +9,32 @@
 // ⇒ 它是一个**通用属性包**，并带一个**规范字符串形式**。这正是清单里
 //   `<assemblyIdentity name=… version=… processorArchitecture=… publicKeyToken=… …/>` 的抽象。
 //
-// 规范字符串形式（与 Windows 一致，务必照抄，否则和镜像里已有的键/目录对不上）：
-//     <name>~<version>~<architecture>~<publicKeyToken>~<language>~<versionScope>
-//   · 无该属性时该段留空，但分隔符要保留
-//   · 第 6 段 versionScope：0=neutral，1=nonSxS，2=SxS
-//   例：Microsoft-Windows-Shell32~6.2.8061.0~arm~31bf3856ad364e35~zh-CN~1
+// 规范字符串形式（**照抄真实实现，别按直觉猜**）
 //
-// 另一个必须照抄的点：**版本可被省略**（versionless）。CBS 用它的地方很多
+// 依据 8061 带符号反编译 `CbsCore.dll` 的 `CCbsIdentity::SaveAsStringId`（@0x100A4303）：
+//     SczAllocFormatted(&v7, L"%s%c%s%c%s%c%s%c%s", lpCriticalSection[1].SpinCount)
+// ⇒ **5 个 %s + 4 个 %c ⇒ 规范字符串是【5 段】**：
+//     <name>~<version>~<processorArchitecture>~<publicKeyToken>~<language>
+//
+// ⚠ `versionScope` **不在**这个字符串里（我最初按 6 段写，是错的）。
+//
+// `versionScope` 在清单里是**字符串** `nonSxS` / `SxS`，而且有一条真实规则
+// （见 `?GetKeyFormFromDefinitionIdentityLessVersion@@YGJPAUIDefinitionIdentity@@PAPAG@Z` @0x10095203）：
+//     if (versionScope 与 L"nonSxS" 不区分大小写相等)  version := L"0.0.0.0"
+//     else                                            version := 解析后的真实版本
+// ⇒ 即 **nonSxS 的版本一律按 `0.0.0.0` 处理**。
+//
+// 另有一个**完全不同的**格式，"组件名"（目录名/清单名用的）：
+//     <arch>_<name>_<publicKeyToken>_<version>_<culture>_<hash>
+//   · 与标识字符串**不是一回事**，别混用
+//   · 其中 culture：`neutral` → **`none`**
+//   实测例（镜像里的真实目录）：
+//     arm_acpi.inf_31bf3856ad364e35_6.2.8061.0_none_a991cf7a419448c9
+//   对应的 identity 是：
+//     name="acpi.inf" version="6.2.8061.0" processorArchitecture="arm"
+//     language="neutral" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS"
+//
+// 第三个必须照抄的点：**版本可被省略**（versionless）。CBS 用它的地方很多
 // （`GetVersionlessStringId`）—— 例如"按名字+架构找到这个组件的所有版本"。
 
 #pragma once
@@ -27,10 +46,15 @@
 
 namespace ocid {
 
+    /// 版本范围。
+    ///
+    /// ⚠ 在清单/标识里它是**字符串** `"nonSxS"` / `"SxS"`，不是数字。
+    /// 早期 Windows 的 SxS 世界用「中立/非 SxS/ SxS」三分，这里保留三态便于判断，
+    /// 但**存进属性的永远是字符串**（`SetScope` 负责转换）。
     enum class VersionScope : int {
-        Neutral = 0,
-        NonSxS  = 1,
-        SxS     = 2,
+        Neutral = 0,   // 属性缺失
+        NonSxS  = 1,   // 字符串 "nonSxS"
+        SxS     = 2,   // 字符串 "SxS"
     };
 
     /// 标识里的一个具名属性（name / version / processorArchitecture / publicKeyToken / language / …）。
@@ -70,15 +94,39 @@ namespace ocid {
 
         VersionScope Scope() const;
         void         SetScope(VersionScope s);
+        /// 直接的字符串形式（`"nonSxS"` / `"SxS"` / 空）。
+        std::wstring ScopeString() const { return Attr(L"versionscope"); }
 
         /// 是否有版本段。真实实现区分 versionless，很多查找都靠它。
         bool HasVersion() const { return !Version().empty(); }
 
+        /// **有效版本**：`nonSxS` 的一律按 `0.0.0.0` 处理（真实实现的规则，见文件头注释）。
+        std::wstring EffectiveVersion() const;
+
         // ── 规范字符串形式 ──────────────────────────────────────────────────
         //
-        // `includeVersion=false` 即真实实现里的 "versionless string id"。
+        // **5 段**：name~version~arch~publicKeyToken~language
+        // versionScope 不入串。
+        //
+        // `includeVersion=false` 即真实实现里的 "versionless string id"：
+        // 版本段留空，但**分隔符保留**（不能靠丢段来实现）。
         std::wstring ToString(bool includeVersion = true) const;
         static bool  TryParse(const std::wstring& s, AssemblyIdentity& out);
+
+        /// "KeyForm"：真实实现里 `GetKeyFormFromDefinitionIdentityLessVersion` 用的形式，
+        /// 即**去掉版本**的规范字符串，且版本按 `EffectiveVersion()`（nonSxS ⇒ 0.0.0.0）语义处理。
+        std::wstring KeyFormLessVersion() const;
+
+        // ── "组件名"格式（目录名/清单名用，与上面的标识字符串【不是一回事】） ──
+        //
+        //     <arch>_<name>_<publicKeyToken>_<version>_<culture>_<hash>
+        //   · culture：`neutral` → `none`
+        //   · hash 是清单内容的哈希，本函数无法算（需要清单字节），
+        //     所以只生成前 5 段；算完 hash 由调用方接上。
+        std::wstring ComponentNamePrefix() const;
+
+        /// culture 段的取值：neutral → none，其它原样。
+        std::wstring CultureSegment() const;
 
         // ── 比较 ────────────────────────────────────────────────────────────
         //
