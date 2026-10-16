@@ -22,6 +22,30 @@ UUP queries, snapshots, payload association, downloaded folders, converted ISOs,
 
 SxS preflight previews selected input/output paths and required script availability without creating output directories, mounting images, or executing scripts. It reports the `prepare.cmd` `format X:` operation and remains blocked because `SxSFounder`/`CbsExploder` binaries are absent and their independent licensing/build provenance is unresolved. No automatic formatting, even with confirmation, is implemented.
 
+## Self-contained servicing stack (in progress)
+
+The long-term goal is to assemble a Windows image from a package set **without depending on the operating system's own servicing components**. Upstream that work is performed by `CbsCore.dll` (CBS), `wcp.dll` (WCP/SMI), the CMI engine, the CSI/DMI providers and KTM. Those components are architecture-specific, version-locked, and partly encumbered by independent licenses, so OCID is re-implementing the behaviour it needs as project-owned C++.
+
+Implemented so far under `Source/Native/OcidServicing/`:
+
+| Module | Responsibility |
+| --- | --- |
+| `Identity` | Assembly identity: the canonical `name~version~arch~token~language` string, `versionScope` handling, the forced `0.0.0.0` version of non-SxS packages, and component-name derivation including Windows' long-name abbreviation |
+| `Manifest` | Self-contained pull parser for component manifests, reading both registry declaration mechanisms (`registryKeys` and `configurationSchema`) |
+| `WcmSchema` | WCM (`smiengine`) schema declarations: `wcm:handler` / `wcm:legacyName` / `wcm:legacyType` / `default` |
+| `RegistryValue` | Registry value encoding (text to raw bytes) and type-correct merging |
+| `CmiInstaller` | CMI write decisions: `owner`, `operationHint`, `InternalInstall`, and the per-type merge rules |
+
+Build the native library, the console entry point, and the native tests:
+
+```powershell
+.\Source\Native\build-servicing.ps1
+```
+
+The same code backs the console tool and the application. The managed side binds through `Services/OcidServicingNative.cs` and applies the decisions in `Services/OcidSmiService.cs`. The application never falls back to a managed re-implementation of the value encoding: when the native library is unavailable it skips the operation and reports it, because a silently wrong byte image is worse than a reported failure.
+
+`Source/Native/OcidRegHook/` is a diagnostic IAT-hooking DLL used while researching how the servicing stack writes to offline hives. It is a research aid, not part of the shipping path.
+
 ## Requirements
 
 - Windows 10/11.
@@ -39,11 +63,23 @@ From the repository root:
 dotnet build ".\OneCore Image Designer.csproj" --configuration Release
 ```
 
-The main build also builds the repository-local `UupBridge` and copies its runtime files to the application output. No external UUPMediaCreator checkout or .NET 10 runtime is required for the base app. NuGet packages are restored by the SDK in the normal way.
+The main build also builds the repository-local `UupBridge` and copies its runtime files to the application output.
+
+The self-contained servicing stack is native code and is built separately. It requires Visual Studio 2022 (C++ workload) with a C++ build environment script; the build script cross-compiles both architectures because the application is x64 while the servicing stack it replaces may be x86:
+
+```powershell
+.\Source\Native\build-servicing.ps1
+```
+
+That produces `Source/Native/Output/x86/` and `Source/Native/Output/x64/` (the `OcidServicing` library, `ocid_manifest.exe`, and the native unit tests). These are build outputs and are excluded from the repository; run the script once after cloning before using the servicing pages. `Services/OcidServicingNative.cs` locates the library relative to the application output, so no copy step is required.
+
+`.\Build-CbsBundle.ps1` assembles the standalone console bundle at `bin\Release\net8.0-windows\CBS\` (the CLI plus its elevation helper). Pass `-NoBuild` to skip rebuilding the CLI.
+
+ No external UUPMediaCreator checkout or .NET 10 runtime is required for the base app. NuGet packages are restored by the SDK in the normal way.
 
 The build also copies the bundled `addonkit/` tree (Microsoft iot-adk-addonkit 17763-v7) into the output directory. The copy target is additive: files previously installed under `addonkit\adk\` by the in-app downloader are left in place. The addonkit shell additionally requires the Windows 10 IoT Core Kits (1809 / 10.0.17763.x) and the ADK to be installed on the machine, per the upstream README.
 
-Generated `bin`, `obj`, `build`, and `intermediate` trees, debug symbols, and generated Appx files are excluded from the repository; release packages should be attached to GitHub Releases instead. The checked-in `7z.dll` architecture variants, `makeappx.exe` fixture and its support DLLs, and `Tools/wcpex` binaries are retained runtime inputs used by the package-generation sources or embedded by the application, not build outputs.
+Generated `bin`, `obj`, `build`, `intermediate`, and `Source/Native/Output` trees, debug symbols, and generated Appx files are excluded from the repository; release packages should be attached to GitHub Releases instead. The checked-in `7z.dll` architecture variants, `makeappx.exe` fixture and its support DLLs, and `Tools/wcpex` binaries are retained runtime inputs used by the package-generation sources or embedded by the application, not build outputs.
 
 Run the generated application from:
 
@@ -69,7 +105,10 @@ Schemas/                 OEMInput schemas
 MobilePackageGen/         Package-generation libraries
 UupBridge/               .NET 8 adapter over the vendored UUP core
 UupShared/               Offline UUP query parsing and payload contracts shared by app and bridge
-Tests/                   Offline regression harness for UUP, SxS safety, artifacts, and XML generations
+Tests/                   Offline regression harness for UUP, SxS safety, artifacts, XML generations, and the native servicing library
+Source/Native/            Project-owned C++ servicing stack (OcidServicing), its console tool and tests, plus the diagnostic registry hook
+Reference/               Reverse-engineering scripts used to derive servicing behaviour from the upstream binaries
+Tools/                    Vendored helper binaries (wcpex and its wcp.dll), used to decompress DCM-compressed manifests
 ThirdParty/UUPMediaCreator/  Vendored upstream UUP source closure
 ThirdParty/SxS/           Isolated GPL-3 pureSxS and explodeSxS sources
 addonkit/                 Bundled Microsoft iot-adk-addonkit 17763-v7 (PowerShell toolchain + sample workspace); downloaded ADK tool sets land under addonkit/adk/<build>/ at runtime
@@ -94,6 +133,7 @@ See [`ThirdParty/THIRD-PARTY-NOTICES.md`](ThirdParty/THIRD-PARTY-NOTICES.md) for
 3. **Safe SxS workflow — preview implemented; image operation blocked.** The SxS page presents the chosen image/output paths and a read-only preflight. It does not execute scripts or create outputs. Upstream `prepare.cmd` formats `X:`; no automated volume format path exists. `CbsExploder`/`SxSFounder` binaries and license evidence are absent.
 4. **CBS licensing/provenance — unresolved and not distributed.** Local notices identify GPL-3.0 pureSxS/explodeSxS source, but do not establish independent terms or build provenance for the referenced CBS executables; no external sources were consulted. Resolve this with authoritative source/license/build records before adding either binaries or source.
 5. **Artifacts and generation regression — partial.** UUP snapshots/download folders and generated media/CBS output paths are registered in a shared in-process registry; a unified basic existence/snapshot-payload preflight is available. Tests exercise representative XML shapes, not generation builds against real OS/ADK packages. Genuine licensed representative OS/ADK samples and generation-specific build tools are not available in this repository, so end-to-end generation regression remains blocked.
+6. **Self-contained servicing stack — in progress.** `Source/Native/OcidServicing/` re-implements the servicing behaviour OCID needs — assembly identity, manifest parsing, WCM schema handling, registry value encoding, and CMI write decisions — as project-owned C++, exposed to the application through a small C ABI. The upstream dependencies named in items 3 and 4 are being removed module by module rather than redistributed: the goal is that assembling an image from a package set no longer requires the operating system's own servicing binaries.
 
 ## About
 

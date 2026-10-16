@@ -15,11 +15,17 @@ TestResults/
 UupBridge/bin/
 UupBridge/obj/
 
-# addonkit ä¸ºå¾®è½¯ iot-adk-addonkit 17763-v7 å†…ç½®å‰¯æœ¬ï¼šå…¶ç›®å½•/æ–‡ä»¶å¿…é¡»éšä»“åº“å‘å¸ƒï¼Œ
-# ä¸Šé¢çš„é€šé…è§„åˆ™ï¼ˆbin/ã€**/build/ã€*.tmp ç­‰ï¼‰ä¸å¾—å‘½ä¸­è¿™é‡Œã€‚
+# addonkit is a bundled copy of Microsoft iot-adk-addonkit 17763-v7.
+# Its directories and files must ship with the repository, so the wildcard
+# rules above (bin/, **/build/, *.tmp, ...) must NOT match inside it.
 !addonkit/**
 !addonkit/**/Build/
 !addonkit/**/bin/
 
-# ±àÒëÖĞ¼ä²úÎï£¨¹¹½¨Êä³öÄ¿Â¼ Output/x86 ÈÔ°´¼ÈÓĞÔ¼¶¨±£Áô£©
-Source/Native/Output/build_*/
+# Native servicing build outputs, produced by Source/Native/build-servicing.ps1
+# from Source/Native/**. They are rebuildable, so they are never committed.
+Source/Native/Output/
+
+# Local working notes: kept on the author's machine, never part of the repo.
+CBS_TECHNICAL_NOTES.md
+CBS_SESSION_REVIEW.md
