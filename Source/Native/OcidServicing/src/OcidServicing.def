@@ -1,0 +1,18 @@
+; OCID servicing library - undecorated C exports for P/Invoke.
+;
+; Why a .def: on x86, __cdecl functions are exported as _Name and __stdcall as
+; _Name@N. Both force the C# side to know the decoration, which changes with the
+; calling convention. A .def lists the names verbatim, so C# just declares
+; [DllImport("OcidServicing.dll", CallingConvention = Cdecl)] EntryPoint "Name".
+;
+; Keep this file pure ASCII.
+
+LIBRARY OcidServicing
+
+EXPORTS
+    OcidServicingVersion
+    OcidRegValueTypeCode
+    OcidRegValueEncode
+    OcidRegValueMerge
+    OcidCmiResolve
+    OcidWriteActionName

@@ -18,7 +18,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("artifact registry and preflight", () => { ArtifactPreflight(); return Task.CompletedTask; }),
     ("SxS preview is non-executing and blocks unsafe scripts", () => { SxsPreview(); return Task.CompletedTask; }),
     ("OS generation XML regressions", () => { GenerationRegression(); return Task.CompletedTask; }),
-    ("Validation rule families wire-up and hard-intercept templates", () => { RuleFamiliesRegression(); return Task.CompletedTask; })
+    ("Validation rule families wire-up and hard-intercept templates", () => { RuleFamiliesRegression(); return Task.CompletedTask; }),
+    ("Ocid servicing native library (ABI, value encoding, CMI decisions)", () => { OcidServicingNativeAbi(); return Task.CompletedTask; })
 };
 
 var failures = new List<string>();
@@ -271,6 +272,113 @@ static void RuleFamiliesRegression()
                 + string.Join("; ", res.Issues.Where(i => i.IsError).Select(i => i.Where + ":" + i.Message).Take(3)));
     }
 }
+
+// ── OCID 原生服务栈库（OcidServicing.dll）──────────────────────────────────
+//
+// 这组断言守的是**跨语言边界**，不是业务规则本身（规则由 C++ 侧的测试守）：
+//   · 导出名去修饰、调用约定、参数封送是否与 C ABI 对得上；
+//   · 架构（x86/x64）能不能在本进程里加载；
+//   · "不写"的几种结论能不能正确地穿过边界传回来。
+// 这几件事一旦错了，表现是进程崩溃或静默写错字节，而不是编译错误 —— 所以必须实测。
+static void OcidServicingNativeAbi()
+{
+    True(OcidServicingNative.Available,
+        "OcidServicing.dll 未找到（先跑 Source\\Native\\build-servicing.ps1）");
+    True(OcidServicingNative.Probe(out string probeMsg), "原生库自检失败：" + probeMsg);
+
+    // 类型码必须是**真实 Win32** 码，不是 wcp/smiengine 的内部枚举。
+    Equal<uint>(1u, OcidServicingNative.RegValueTypeCode("REG_SZ"));
+    Equal<uint>(2u, OcidServicingNative.RegValueTypeCode("REG_EXPAND_SZ"));
+    Equal<uint>(3u, OcidServicingNative.RegValueTypeCode("REG_BINARY"));
+    Equal<uint>(4u, OcidServicingNative.RegValueTypeCode("REG_DWORD"));
+    Equal<uint>(7u, OcidServicingNative.RegValueTypeCode("REG_MULTI_SZ"));
+    Equal<uint>(11u, OcidServicingNative.RegValueTypeCode("REG_QWORD"));
+    Equal<uint>(0u, OcidServicingNative.RegValueTypeCode("REG_NOT_A_TYPE"));
+
+    // REG_DWORD：4 字节小端。
+    True(OcidServicingNative.TryEncode("REG_DWORD", "0x3F", out byte[] dw, out _, out string e1),
+        "REG_DWORD 编码失败：" + e1);
+    Equal("3F000000", Hex(dw));
+
+    // REG_QWORD：文本就是**那 8 个字节本身**，按低地址→高地址书写，不做数值解释。
+    // 所以文本与写进注册表的字节是**逐字符镜射**（identity），不是"大端数字"。
+    // 依据：清单 `0001000000000000` ↔ 活机该值读出 `0x100`（23/23 命中、0 反例）。
+    // ⚠ 文本必须是 **16 位 hex**（实测 501/501 全语料如此，没有 `0x` 前缀形态）。
+    True(OcidServicingNative.TryEncode("REG_QWORD", "0001000000000000", out byte[] qw, out _, out string e2),
+        "REG_QWORD 编码失败：" + e2);
+    Equal("0001000000000000", Hex(qw));
+    True(!OcidServicingNative.TryEncode("REG_QWORD", "0x100", out _, out _, out _),
+        "REG_QWORD 带 0x 前缀应失败（真实数据里没有这种形态）");
+
+    // REG_SZ / REG_MULTI_SZ 的宽字符镜像与结尾 NUL。
+    True(OcidServicingNative.TryEncode("REG_SZ", "abc", out byte[] sz, out _, out string e3),
+        "REG_SZ 编码失败：" + e3);
+    Equal("6100620063000000", Hex(sz));
+
+    True(OcidServicingNative.TryEncode("REG_MULTI_SZ", "\"a\",\"b\"", out byte[] ms, out _, out string e4),
+        "REG_MULTI_SZ 编码失败：" + e4);
+    // "a\0b\0\0" 的 UTF-16LE：每个项各自以 NUL 结束（6100 0000 6200 0000），末尾再加一个 NUL（0000）。
+    // 容易写成 "ab\0"（漏掉项间分隔），那是错的。
+    Equal("61000000620000000000", Hex(ms));
+
+    // 失败必须是**显式失败**，不许拿 0 顶替。
+    True(!OcidServicingNative.TryEncode("REG_NOT_A_TYPE", "x", out _, out _, out _), "未知类型应失败");
+    True(!OcidServicingNative.TryEncode("REG_DWORD", "zzz", out _, out _, out _), "REG_DWORD 文本非法应失败");
+
+    // ── CMI 落地决策 ─────────────────────────────────────────────────────
+    // ① owner 组件 + 值已存在 + replace ⇒ 不覆盖（这是最容易漏、也最容易写坏数据的一条）
+    True(OcidServicingNative.TryResolveWrite("registryKeys", "replace", owner: true,
+            "REG_SZ", "new", valueExists: true, existingTypeCode: 1, existing: Bytes("old"),
+            out var d1, out string r1), "决策①失败：" + r1);
+    Equal(OcidWriteAction.SkipOwned, d1.Action);
+    True(!d1.WillWrite, "owner=true + 值已存在 ⇒ 必须不写");
+
+    // ② 值不存在 ⇒ 写，owner 不参与
+    True(OcidServicingNative.TryResolveWrite("registryKeys", "replace", owner: true,
+            "REG_SZ", "new", valueExists: false, existingTypeCode: 0, existing: Array.Empty<byte>(),
+            out var d2, out string r2), "决策②失败：" + r2);
+    True(d2.WillWrite, "值不存在 ⇒ 必须写");
+    Equal<uint>(1u, d2.TypeCode);
+
+    // ③ owner 组件但 hint 不是 replace（append）⇒ 合并而不是跳过
+    True(OcidServicingNative.TryResolveWrite("registryKeys", "append", owner: true,
+            "REG_SZ", "B", valueExists: true, existingTypeCode: 1, existing: Bytes("A"),
+            out var d3, out string r3), "决策③失败：" + r3);
+    True(d3.WillWrite, "append ⇒ 必须写（合并结果）");
+    Equal("410042000000", Hex(d3.Data));
+
+    // ④ WCM/SMI 那套**没有** owner 语义：值存在就覆盖
+    True(OcidServicingNative.TryResolveWrite("wcm", "", owner: true,
+            "REG_SZ", "new", valueExists: true, existingTypeCode: 1, existing: Bytes("old"),
+            out var d4, out string r4), "决策④失败：" + r4);
+    True(d4.WillWrite, "WCM 不受 owner 影响 ⇒ 必须写");
+
+    // ⑤ 非法 operationHint ⇒ InvalidHint（对应 E_INVALIDARG），不写、也不抛
+    True(OcidServicingNative.TryResolveWrite("registryKeys", "bogus", owner: false,
+            "REG_SZ", "new", valueExists: true, existingTypeCode: 1, existing: Bytes("old"),
+            out var d5, out string r5), "决策⑤失败：" + r5);
+    Equal(OcidWriteAction.InvalidHint, d5.Action);
+    True(!d5.WillWrite, "非法 hint ⇒ 不写");
+
+    // ⑥ 路径层数回归：原来写死 4 层往上，主程序布局（3 层）永远找不到工具。
+    True(OcidSmiService.FindManifestTool() != null,
+        "FindManifestTool() 没找到 ocid_manifest.exe（路径层数逻辑坏了）");
+}
+
+static byte[] Bytes(string s)
+{
+    // 测试里构造"已有值"：REG_SZ 的内存镜像 = UTF-16 + 结尾 NUL。
+    var chars = s.ToCharArray();
+    var b = new byte[(chars.Length + 1) * 2];
+    for (int i = 0; i < chars.Length; i++)
+    {
+        b[i * 2] = (byte)(chars[i] & 0xFF);
+        b[i * 2 + 1] = (byte)(chars[i] >> 8);
+    }
+    return b;
+}
+
+static string Hex(byte[] b) => Convert.ToHexString(b);
 
 static string NewTempDirectory()
 {

@@ -242,9 +242,16 @@ namespace OneCore_Image_Designer.Services
             {
                 Path.Combine(baseDir, "ocid_manifest.exe"),
                 Path.Combine(baseDir, "CBS", "ocid_manifest.exe"),
-                // 仓库里原生构建的输出目录（开发期）
-                Path.Combine(baseDir, "..", "..", "..", "..", "Source", "Native", "Output", "x86", "ocid_manifest.exe"),
             };
+            // ⚠ 这里原来写的是固定的 `"..","..","..",".."`，等于假设调用方在
+            //   `Tests\bin\Release\net8.0-windows\`。主程序在 `bin\Release\net8.0-windows\`
+            //   （少一层），于是**开发期永远找不到** ocid_manifest.exe，而失败只是"工具不可用"。
+            //   改成逐层往上找，两种布局都能命中。
+            var dir = new DirectoryInfo(baseDir);
+            for (int up = 0; up < 6 && dir != null; up++, dir = dir.Parent)
+            {
+                candidates.Add(Path.Combine(dir.FullName, "Source", "Native", "Output", "x86", "ocid_manifest.exe"));
+            }
             foreach (var c in candidates)
             {
                 try { if (File.Exists(c)) return Path.GetFullPath(c); } catch { }
@@ -385,12 +392,43 @@ namespace OneCore_Image_Designer.Services
             // ⚠ 这里**必须**走 RegSetValueExW 写原始字节，不能再用 RegistryKey.SetValue。
             //   原因见 RegSetting 里那段：.NET 的 SetValue 会按它自己的类型系统重新解释数据，
             //   REG_QWORD 的 8 字节内存镜像与 REG_MULTI_SZ 的引号定界符都会被它改掉或抛错。
-            //   C++ 侧已经把最终字节算好了（`DataHex`），这里只做"搬运"，不再有第二份解释逻辑。
-            if (!s.Encoded)
+            //
+            // ★ 字节与"该不该写"都问 C++ 侧（OcidServicing.dll），这里只搬运。
+            //   决策必须看 hive 现状：owner=true + hint=replace + 值已存在 ⇒ **不覆盖**
+            //   （真实服务栈 CMI::Utility::RegistryInstallerImpl::InternalInstall 的分支）。
+            //   只看清单写，会把 owner 组件已有的值无条件盖掉。
+            if (!OcidServicingNative.Available)
             {
-                log?.Invoke($"[SMI] ✗ 值无法编码，**跳过不写**（宁缺勿错）：" +
-                            $"{s.Root}\\{s.SubKey} [{valueDisplay}] {s.ValueType} — {s.EncodeError}");
+                log?.Invoke($"[SMI] ✗ 原生库 {OcidServicingNative.DllName} 不可用，**跳过不写**" +
+                            $"（宁缺勿错，绝不退回 C# 自己解释）：{fullPath} [{valueDisplay}]");
                 return false;
+            }
+
+            bool exists = TryReadExistingValue(key.Handle, s.ValueName, out uint curType, out byte[] curData);
+
+            if (!OcidServicingNative.TryResolveWrite(
+                    s.Mechanism, s.OperationHint, s.Owner, s.ValueType, s.Data,
+                    exists, curType, curData, out var decision, out string decideErr))
+            {
+                log?.Invoke($"[SMI] ✗ 落地决策失败，**跳过不写**：{s.Root}\\{s.SubKey} [{valueDisplay}] " +
+                            $"{s.ValueType} — {decideErr}");
+                return false;
+            }
+
+            string actName = OcidServicingNative.ActionName(decision.Action);
+            if (!decision.WillWrite)
+            {
+                // SkipOwned 是正常路径（不是失败）：owner 组件已经放了这个值，我们不该盖。
+                log?.Invoke($"[SMI]   ⊘ {actName}：{fullPath} [{valueDisplay}] — {decision.Note}");
+                return false;
+            }
+
+            if (exists && decision.TypeCode != curType && decision.Action == OcidWriteAction.Write
+                && string.Equals(s.OperationHint, "replace", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(s.Mechanism, "registryKeys", StringComparison.OrdinalIgnoreCase))
+            {
+                // 仅排障用：非 CMI 那套（WCM/SMI）语义就是"设成这个值"，类型变了也照写。
+                log?.Invoke($"[SMI]   · 覆盖类型 {curType} ⇒ {decision.TypeCode}：{fullPath} [{valueDisplay}]");
             }
 
             if (s.HasMacro)
@@ -401,16 +439,55 @@ namespace OneCore_Image_Designer.Services
                 log?.Invoke($"[SMI] ⚠ 值含未展开的 $(…) 宏：{s.Root}\\{s.SubKey} [{valueDisplay}] = {Truncate(s.Data, 80)}");
             }
 
-            byte[] bytes = HexToBytes(s.DataHex);
-            int rc = RegSetValueExW(key.Handle, s.ValueName, 0, s.TypeCode, bytes, (uint)bytes.Length);
+            byte[] bytes = decision.Data;
+            int rc = RegSetValueExW(key.Handle, s.ValueName, 0, decision.TypeCode, bytes, (uint)bytes.Length);
             if (rc != 0)
             {
                 log?.Invoke($"[SMI] ✗ RegSetValueExW 失败 rc={rc}（{new System.ComponentModel.Win32Exception(rc).Message}）：" +
-                            $"{fullPath} [{valueDisplay}] type={s.TypeCode} len={bytes.Length}");
+                            $"{fullPath} [{valueDisplay}] type={decision.TypeCode} len={bytes.Length}");
                 return false;
             }
             return true;
         }
+
+        /// <summary>
+        /// 读出目标值在 hive 里的现状（类型 + 原始字节）。不存在返回 false。
+        /// </summary>
+        /// <remarks>
+        /// 一定要读原始字节：决策里的 Merge（append/prepend）与"类型是否相同"都基于字节，
+        /// 用 .NET 的 <c>GetValue</c> 会把 REG_QWORD/REG_MULTI_SZ 重新解释一遍，那正是
+        /// 我们要避免的第二份解释逻辑。
+        /// </remarks>
+        private static bool TryReadExistingValue(SafeRegistryHandle hKey, string valueName,
+                                                 out uint typeCode, out byte[] data)
+        {
+            typeCode = 0;
+            data = Array.Empty<byte>();
+
+            uint size = 0;
+            int rc = RegQueryValueExW(hKey, valueName, IntPtr.Zero, out typeCode, null, ref size);
+            uint err = (uint)Marshal.GetLastWin32Error();
+            // ERROR_FILE_NOT_FOUND(2) / ERROR_MORE_DATA(234)：前者=不存在，后者=需要缓冲。
+            if (rc != 0 && err != 234) return false;
+
+            if (size == 0) return rc == 0;
+
+            var buf = new byte[size];
+            rc = RegQueryValueExW(hKey, valueName, IntPtr.Zero, out typeCode, buf, ref size);
+            if (rc != 0) return false;
+            if (size != buf.Length) Array.Resize(ref buf, (int)size);
+            data = buf;
+            return true;
+        }
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int RegQueryValueExW(
+            SafeRegistryHandle hKey,
+            string lpValueName,
+            IntPtr lpReserved,
+            out uint lpType,
+            byte[]? lpData,
+            ref uint lpcbData);
 
         // 直接写原始字节（绕开 .NET 的类型解释）。lpValueName 传空串即**默认值**。
         [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
