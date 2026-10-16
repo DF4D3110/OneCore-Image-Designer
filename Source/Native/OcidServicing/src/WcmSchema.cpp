@@ -1,4 +1,4 @@
-// OCID - WCM 配置模式实现
+﻿// OCID - WCM 配置模式实现
 
 #include "ocid/WcmSchema.h"
 
@@ -231,6 +231,68 @@ namespace ocid {
         cv.text = item.defaultValue;
         cv.ok = true;
         return cv;
+    }
+
+    // ── 两套声明机制的统一收集 ──────────────────────────────────────────────
+
+    void RegistryKeyToOperations(const RegistryKeySpec& key,
+                                 std::vector<WcmRegistryOperation>& out)
+    {
+        std::wstring root, sub;
+        if (SplitRoot(key.keyName, root, sub)) {
+            for (const auto& v : key.values) {
+                WcmRegistryOperation op;
+                op.root       = root;
+                // 清单里 keyName 可能带尾随反斜杠（如 "HKEY_CLASSES_ROOT\Foo\"），
+                // 直接拿去拼路径会多出一个空段。统一去掉尾部反斜杠与空白。
+                while (!sub.empty() && (sub.back() == L'\\' || sub.back() == L' ')) sub.pop_back();
+                op.subKey     = sub;
+                op.valueName  = v.name;                       // 空 = 默认值
+                op.valueType  = v.valueType.empty() ? L"REG_SZ" : v.valueType;
+                op.data       = v.value;
+                op.owner      = v.owner;
+                op.operationHint = v.operationHint;
+                op.scope      = L"";                          // ① 不带 scope，由 handler 根决定落点
+                op.mechanism  = L"registryKeys";
+                op.sourceItem = key.keyName + (v.name.empty() ? L"\\defaultValue" : (L"\\" + v.name));
+                out.push_back(std::move(op));
+            }
+        }
+        // 真实数据里 registryKey 是扁平的（每个 keyName 都写全路径），
+        // 但万一出现嵌套写法也一并处理，免得静默丢设置。
+        for (const auto& sk : key.subKeys) RegistryKeyToOperations(sk, out);
+    }
+
+    RegistryOperationBatch CollectManifestRegistryOperations(
+        const ComponentManifest& manifest,
+        std::vector<std::wstring>* warnings)
+    {
+        RegistryOperationBatch batch;
+
+        // ① `<registryKeys>`（5282 条量级，带 owner/operationHint）
+        for (const auto& k : manifest.registryKeys) {
+            size_t before = batch.operations.size();
+            RegistryKeyToOperations(k, batch.operations);
+            batch.fromRegistryKeys += batch.operations.size() - before;
+        }
+
+        // ② `<configurationSchema>`（533 条量级，带 wcm:handler/legacy*）
+        if (!manifest.configurationSchema.xsdText.empty()) {
+            WcmConfigurationSchema schema;
+            auto sr = schema.Parse(manifest.configurationSchema.xsdText);
+            if (sr.ok) {
+                auto ops = ToRegistryOperations(schema, warnings);
+                for (auto& op : ops) {
+                    op.mechanism = L"wcm";
+                    batch.operations.push_back(std::move(op));
+                }
+                batch.fromWcmSchema = ops.size();
+            } else if (warnings) {
+                warnings->push_back(L"configurationSchema 解析失败：" + sr.error);
+            }
+        }
+
+        return batch;
     }
 
 } // namespace ocid

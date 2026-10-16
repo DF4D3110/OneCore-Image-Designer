@@ -405,6 +405,7 @@ static int CmdExportOps(const std::wstring& dir, const std::wstring& listFile, i
     }
 
     size_t totalOps = 0, okManifests = 0, badManifests = 0, noSchema = 0;
+    size_t fromRegistryKeys = 0, fromWcm = 0;
     for (const auto& path : files) {
         std::wstring text, err;
         if (!ReadFileUtf8(path, text, err)) { ++badManifests; continue; }
@@ -414,24 +415,28 @@ static int CmdExportOps(const std::wstring& dir, const std::wstring& listFile, i
         if (!r.ok) { ++badManifests; continue; }
         ++okManifests;
 
-        if (m.configurationSchema.xsdText.empty()) { ++noSchema; continue; }
-
-        WcmConfigurationSchema schema;
-        auto sr = schema.Parse(m.configurationSchema.xsdText);
-        if (!sr.ok) { ++badManifests; continue; }
+        // ⚠ 两套机制都要收：`<registryKeys>`（5282 条量级）与 `<configurationSchema>`（533 条量级）。
+        //   只做后者会静默丢掉一大片设置，而且日志看起来一切正常。
+        if (m.configurationSchema.xsdText.empty() && m.registryKeys.empty()) { ++noSchema; continue; }
 
         std::wstring compName = m.identity.ComponentNamePrefix();
-        auto ops = ToRegistryOperations(schema);
-        for (const auto& o : ops) {
-            // 一行一个对象，带上来源（组件名 + 设置项名），排障时能直接定位到哪份清单的哪一条
+        auto batch = CollectManifestRegistryOperations(m);
+        fromRegistryKeys += batch.fromRegistryKeys;
+        fromWcm          += batch.fromWcmSchema;
+
+        for (const auto& o : batch.operations) {
+            // 一行一个对象，带上来源（组件名 + 机制 + 设置项名），排障时能直接定位到哪份清单的哪一条
             std::string line = "{\"component\":\"" + JsonEscape(compName)
                              + "\",\"identity\":\"" + JsonEscape(m.identity.ToString())
+                             + "\",\"mechanism\":\"" + JsonEscape(o.mechanism)
                              + "\",\"root\":\"" + JsonEscape(o.root)
                              + "\",\"subKey\":\"" + JsonEscape(o.subKey)
                              + "\",\"valueName\":\"" + JsonEscape(o.valueName)
                              + "\",\"valueType\":\"" + JsonEscape(o.valueType)
                              + "\",\"data\":\"" + JsonEscape(o.data)
                              + "\",\"scope\":\"" + JsonEscape(o.scope)
+                             + "\",\"owner\":" + (o.owner ? "true" : "false")
+                             + ",\"operationHint\":\"" + JsonEscape(o.operationHint)
                              + "\",\"sourceItem\":\"" + JsonEscape(o.sourceItem) + "\"}";
             OutLn(line);
             ++totalOps;
@@ -441,7 +446,9 @@ static int CmdExportOps(const std::wstring& dir, const std::wstring& listFile, i
     Err("manifests=" + std::to_string(okManifests)
       + " failed=" + std::to_string(badManifests)
       + " noSchema=" + std::to_string(noSchema)
-      + " ops=" + std::to_string(totalOps));
+      + " ops=" + std::to_string(totalOps)
+      + " (registryKeys=" + std::to_string(fromRegistryKeys)
+      + " wcm=" + std::to_string(fromWcm) + ")");
     return badManifests == 0 ? 0 : 1;
 #else
     (void)dir; (void)listFile; (void)maxFiles; return 2;

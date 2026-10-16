@@ -46,6 +46,8 @@
 
 #pragma once
 
+#include "ocid/Manifest.h"
+
 #include <cstdint>
 #include <map>
 #include <string>
@@ -125,12 +127,54 @@ namespace ocid {
         std::wstring data;       // 值数据（字符串形式）
         std::wstring scope;      // allUsers / perUser
         std::wstring sourceItem; // 来自哪个设置项（排障用）
+        /// 来源机制：`"registryKeys"`（①）或 `"wcm"`（②）。两套是不同集合，排障时必须能区分。
+        std::wstring mechanism;
+        /// `<registryKeys>` 那套才带：该组件是否**拥有**这个值（影响卸载时是否删除）。
+        bool         owner = true;
+        /// `operationHint`（实测几乎全是 `replace`）。
+        std::wstring operationHint;
     };
 
     /// 把一份模式里的全部注册表设置转成操作列表。
     /// `settings_` 里非注册表形态的项会记进 `warnings`，不会导致失败。
     std::vector<WcmRegistryOperation> ToRegistryOperations(
         const WcmConfigurationSchema& schema,
+        std::vector<std::wstring>* warnings = nullptr);
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 两套声明机制的统一收集
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // ⚠⚠ **一份清单里有【两套独立】的注册表声明，而且它们是不同的集合**，实测（shell32，1.3 MB）：
+    //
+    //   ① `<registryKeys>/<registryKey>/<registryValue>`     2115 key / **5282 value**
+    //      属性：`keyName`、`owner` ／ `name`、`valueType`、`value`、`operationHint`、`owner`
+    //      **里面没有** `Classes\Unknown\shell`
+    //
+    //   ② `<configuration>/<configurationSchema>/<xsd:element>`   **533 条**
+    //      属性：`wcm:handler`、`wcm:legacyName`、`wcm:legacyType`、`default`、`wcm:scope`
+    //      **里面有** `Classes\Unknown\shell = openas`（CBS 被 UCPD 拦的那一笔）
+    //
+    //   ⇒ 数目、属性、内容都不同 ⇒ **不是同一批设置的两种写法**。
+    //   ⇒ 要完整替代 CBS，**两套都必须落**。只做 ② 会静默丢掉 ① 的几千条设置：
+    //      清单解析成功、日志全绿、`Unknown\shell` 也对，**只有拿真实镜像逐条对比才会发现少了一大片**。
+    //
+    // 本函数把两套统一收集成同一种操作，用 `source`/`sourceItem` 区分来源，便于排障。
+    struct RegistryOperationBatch
+    {
+        std::vector<WcmRegistryOperation> operations;
+        size_t fromRegistryKeys = 0;   // ① 贡献的条数
+        size_t fromWcmSchema = 0;      // ② 贡献的条数
+    };
+
+    /// ① 单个 `<registryKey>` 下的值 → 操作（含嵌套子键）。
+    void RegistryKeyToOperations(const RegistryKeySpec& key,
+                                 std::vector<WcmRegistryOperation>& out);
+
+    /// 从整份清单收集**两套机制**的全部注册表操作。
+    /// `hasSchema=false` 表示清单没有 configurationSchema（② 没有内容，属正常）。
+    RegistryOperationBatch CollectManifestRegistryOperations(
+        const ComponentManifest& manifest,
         std::vector<std::wstring>* warnings = nullptr);
 
     // ─────────────────────────────────────────────────────────────────────────

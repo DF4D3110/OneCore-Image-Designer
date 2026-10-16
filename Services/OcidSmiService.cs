@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -129,6 +129,8 @@ namespace OneCore_Image_Designer.Services
             public string Source = "";
             /// <summary>来源组件名（用于日志）。</summary>
             public string Component = "";
+            /// <summary>来源机制：`registryKeys`（清单里第一套声明）或 `wcm`（configurationSchema）。两套是不同集合。</summary>
+            public string Mechanism = "";
         }
 
         /// <summary>
@@ -262,9 +264,11 @@ namespace OneCore_Image_Designer.Services
                 Scope = Get("scope") ?? "",
                 Source = Get("sourceItem") ?? "",
                 Component = Get("component") ?? "",
-                // owner/operationHint 尚未从原生工具导出（下一步补），先按清单默认语义
-                Owner = true,
-                OperationHint = "replace",
+                Mechanism = Get("mechanism") ?? "",
+                // owner/operationHint 由原生工具从 `<registryKeys>` 那套声明导出
+                // （实测 `owner="true"/"false"`、`operationHint="replace"`）。
+                Owner = line.Contains("\"owner\":true"),
+                OperationHint = Get("operationHint") is { Length: > 0 } oh ? oh : "replace",
             };
         }
 
