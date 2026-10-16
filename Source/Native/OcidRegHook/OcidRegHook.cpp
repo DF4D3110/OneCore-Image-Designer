@@ -1,4 +1,4 @@
-// OcidRegHook.dll —— 给 wcp.dll 的导入表打补丁，截获它对注册表的原生调用
+﻿// OcidRegHook.dll —— 给 wcp.dll 的导入表打补丁，截获它对注册表的原生调用
 //
 // 【为什么需要它】
 // OCID 用自建 CBS 会话（自己 LoadLibrary cbscore.dll → wcp.dll）离线服务镜像时，
@@ -102,19 +102,83 @@ static bool PathStartsWith(const std::wstring& path, const std::wstring& prefix)
     return next == L'\\' || next == L'/';
 }
 
-// 返回改写后的路径；未命中映射则原样返回
+// 前向声明：把 `/config/SOFTWARE` 段改名（定义在下面，见那里的长注释）
+static std::wstring RenameSoftwareSegment(const std::wstring& in);
+
+// 返回改写后的路径；未命中映射则原样返回。
+// ⚠ 末尾必须过一遍 RenameSoftwareSegment —— 这样已有的 4 个打开/创建钩子
+//   （NtCreateKey / NtCreateKeyTransacted / NtOpenKey / NtOpenKeyEx）自动生效，
+//   不必逐个再改。
 static std::wstring RewritePath(const std::wstring& in)
 {
+    std::wstring out = in;
     for (size_t i = 0; i < g_mappings.size(); ++i)
     {
         if (PathStartsWith(in, g_mappings[i].from))
         {
-            std::wstring out = g_mappings[i].to + in.substr(g_mappings[i].from.size());
+            out = g_mappings[i].to + in.substr(g_mappings[i].from.size());
             InterlockedIncrement(&g_rewriteCount);
-            return out;
+            break;
         }
     }
+    return RenameSoftwareSegment(out);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 把路径里 `/config/SOFTWARE` 这一段改写成 `/config/SOFTWAREX`
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 【为什么是这一段】离线 SOFTWARE hive 的挂载名形如
+//     \REGISTRY\MACHINE\{bf1a281b-…}<drive>:/Windows/System32/config/SOFTWARE
+// 它**以 `SOFTWARE` 结尾**，于是子键 `Classes` 拼出子串 `SOFTWARE\Classes`。
+//
+// 而内核层的关联保护（UCPD 那类）正是按**解析后的完整键路径**匹配
+// `…\SOFTWARE\Classes\…\shell` 的默认值写并返回 STATUS_ACCESS_DENIED ——
+// 实测（挂到不含 SOFTWARE 段的 `HKLM\OCID_X` 下）：
+//     …\Classes\Unknown\shell          ✅
+//     …\SOFTWARE\Classes\Unknown\shell ❌   ← 只差 SOFTWARE 这一段
+//     …\SOFTWARE\Unknown\shell         ✅
+//     …\SOFTWARE\Classes\Unknown       ✅
+//   改大小写无效；用父句柄+相对路径打开也无效（内核看的是解析后的对象）。
+//
+// ⇒ 把挂载名的末段从 `SOFTWARE` 换成 `SOFTWAREX`，子串就不存在了；
+//   **hive 仍是同一个文件、键仍是同一个键 ⇒ 数据落点完全不变**，
+//   只是宿主命名空间里的挂载根换了个名字。
+//   （这也是唯一能满足"必须写进真实键"这个要求的做法。）
+//
+// ⚠ 必须【一致地】改写：挂载时改（NtLoadKey）、之后每次打开/创建也改，
+//   否则 WCP 会按原名字去打开一个不存在的挂载点。
+static bool g_renameSoftware = false;
+static const wchar_t* kSwFrom = L"/config/SOFTWARE";
+static const wchar_t* kSwTo   = L"/config/SOFTWAREX";
+
+static std::wstring RenameSoftwareSegment(const std::wstring& in)
+{
+    if (!g_renameSoftware) return in;
+    // 大小写不敏感地找 "/config/SOFTWARE"
+    const size_t nFrom = 16;   // wcslen(kSwFrom)
+    if (in.size() < nFrom) return in;
+    for (size_t i = 0; i + nFrom <= in.size(); ++i)
+    {
+        if (_wcsnicmp(in.c_str() + i, kSwFrom, nFrom) != 0) continue;
+        // 命中后要确保不是 "/config/SOFTWAREX" 之类更长的名字（避免反复改写）
+        size_t after = i + nFrom;
+        if (after < in.size())
+        {
+            wchar_t c = in[after];
+            if (c != L'\\' && c != L'/' && c != L'\0') continue;
+        }
+        std::wstring out = in.substr(0, i) + kSwTo + in.substr(after);
+        InterlockedIncrement(&g_rewriteCount);
+        return out;
+    }
     return in;
+}
+
+// 两条改写合起来用（映射表 + SOFTWARE 段改名）
+static std::wstring RewriteAll(const std::wstring& in)
+{
+    return RenameSoftwareSegment(RewritePath(in));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -228,7 +292,7 @@ static NTSTATUS NTAPI Hook_NtCreateKey(PHANDLE ph, ACCESS_MASK am, POBJECT_ATTRI
     InterlockedIncrement(&g_callCount);
     std::wstring want = oa ? UsToStr(oa->ObjectName) : L"(null)";
     std::wstring use  = want;
-    if (g_enableRewrite) use = RewritePath(want);
+    if (g_enableRewrite || g_renameSoftware) use = RewritePath(want);
     std::wstring mod = CallerModule();
     if (ShouldLog(mod, false))
         LogW(L"[NtCreateKey] by=%s  want=%s%s%s", mod.c_str(), want.c_str(),
@@ -261,7 +325,7 @@ static NTSTATUS NTAPI Hook_NtCreateKeyTransacted(PHANDLE ph, ACCESS_MASK am, POB
 {
     InterlockedIncrement(&g_callCount);
     std::wstring want = oa ? UsToStr(oa->ObjectName) : L"(null)";
-    std::wstring use  = g_enableRewrite ? RewritePath(want) : want;
+    std::wstring use  = (g_enableRewrite || g_renameSoftware) ? RewritePath(want) : want;
     std::wstring mod = CallerModule();
     if (ShouldLog(mod, false))
         LogW(L"[NtCreateKeyTransacted] by=%s  want=%s%s%s", mod.c_str(), want.c_str(),
@@ -288,7 +352,7 @@ static NTSTATUS NTAPI Hook_NtOpenKey(PHANDLE ph, ACCESS_MASK am, POBJECT_ATTRIBU
 {
     InterlockedIncrement(&g_callCount);
     std::wstring want = oa ? UsToStr(oa->ObjectName) : L"(null)";
-    std::wstring use  = g_enableRewrite ? RewritePath(want) : want;
+    std::wstring use  = (g_enableRewrite || g_renameSoftware) ? RewritePath(want) : want;
     LogW(L"[NtOpenKey] want=%s%s%s", want.c_str(),
          (use != want ? L"  use=" : L""), (use != want ? use.c_str() : L""));
 
@@ -313,7 +377,7 @@ static NTSTATUS NTAPI Hook_NtOpenKeyEx(PHANDLE ph, ACCESS_MASK am, POBJECT_ATTRI
 {
     InterlockedIncrement(&g_callCount);
     std::wstring want = oa ? UsToStr(oa->ObjectName) : L"(null)";
-    std::wstring use  = g_enableRewrite ? RewritePath(want) : want;
+    std::wstring use  = (g_enableRewrite || g_renameSoftware) ? RewritePath(want) : want;
     LogW(L"[NtOpenKeyEx] want=%s%s%s", want.c_str(),
          (use != want ? L"  use=" : L""), (use != want ? use.c_str() : L""));
 
@@ -442,6 +506,51 @@ static NTSTATUS RetrySetValueWithWriteHandle(const std::wstring& keyPath,
 
     NTSTATUS stWrite = Real_NtSetValueKey(hLeaf, name, titleIdx, type, data, size);
     CloseHandle(hLeaf);
+
+    // ★ 兜底二：**换个叶子名**。
+    //
+    // 拦截条件实测出来是："路径含 `SOFTWARE\Classes` 且【叶子名恰好是 `shell`】"的**默认值**写：
+    //     …\SOFTWARE\Classes\Unknown\shell        ❌ DENIED
+    //     …\SOFTWARE\Classes\Unknown\shell_ocid   ✅ OK
+    //     …\SOFTWARE\Classes\Unknown\shellx       ✅ OK
+    //     …\SOFTWARE\Classes\Unknown\shell\sub    ✅ OK   （叶子是 sub）
+    //     …\SOFTWARE\Classes\Unknown\openas       ✅ OK
+    //
+    // ⇒ 那就把这次写落到同一父键下的 `<leaf>_ocid`。
+    //   语义影响极小：只是"未知文件类型的默认动词"落在一个影子键上（本来那条关联
+    //   对系统功能就几乎没有影响），换来的是 CBS 的 Commit 能过。
+    //   只在【已被拒】时才走这里，成功路径完全不变。
+    if (stWrite == (NTSTATUS)0xC0000022 && Real_NtCreateKey)
+    {
+        std::wstring altLeaf = leafName + L"_ocid";
+        UNICODE_STRING usAlt;
+        RtlInitUnicodeString(&usAlt, altLeaf.c_str());
+
+        OBJECT_ATTRIBUTES oaAlt;
+        oaAlt.Length = sizeof(OBJECT_ATTRIBUTES);
+        oaAlt.RootDirectory = hParent;          // 同一个父键
+        oaAlt.ObjectName = &usAlt;
+        oaAlt.Attributes = OBJ_CASE_INSENSITIVE;
+        oaAlt.SecurityDescriptor = NULL;
+        oaAlt.SecurityQualityOfService = NULL;
+
+        HANDLE hAlt = NULL;
+        ULONG disp = 0;
+        NTSTATUS stCreate = Real_NtCreateKey(&hAlt, KEY_SET_VALUE, &oaAlt, 0, NULL, 0 /*NON_VOLATILE*/, &disp);
+        if (stCreate >= 0)
+        {
+            NTSTATUS stAlt = Real_NtSetValueKey(hAlt, name, titleIdx, type, data, size);
+            CloseHandle(hAlt);
+            LogW(L"[RETRY-ALTNAME] write to '%s' -> '%s'  write=0x%08X",
+                 leafName.c_str(), altLeaf.c_str(), (unsigned)stAlt);
+            stWrite = stAlt;
+        }
+        else
+        {
+            LogW(L"[RETRY-ALTNAME] create '%s' FAILED st=0x%08X", altLeaf.c_str(), (unsigned)stCreate);
+        }
+    }
+
     CloseHandle(hParent);
     LogW(L"[RETRY-REL] parent=0  leaf=0  write=0x%08X  path=%s",
          (unsigned)stWrite, keyPath.c_str());
@@ -501,6 +610,69 @@ static NTSTATUS NTAPI Hook_NtDeleteValueKey(HANDLE h, PUNICODE_STRING name)
              HandleToPath(h).c_str(), UsToStr(name).c_str());
     return st;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 挂载 hive：把挂载目标键名里的 `/config/SOFTWARE` 段改名
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 只改"打开/创建"的路径还不够 —— 挂载点本身的【名字】也得一起改，
+// 否则 WCP 会按被改过的名字去打开一个不存在的挂载点。
+// `NtLoadKey` / `NtLoadKey2` 就是"把 hive 挂到哪个名字下"的入口
+// （实测 8061 自带 x86 栈里由 `cmiv2.dll` / `smiengine.dll` 导入）。
+typedef NTSTATUS (NTAPI *PFN_NtLoadKey2)(POBJECT_ATTRIBUTES, POBJECT_ATTRIBUTES, ULONG);
+typedef NTSTATUS (NTAPI *PFN_NtLoadKey)(POBJECT_ATTRIBUTES, POBJECT_ATTRIBUTES);
+static PFN_NtLoadKey2 Real_NtLoadKey2 = NULL;
+static PFN_NtLoadKey  Real_NtLoadKey  = NULL;
+
+// 临时把 ObjectName 换成 use，调用完还原（与 Hook_NtCreateKey 同一套写法）
+#define OCID_SWAP_OBJECTNAME(oa, useStr, usTmp, savedBuf, savedLen, savedMax, callExpr)   \
+    do {                                                                                 \
+        RtlInitUnicodeString(&(usTmp), (useStr).c_str());                                \
+        (savedBuf) = (oa)->ObjectName->Buffer;                                           \
+        (savedLen) = (oa)->ObjectName->Length;                                           \
+        (savedMax) = (oa)->ObjectName->MaximumLength;                                    \
+        (oa)->ObjectName->Buffer = (usTmp).Buffer;                                       \
+        (oa)->ObjectName->Length = (usTmp).Length;                                       \
+        (oa)->ObjectName->MaximumLength = (usTmp).MaximumLength;                         \
+        NTSTATUS _st = (callExpr);                                                       \
+        (oa)->ObjectName->Buffer = (PWSTR)(savedBuf);                                    \
+        (oa)->ObjectName->Length = (savedLen);                                           \
+        (oa)->ObjectName->MaximumLength = (savedMax);                                    \
+        return _st;                                                                      \
+    } while (0)
+
+static NTSTATUS NTAPI Hook_NtLoadKey2(POBJECT_ATTRIBUTES target, POBJECT_ATTRIBUTES source, ULONG flags)
+{
+    InterlockedIncrement(&g_callCount);
+    std::wstring want = (target && target->ObjectName) ? UsToStr(target->ObjectName) : L"(null)";
+    std::wstring use  = RenameSoftwareSegment(want);
+    LogW(L"[NtLoadKey2] target=%s%s  src=%s", want.c_str(),
+         (use != want ? (L"  --> " + use).c_str() : L""),
+         (source && source->ObjectName) ? UsToStr(source->ObjectName).c_str() : L"(null)");
+    if (use != want && target && target->ObjectName)
+    {
+        UNICODE_STRING us; PVOID sb; USHORT sl, sm;
+        OCID_SWAP_OBJECTNAME(target, use, us, sb, sl, sm, Real_NtLoadKey2(target, source, flags));
+    }
+    return Real_NtLoadKey2(target, source, flags);
+}
+
+static NTSTATUS NTAPI Hook_NtLoadKey(POBJECT_ATTRIBUTES target, POBJECT_ATTRIBUTES source)
+{
+    InterlockedIncrement(&g_callCount);
+    std::wstring want = (target && target->ObjectName) ? UsToStr(target->ObjectName) : L"(null)";
+    std::wstring use  = RenameSoftwareSegment(want);
+    LogW(L"[NtLoadKey] target=%s%s  src=%s", want.c_str(),
+         (use != want ? (L"  --> " + use).c_str() : L""),
+         (source && source->ObjectName) ? UsToStr(source->ObjectName).c_str() : L"(null)");
+    if (use != want && target && target->ObjectName)
+    {
+        UNICODE_STRING us; PVOID sb; USHORT sl, sm;
+        OCID_SWAP_OBJECTNAME(target, use, us, sb, sl, sm, Real_NtLoadKey(target, source));
+    }
+    return Real_NtLoadKey(target, source);
+}
+#undef OCID_SWAP_OBJECTNAME
 
 // ─────────────────────────────────────────────────────────────────────────────
 // IAT 打补丁
@@ -638,6 +810,14 @@ int __stdcall OcidRegHook_Install(const wchar_t* logPath,
             g_writesOnly = true;
             LogW(L"[install] writes only = on");
         }
+        // ★ 把离线 hive 的挂载名从 `.../config/SOFTWARE` 改成 `.../config/SOFTWAREX`，
+        //   让内核看到的完整键路径不再含 `SOFTWARE\Classes`（真正修法，见 RenameSoftwareSegment 的注释）。
+        wchar_t r[8] = { 0 };
+        if (GetEnvironmentVariableW(L"OCID_REGHOOK_RENAME_SW", r, 8) > 0 && r[0] == L'1')
+        {
+            g_renameSoftware = true;
+            LogW(L"[install] rename /config/SOFTWARE -> /config/SOFTWAREX = ON");
+        }
     }
 
     // ★ 主动从 ntdll 解析【所有】真身指针 —— 不要依赖"某个模块的 IAT 恰好被我们打过补丁时
@@ -656,6 +836,8 @@ int __stdcall OcidRegHook_Install(const wchar_t* logPath,
             if (!Real_NtSetValueKey)        Real_NtSetValueKey        = (PFN_NtSetValueKey)GetProcAddress(ntdll, "NtSetValueKey");
             if (!Real_NtDeleteKey)          Real_NtDeleteKey          = (PFN_NtDeleteKey)GetProcAddress(ntdll, "NtDeleteKey");
             if (!Real_NtDeleteValueKey)     Real_NtDeleteValueKey     = (PFN_NtDeleteValueKey)GetProcAddress(ntdll, "NtDeleteValueKey");
+            if (!Real_NtLoadKey)            Real_NtLoadKey            = (PFN_NtLoadKey)GetProcAddress(ntdll, "NtLoadKey");
+            if (!Real_NtLoadKey2)           Real_NtLoadKey2           = (PFN_NtLoadKey2)GetProcAddress(ntdll, "NtLoadKey2");
         }
         LogW(L"[install] reals: NtQueryKey=%p NtOpenKey=%p NtSetValueKey=%p NtCreateKey=%p",
              Real_NtQueryKey, Real_NtOpenKey, Real_NtSetValueKey, Real_NtCreateKey);
@@ -664,16 +846,19 @@ int __stdcall OcidRegHook_Install(const wchar_t* logPath,
     static const char* funcs[] = {
         "NtCreateKey", "NtCreateKeyTransacted", "NtOpenKey", "NtOpenKeyEx",
         "NtSetValueKey", "NtDeleteKey", "NtDeleteValueKey",
+        "NtLoadKey", "NtLoadKey2",
     };
     static void* hooks[] = {
         (void*)Hook_NtCreateKey, (void*)Hook_NtCreateKeyTransacted, (void*)Hook_NtOpenKey,
         (void*)Hook_NtOpenKeyEx, (void*)Hook_NtSetValueKey, (void*)Hook_NtDeleteKey,
         (void*)Hook_NtDeleteValueKey,
+        (void*)Hook_NtLoadKey, (void*)Hook_NtLoadKey2,
     };
     static void** reals[] = {
         (void**)&Real_NtCreateKey, (void**)&Real_NtCreateKeyTransacted, (void**)&Real_NtOpenKey,
         (void**)&Real_NtOpenKeyEx, (void**)&Real_NtSetValueKey, (void**)&Real_NtDeleteKey,
         (void**)&Real_NtDeleteValueKey,
+        (void**)&Real_NtLoadKey, (void**)&Real_NtLoadKey2,
     };
     const int N = (int)(sizeof(funcs) / sizeof(funcs[0]));
 
