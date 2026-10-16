@@ -1,140 +1,274 @@
 # OneCore Image Designer
 
-OneCore Image Designer is a Windows WPF workbench for preparing Windows Core OS images and related servicing workflows. It provides project-based OEMInput authoring, device-layout work, image build/reconstruction tools, FFU browsing, and independent UUP and SxS pages.
+![OneCore Image Designer](Assets/banner.png)
 
-The UI follows the compact, light ICD workspace style. This is an independent implementation; it does not redistribute ICD binaries or claim to be an official Microsoft product.
+OneCore Image Designer (OCID) is an independent Windows workbench for preparing and servicing
+Windows Core OS / OneCore / IoT Core images. It covers project-based OEMInput authoring, device
+layout authoring, image build, reconstruction of a system package set from an image, FFU browsing,
+Microsoft UUP query/download, an addonkit front end, and a set of offline registry, driver,
+firmware and component-store tools.
 
-## Features
+It is **not** a Microsoft product and is not affiliated with Microsoft. It does not redistribute
+the Windows servicing stack it is replacing (`CbsCore.dll`, `wcp.dll`, CMI/CSI/DMI, KTM), nor any
+Microsoft package sample. A small number of Microsoft utility binaries are retained as runtime
+inputs — the `Tools/wcpex` pair used to decompress DCM-compressed manifests, the `makeappx.exe`
+fixture used by the package-generation sources, and the tools shipped inside the vendored
+`addonkit/` — see [Third-party code and licensing](#third-party-code-and-licensing). Workflows that
+need Microsoft tooling otherwise use the ADK, DISM or Windows 10 IoT Core Kits installation already
+present on the machine; the parts of the servicing stack this project needs are being
+re-implemented as project-owned C++ (see
+[Self-contained servicing stack](#self-contained-servicing-stack-in-progress)).
 
-- **OEMInput designer** — discover FM and DeviceLayout inputs, edit V1/V2 documents, validate against the bundled schemas, and save `.cwproj` projects. Validation is era-aware: an optional target build (auto-detected from the selected MSPackageRoot path) selects the matching official OEMInput XSD family among 11 vendored schemas (V1 six generations 10527→18963→frozen, V2 four: 18963 transitional / 18985–19041 / 20348–22000 / 22621), grouped from hashing featureapi.dll across all 41 ADK builds; plus field-era gating warnings (AppXOptionalPackages 17047+, MachineInfoFile 17666+, TestContent/DevicePlatformIDs/V2 18963+, V2 Obsolete fields) from decompiled OEMInput.cs of 12 representative builds.
-- **Device layout** — inspect and author layouts, including period-specific package/manifest generation rules. Validation rule sets were re-extracted from all 41 ADK `DeviceLayoutValidation.dll` assemblies (IL-decompiled embedded XML, deduplicated by content hash): `Assets\ValidationRules\{ADK build}\` directories named by family-representative build (14349/14986/16288/17040/17095/17666/17704/17733/18272/18298/18327/19023), plus `10527` (native DLL family) and `phone` (early phone-only rules from the ADK validation-manifest cab and phone samples). The dropdown therefore matches the ADK build you download. The layout-creation wizard additionally builds BSP companion components (individually or bundled with the layout, `Services/BspComponentBuilderService.cs`): OEMDevicePlatform package (modern standalone package + `OEMDEVICEPLATFORM_*` FIP, or Phone-era `$(runtime.windows)\ImageUpdate` placement), DeviceInfo registry package (SiliconInformation/ManufacturerInformation + `DEVICE_*` FIP), `machineinfo.xml` (gated with a 17666+ era hint), and IoT Custom.SMBIOS source package (wm.xml + CFG for PkgGen); a unified FM merges layout + component sections with the `Devices` binding. All manifest/mum/FIP templates are field-for-field from real samples (QEMU ARM64 20279 / 15254 QC8960 / QCDB410C), verified by a headless smoke test reproducing sample keyform filenames, update.mum structure and update-name hashes. Driver handling (`Services/DriverPackageBuilder.cs`): recursively scan a directory for `*.inf`, group by containing directory, and emit one PkgGen source package per group — `identity`/`drivers`/`inf` wm.xml per the addonkit IoTWMWriter and real NXP imx-iotcore BSP samples, with configurable package namespace (default `Drivers`, vendor style e.g. `iMX`) and FeatureID policy (per-package `DRIVERS_<INF>` addonkit style, or a shared group like `IMX_DRIVERS` NXP style); optionally invoke the ADK's `PkgGen.exe` (auto-discovered from installed toolsets, with `makecat.exe` PATH injection) to build real cabs directly — where signing fails without test certificates the wizard reports an actionable hint and the wm.xml source packages remain addonkit-buildable. Successful packs clean their staging directories and `.cdf` intermediates so the output holds only final cabs plus FM/machineinfo/SMBIOS sources.
-- **Image workflows** — invoke configured image-app/ADK tools to build images, reconstruct system packages, and browse FFU contents. Long-running work (component extraction, UUP downloads, external driver packaging) streams its live log into a shared task-log window (`Views/TaskLogWindow` + `Services/TaskLogSink`): a worker-thread queue drained on a 400 ms batch timer, so the main UI never blocks on per-line dispatcher calls; logs also persist to temp files with copy/open controls. In the selection-based reconstruction view, package-list FM/OEMInput entries and any file-tree node support double-click XML preview (`Views/XmlPreviewWindow`, indented + syntax-colored, binary files summarized, 2 MB truncation guard, read directly from the mounted image partitions). Driver scanning marks third-party driver packages (INF base names not starting with `microsoft`, the inbox-vs-OEM naming rule verified against 22621 driver packages) with a dedicated "第三方驱动" filter, and an "外部驱动打包" action scans an arbitrary folder of INF directories, generating PkgGen source packages (wm.xml) or full cabs via the installed ADK's PkgGen.
-- **UUP update query and download** — query Microsoft UUP by SKU, architecture, ring, branch, and release filter; choose a returned update, save/load snapshots, and download the selected update using the vendored UUPMediaCreator core.
-- **SxS source tools** — browse GPL-isolated pureSxS/explodeSxS source and run a non-executing preflight/preview of a selected image and output directory. Missing CBS binaries and the upstream `prepare.cmd` X: format command block operations; this app never runs the upstream scripts.
-- **Offline utilities** — registry, driver, firmware, WinSxS hash, dependency, and component-store tools.
-- **Bundled addonkit** — Microsoft's `iot-adk-addonkit` (17763-v7, PowerShell IoT Core imaging toolchain) ships in-repo under `addonkit/` and is copied to the output directory on build. Feature → "addonkit 工作区" opens a dedicated page: module/ADK status, sample workspace discovery of products/BSPs, a preflight check (bundled module, workspace XML, IoT Core Kits registry for 17763, MSPkgRoot/KITSROOT reachability, installed ADK build, Retail signing parameters) that gates commands unless explicitly overridden, and elevated one-click commands (build packages, build FFU, build recovery, import sample packages) with live transcript logging. Tools → "ADK 工具下载 / addonkit…" remains for downloading tool zips and launching the interactive shell.
-- **ADK tool download** — per-build ADK tool zips (imageapp.exe, imggen.cmd, etc.) are hosted on this repository's GitHub Release (tag `adktool`); the in-app manager lists them, downloads the selected build, verifies the SHA256 digest provided by the GitHub asset API, and extracts to `addonkit\adk\<build>\`. Downloads use a hardened HTTP client (explicit TLS 1.2/1.3, direct connection bypassing system proxy, 20 s connect timeout) with up to 3 attempts and exponential backoff on transient network/5xx failures, and translate socket/TLS exceptions into actionable Chinese diagnostics in the download log. The Image Build page auto-discovers the tool matching the OS package build number from this directory.
-- **updateapp update orchestration** — a start-page tile and Feature → "updateapp 更新调度" open a page that dispatches the version-specific `updateapp.exe` from the downloaded ADK build. The command list is rendered dynamically per build from the official usage text embedded in each `updateapp.exe` (extracted once from IDA decompilations of 40 builds, 10527–22621, and vendored as `Services/UpdateAppUsageCatalog.cs`): old builds expose `installfromsd`/`stagetosd`/`stageinproc`/`converttocbs`, newer builds expose `finalizecommit`/`rollback`/`getfeatures`/`creatediffhives`, and 22000+ add DISM-style `/image:` switches; each command shows its official argument template, category, and risk level. Execution targets are either an offline image (VHD/VHDX/FFU for `mountandinstall`, package/actionlist directories for install/stage families) or the live running system (explicitly warned). Commands run elevated through the same PowerShell transcript-capture runner as addonkit, with live log streaming, cancellation, and destructive-command confirmation.
-
-UUP-to-installation-media conversion is a separate optional workflow on the UUP page. It launches a user-selected upstream `UUPMediaConverter.exe`, displays its stdout/stderr progress, supports cancellation, and checks that a .NET 10 runtime is available, the local UUP set is non-empty, the requested ISO does not already exist, the output parent exists, the temp folder exists and is empty, and destination/temp volumes have conservative free space (max of 20 GiB or twice the input size per destination; requirements are summed when both destinations share a drive). Preflight size enumeration/runtime detection run asynchronously from the UI, with a bounded runtime-probe timeout. The converter requires an explicit start confirmation, uses upstream `--no-key-prompt`, and is not bundled or launched during tests. The upstream [`OSTooling/UUPMediaCreator`](https://github.com/OSTooling/UUPMediaCreator) source is MIT-licensed. Its UUPMediaConverter targets .NET 10 and references Media.Creator, Imaging, Common.Messaging, Microsoft.Dism, Microsoft.Wim, Privileges, Media.Creator.Planning, TempManager, VirtualHardDiskLib, CompDB and Cabinet projects, plus DiscUtils, ManagedWimLib, ini-parser, and other NuGet dependencies. A no-restore Release build of the supplied converter checkout failed with 18 unresolved DiscUtils/ManagedWimLib errors; this confirms the dependency assets are not presently resolved, not that the source is absent. The closure also contains `cdimage.exe`; its independent binary provenance/redistribution terms have not been reviewed. Consequently no upstream source closure or converter/CDImage binary is redistributed here; users must provide a separately built converter and its required .NET 10 runtime. Upstream documents that update packages are not integrated into the resulting ISO.
-
-UUP queries, snapshots, payload association, downloaded folders, converted ISOs, and generated image/CBS output paths are registered as artifacts; the registry is in-memory for the current application session. Registered artifacts receive basic existence/snapshot-payload preflight.
-
-SxS preflight previews selected input/output paths and required script availability without creating output directories, mounting images, or executing scripts. It reports the `prepare.cmd` `format X:` operation and remains blocked because `SxSFounder`/`CbsExploder` binaries are absent and their independent licensing/build provenance is unresolved. No automatic formatting, even with confirmation, is implemented.
-
-## Self-contained servicing stack (in progress)
-
-The long-term goal is to assemble a Windows image from a package set **without depending on the operating system's own servicing components**. Upstream that work is performed by `CbsCore.dll` (CBS), `wcp.dll` (WCP/SMI), the CMI engine, the CSI/DMI providers and KTM. Those components are architecture-specific, version-locked, and partly encumbered by independent licenses, so OCID is re-implementing the behaviour it needs as project-owned C++.
-
-Implemented so far under `Source/Native/OcidServicing/`:
-
-| Module | Responsibility |
-| --- | --- |
-| `Identity` | Assembly identity: the canonical `name~version~arch~token~language` string, `versionScope` handling, the forced `0.0.0.0` version of non-SxS packages, and component-name derivation including Windows' long-name abbreviation |
-| `Manifest` | Self-contained pull parser for component manifests, reading both registry declaration mechanisms (`registryKeys` and `configurationSchema`) |
-| `WcmSchema` | WCM (`smiengine`) schema declarations: `wcm:handler` / `wcm:legacyName` / `wcm:legacyType` / `default` |
-| `RegistryValue` | Registry value encoding (text to raw bytes) and type-correct merging |
-| `CmiInstaller` | CMI write decisions: `owner`, `operationHint`, `InternalInstall`, and the per-type merge rules |
-
-Build the native library, the console entry point, and the native tests:
-
-```powershell
-.\Source\Native\build-servicing.ps1
-```
-
-The same code backs the console tool and the application. The managed side binds through `Services/OcidServicingNative.cs` and applies the decisions in `Services/OcidSmiService.cs`. The application never falls back to a managed re-implementation of the value encoding: when the native library is unavailable it skips the operation and reports it, because a silently wrong byte image is worse than a reported failure.
-
-`Source/Native/OcidRegHook/` is a diagnostic IAT-hooking DLL used while researching how the servicing stack writes to offline hives. It is a research aid, not part of the shipping path.
+The application UI is in Chinese.
 
 ## Requirements
 
-- Windows 10/11.
-- .NET 8 SDK to build the base WPF application/UUP bridge. The external UUPMediaConverter workflow requires a .NET 10 runtime; the base app itself does not require .NET 10.
-- Python is required to run the included pureSxS scripts manually.
-- Some image and CBS operations require ADK/DISM, administrator permissions, an image source, or additional licensed tools. The required tools depend on the selected workflow.
+- Windows 10 / 11, x64.
+- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) — builds the WPF application, the
+  `UupBridge` helper, and the offline test harness.
+- Optional, depending on the workflow used:
+  - Administrator rights for anything that mounts, services or writes an image.
+  - Windows ADK (Deployment Tools) for the image-build and package-generation workflows; the ADK
+    build to use is selectable in-app.
+  - Windows 10 IoT Core Kits 1809 (10.0.17763.x) for the bundled addonkit shell, per the upstream
+    addonkit README.
+  - An image source: FFU, VHD/VHDX, WIM, or a mounted directory.
+  - Visual Studio 2022 with the C++ workload to build the native servicing stack.
+- The optional UUP-to-ISO workflow needs a separately built `UUPMediaConverter.exe` **and** a
+  .NET 10 runtime. Neither is shipped here (see [Third-party code and licensing](#third-party-code-and-licensing)).
 
-UUP scan and download require internet access and are started only when the user requests them. The application does not initiate a scan or download on launch.
+UUP queries and downloads run only when the user asks for them; nothing is queried or downloaded at
+startup.
 
-## Build
+## Build and run
 
-From the repository root:
+```powershell
+git clone https://github.com/DF4D3110/OneCore-Image-Designer.git
+cd OneCore-Image-Designer
+```
+
+Build and launch the application from the repository root. This also builds the repository-local
+`UupBridge` and copies its runtime files into the application output.
 
 ```powershell
 dotnet build ".\OneCore Image Designer.csproj" --configuration Release
+bin\Release\net8.0-windows\OneCore Image Designer.exe
 ```
 
-The main build also builds the repository-local `UupBridge` and copies its runtime files to the application output.
-
-The self-contained servicing stack is native code and is built separately. It requires Visual Studio 2022 (C++ workload) with a C++ build environment script; the build script cross-compiles both architectures because the application is x64 while the servicing stack it replaces may be x86:
+The native servicing stack is separate and needs the Visual Studio C++ build environment. It
+cross-builds both architectures on purpose: the application is x64, while the servicing binaries it
+replaces are frequently x86.
 
 ```powershell
 .\Source\Native\build-servicing.ps1
 ```
 
-That produces `Source/Native/Output/x86/` and `Source/Native/Output/x64/` (the `OcidServicing` library, `ocid_manifest.exe`, and the native unit tests). These are build outputs and are excluded from the repository; run the script once after cloning before using the servicing pages. `Services/OcidServicingNative.cs` locates the library relative to the application output, so no copy step is required.
+That writes `Source/Native/Output/x86/` and `Source/Native/Output/x64/` — the `OcidServicing`
+library, the `ocid_manifest.exe` console tool, and the native unit tests. These are build outputs
+and are not checked in: run the script once after cloning before using the servicing pages.
+`Services/OcidServicingNative.cs` locates the library relative to the application output, so no
+copy step is involved.
 
-`.\Build-CbsBundle.ps1` assembles the standalone console bundle at `bin\Release\net8.0-windows\CBS\` (the CLI plus its elevation helper). Pass `-NoBuild` to skip rebuilding the CLI.
+Assemble the standalone CBS console bundle (the CLI plus its elevation helper):
 
- No external UUPMediaCreator checkout or .NET 10 runtime is required for the base app. NuGet packages are restored by the SDK in the normal way.
-
-The build also copies the bundled `addonkit/` tree (Microsoft iot-adk-addonkit 17763-v7) into the output directory. The copy target is additive: files previously installed under `addonkit\adk\` by the in-app downloader are left in place. The addonkit shell additionally requires the Windows 10 IoT Core Kits (1809 / 10.0.17763.x) and the ADK to be installed on the machine, per the upstream README.
-
-Generated `bin`, `obj`, `build`, `intermediate`, and `Source/Native/Output` trees, debug symbols, and generated Appx files are excluded from the repository; release packages should be attached to GitHub Releases instead. The checked-in `7z.dll` architecture variants, `makeappx.exe` fixture and its support DLLs, and `Tools/wcpex` binaries are retained runtime inputs used by the package-generation sources or embedded by the application, not build outputs.
-
-Run the generated application from:
-
-```text
-bin\Release\net8.0-windows\OneCore Image Designer.exe
+```powershell
+.\Build-CbsBundle.ps1          # add -NoBuild to reuse an existing CLI build
+# -> bin\Release\net8.0-windows\CBS\
 ```
 
-Run the offline regression harness (Windows, .NET 8 SDK; no network/UUP download required):
+Run the offline regression harness (no network, no UUP download):
 
 ```powershell
 dotnet run --project ".\Tests\OneCore.Image.Designer.OfflineTests.csproj" --configuration Release
 ```
 
+The main build also copies the bundled `addonkit/` tree into the output directory. That copy is
+additive — anything the in-app downloader has already placed under `addonkit\adk\` is left in place.
+
+## Application overview
+
+| Area | View | What it does |
+| --- | --- | --- |
+| Start | `Views/StartPage.xaml` | Entry point; a tile per workflow, plus recent-artifact shortcuts. |
+| OEMInput | `Views/OEMInput/` | Discover FM and DeviceLayout inputs, edit V1/V2 OEMInput documents, validate them against the bundled schemas, and save `.cwproj` projects. |
+| Device layout | `Views/DeviceLayout/` | Inspect and author device layouts, generate the companion BSP components, and build PkgGen driver packages from a directory of INFs. |
+| Image build | `Views/ImageBuild/` | Drive the selected ADK build's `imageapp.exe` / `imggen.cmd`, discovering the tool set that matches the OS package build number. |
+| Reconstruction | `Views/SystemReconstruct/` | Rebuild a system package set from an image, with per-node XML preview. |
+| CBS | `Views/Cbs/` | CBS servicing against a mounted image. |
+| FFU browser | `Views/FFUBrowser/` | Browse FFU partitions, with a hex viewer. |
+| updateapp | `Views/UpdateAppView.xaml` | Dispatch the version-specific `updateapp.exe` commands, rendered per build from that build's official usage text, with per-command argument template, category and risk level. |
+| UUP | `Views/UupView.xaml` | Query Microsoft UUP by SKU/architecture/ring/branch, pick an update, save and reload snapshots, download it, and optionally convert to ISO through an external converter. |
+| SxS | `Views/SxsView.xaml` | Non-executing preflight/preview of a selected image and output directory. It runs no scripts and creates no output. |
+| addonkit | `Views/AddonKitView.xaml` | Microsoft `iot-adk-addonkit` front end: module/ADK status, sample workspace discovery, preflight gating, and elevated one-click build commands with live transcript logging. |
+| Tools | `Views/Tools/` | Offline registry editor, driver extractor, firmware parser, WinSxS hash calculator, dependency viewer, component-store verifier, and the ADK tool downloader. |
+
+Cross-cutting behaviour:
+
+- **Long-running work never blocks the UI.** Task output streams into a shared log window
+  (`Views/TaskLogWindow.xaml`) through a worker-thread queue drained on a batch timer instead of a
+  dispatcher call per line; logs are also persisted to temp files with copy/open controls.
+- **Elevation is explicit.** Operations that need it are launched through the bundled NSudo helper
+  (`Services/ElevationHelper.cs`) rather than requiring the whole application to run elevated.
+- **Destructive commands require confirmation** and are labelled by risk in the UI.
+
+## How it is put together
+
+- `OneCore Image Designer.csproj` — the WPF application (`net8.0-windows`, x64): MVVM with
+  `ViewModels/` + `Views/`, domain models in `Models/`, and the workflow logic in `Services/`.
+- `Services/` — ~75 single-purpose services (image build, CBS and SxS servicing, drivers, firmware,
+  component store, offline registry, UUP, addonkit, validation, logging). Most user-visible
+  behaviour lives here; the views stay thin.
+- `UupShared/` — offline UUP query parsing and payload contracts, shared by the app and the bridge.
+- `UupBridge/` — a separate `net8.0` adapter executable over the vendored UUP core; the application
+  builds it and copies it into the output rather than referencing it directly.
+- `MobilePackageGen/` — the package-generation toolchain (CLI, WinForms GUI, FFU/VHDX/WIM/raw-FS/
+  storage-pool adapters, CAB and DCM compression, cat/signature rebuilding, the `CbsxCli` and
+  `SxSFounderCli` command-line tools). It has its own README at `MobilePackageGen/readme.md`.
+- `Source/Native/` — the project-owned C++ servicing stack and the diagnostic registry hook.
+- `ThirdParty/` — the vendored UUP source closure and the consolidated third-party notice.
+- `Schemas/`, `Assets/` — the OEMInput XML schemas and the UI assets, project templates and
+  device-layout validation rule sets.
+
+### Era-aware OEMInput validation
+
+OEMInput documents are validated with the schema family that matches the target OS build: 11
+schemas are bundled (`Schemas/OEMInput.V1.*.xsd`, `V2.*.xsd`) and the optional target build —
+auto-detected from the selected package root when possible — selects one of them. Field-level era
+gating adds warnings for fields that do not exist in every generation (AppX optional packages,
+MachineInfoFile, TestContent/DevicePlatformIDs, V2-only and V2-obsolete fields). The device-layout
+rule sets under `Assets/ValidationRules/` are likewise stored per ADK build family, so the rule set
+matches whichever ADK the user has installed.
+
+## Self-contained servicing stack (in progress)
+
+The long-term goal is to assemble a Windows image from a package set **without depending on the
+operating system's own servicing components**. Upstream that work is done by `CbsCore.dll` (CBS),
+`wcp.dll` (WCP/SMI), the CMI engine, the CSI/DMI providers and KTM. Those components are
+architecture-specific, version-locked, and partly encumbered by independent licenses, so OCID
+re-implements the behaviour it needs as project-owned C++ under `Source/Native/OcidServicing/`, and
+exposes it to the application through a small C ABI.
+
+| Module | Responsibility |
+| --- | --- |
+| `Identity` | Assembly identity: the canonical `name~version~arch~token~language` string, `versionScope` handling, the forced `0.0.0.0` version of non-SxS packages, and component-name derivation including Windows' long-name abbreviation rule. |
+| `Manifest` | Self-contained pull parser for component manifests: identity, both registry declaration mechanisms (`registryKeys` and `configurationSchema`), security descriptor definitions, trust info and directories. |
+| `WcmSchema` | WCM (`smiengine`) schema declarations — `wcm:handler`, `wcm:legacyName`, `wcm:legacyType`, `default` — and the key-level attributes (`securityDescriptor`, `perUserVirtualization`, `mapDesiredAccessToMaxAllowedAccess`). |
+| `RegistryValue` | Registry value encoding (declaration text to raw bytes, per value type) and type-correct merging. |
+| `CmiInstaller` | CMI write decisions: `owner`, `operationHint` (replace / append / prepend), `InternalInstall`, and the per-type merge rules. |
+| `MacroExpander` | Expansion of `$(runtime.*)` path macros and `$(runtime.host.*)` registry-root macros, including WOW64 variants and unresolved-macro reporting. |
+| `SecurityDescriptor` | SDDL resolution and description, `(inherit)` pass-through, and SDDL ↔ self-relative binary conversion. |
+
+The same code backs both the console tool and the application. The managed side binds through
+`Services/OcidServicingNative.cs` and applies the decisions in `Services/OcidSmiService.cs`. The
+application deliberately never falls back to a managed re-implementation of value encoding: when the
+native library is unavailable it skips the operation and reports it, because a silently wrong byte
+image is worse than a reported failure.
+
+`Source/Native/OcidServicing/tools/ocid_manifest.cpp` builds `ocid_manifest.exe`, a console entry
+point for inspecting and exporting the same decisions (`info`, `ops`, `scan`, `export-ops`,
+`verify-names`, `expand`, `macros`, `dump-xsd`), used for corpus-wide verification.
+
+`Source/Native/OcidRegHook/` is a separate x86 DLL that patches `wcp.dll`'s import table so the
+registry calls the upstream servicing stack makes can be observed — and optionally redirected to an
+offline hive — instead of hitting the host registry. It is loaded only by the legacy
+`wcp.dll`-driven CBS path, is off-limits to the target design, and defaults to log-only
+(`OCID_REGHOOK`, `OCID_REGHOOK_LOG`, `OCID_REGHOOK_MAP`, `OCID_REGHOOK_REWRITE`). It is an interim
+research instrument, not part of the self-contained servicing stack.
+
 ## Repository layout
 
 ```text
-Assets/                 UI assets, templates, and validation rules
-Models/                 Project and domain models
-Services/               Image, project, UUP, SxS, and validation services
-ViewModels/              WPF view models
-Views/                   WPF pages and dialogs
-Schemas/                 OEMInput schemas
-MobilePackageGen/         Package-generation libraries
-UupBridge/               .NET 8 adapter over the vendored UUP core
-UupShared/               Offline UUP query parsing and payload contracts shared by app and bridge
-Tests/                   Offline regression harness for UUP, SxS safety, artifacts, XML generations, and the native servicing library
-Source/Native/            Project-owned C++ servicing stack (OcidServicing), its console tool and tests, plus the diagnostic registry hook
-Reference/               Reverse-engineering scripts used to derive servicing behaviour from the upstream binaries
-Tools/                    Vendored helper binaries (wcpex and its wcp.dll), used to decompress DCM-compressed manifests
-ThirdParty/UUPMediaCreator/  Vendored upstream UUP source closure
-ThirdParty/SxS/           Isolated GPL-3 pureSxS and explodeSxS sources
-addonkit/                 Bundled Microsoft iot-adk-addonkit 17763-v7 (PowerShell toolchain + sample workspace); downloaded ADK tool sets land under addonkit/adk/<build>/ at runtime
+Assets/                   UI assets, templates, and per-ADK-build device-layout validation rules
+Models/                   Domain and project models
+Services/                 Workflow services (image, CBS, SxS, drivers, firmware, offline registry, UUP, validation)
+ViewModels/               WPF view models
+Views/                    WPF pages, steps and dialogs
+Schemas/                  Bundled OEMInput V1/V2 schemas
+MobilePackageGen/         Package-generation toolchain, CLIs and GUI (own README)
+UupBridge/                Separate .NET 8 adapter over the vendored UUP core
+UupShared/                Offline UUP query parsing and payload contracts shared by app and bridge
+Tests/                    Offline regression harness
+Source/Native/OcidServicing/  Project-owned C++ servicing stack: library, console tool and native tests
+Source/Native/OcidRegHook/    Diagnostic registry interception DLL for the legacy CBS path
+Tools/wcpex/              Vendored wcpex.exe + wcp.dll, used to decompress DCM-compressed manifests
+ThirdParty/               Vendored UUP source closure and the third-party notice inventory
+addonkit/                 Bundled Microsoft iot-adk-addonkit 17763-v7 (PowerShell toolchain + sample workspace)
+Build-CbsBundle.ps1       Assembles the standalone CBS console bundle
 ```
+
+Generated `bin`, `obj`, `build`, `intermediate` and `Source/Native/Output` trees, debug symbols and
+generated Appx files are not tracked; release packages belong on GitHub Releases. The checked-in
+`7z.dll` architecture variants, the `makeappx.exe` fixture and its support DLLs, and `Tools/wcpex`
+are retained **runtime** inputs (consumed by the package-generation sources or embedded into the
+application), not build outputs.
+
+The per-build ADK tool zips consumed by the in-app downloader (`addonkit\adk\<build>\`) are hosted
+as assets on this repository's GitHub Release tagged `adktool`.
+
+## Tests
+
+`Tests/` is an offline regression harness (`Tests/Program.cs`, no network, no image required). It
+groups checks for UUP query parsing and snapshot round-trip, payload lookup and path-traversal
+rejection, bridge cancellation and error propagation, conversion input/output/tool validation,
+overwrite protection, same-drive free-space accounting, safe CLI argument construction, artifact
+preflight, the SxS no-execution gate, XML capability detection, and the managed-to-native servicing
+bindings.
+
+The native modules have their own assertion suites, built and run by `build-servicing.ps1`:
+`identity`, `manifest`, `wcm`, `registryvalue`, `cmiinstaller`, `macroexpander`,
+`securitydescriptor`.
 
 ## Third-party code and licensing
 
-The repository root `LICENSE` remains the project-level MIT license; it does not relicense vendored software.
+The repository root `LICENSE` (MIT) applies to this project's own code only; it does not relicense
+vendored software. Preserve the per-component notices when redistributing.
 
-- UUPMediaCreator is MIT-licensed. Its original license and README are retained under `ThirdParty/UUPMediaCreator/`.
-- The vendored Cabinet LZX decoder is dual-licensed under LGPL-2.1 or MS-PL; its original header and license notice are retained.
-- pureSxS and explodeSxS are separate GPL-3.0 components, each retaining its own `LICENSE` and upstream README. Their source files are not represented as MIT-licensed project code.
-- `addonkit/` is an unmodified copy of Microsoft's open-source `iot-adk-addonkit` (release 17763-v7), MIT-licensed; its original `LICENSE` is retained at `addonkit/LICENSE`. The sample test certificates and `.pfx` files inside it are Microsoft's publicly published sample keys shipped with the official toolkit, not private credentials.
-- `CbsExploder` and `SxSFounder` binaries are excluded because their independent redistribution terms have not been established. Microsoft package samples from the input SxS directory are not included.
+- **[UUPMediaCreator](https://github.com/OSTooling/UUPMediaCreator)** — MIT. Its original license and
+  upstream README are retained under `ThirdParty/UUPMediaCreator/`. Only the source projects needed
+  by `UupBridge` are included; no converter or `cdimage.exe` binary is redistributed.
+- **Cabinet LZX decoder** — dual-licensed LGPL-2.1 or MS-PL; the source header and license are
+  retained. **SevenZipExtractor / 7-Zip** — LGPL-2.1. **Microsoft.Deployment.Compression** (WiX) —
+  MS-RL.
+- **`addonkit/`** — Microsoft's open-source `iot-adk-addonkit` (release 17763-v7), MIT; its
+  `LICENSE` is retained at `addonkit/LICENSE`. The sample certificates and `.pfx` files inside it
+  are Microsoft's publicly published sample keys shipped with the official toolkit, not private
+  credentials.
+- **`MobilePackageGen/`** — a fork/rework of WSK Tools v1.0.4 and upstream MobilePackageGen. Its
+  component inventory, including DiscUtils (MIT), NSudo (MIT), Img2Ffu (MIT), StorageSpace (MIT)
+  and DotnetPackaging.Msix (MIT), is documented in `MobilePackageGen/readme.md` and
+  `MobilePackageGen/license.md`.
+- **Tooling binaries** — `Tools/wcpex/` and the package-generation support DLLs are third-party
+  binaries retained as runtime inputs; see `ThirdParty/THIRD-PARTY-NOTICES.md`.
 
-See [`ThirdParty/THIRD-PARTY-NOTICES.md`](ThirdParty/THIRD-PARTY-NOTICES.md) for the component inventory and provenance details. Preserve the per-component notices when redistributing the repository. This inventory records source boundaries; it is not a legal opinion on distribution of a combined work.
+Not distributed, and therefore not usable from a clean clone:
 
-## Roadmap implementation status
+- `CbsExploder` and `SxSFounder` executables — their independent redistribution terms have not been
+  established. Microsoft package samples are not included either.
+- The GPL-3.0 `pureSxS` / `explodeSxS` script trees that were previously vendored under
+  `ThirdParty/SxS/` have been **removed** from the repository. The behaviours they documented are
+  re-implemented in project code (`Services/PureSxsService.cs`,
+  `Services/ExplodeSxSNativeService.cs`, both of which record their provenance in their file
+  headers). The SxS page remains a read-only preflight and executes nothing.
+- A UUP-to-ISO converter and its .NET 10 runtime — the user must supply a separately built one.
 
-1. **Offline tests — implemented.** `Tests/` covers UUP query parsing, snapshot round-trip, payload lookup/path traversal rejection, bridge cancellation/error propagation, conversion input/output/tool validation, overwrite protection, combined same-drive space checks, safe CLI argument construction (including disabling the upstream keypress prompt), artifact preflight, the SxS no-execution safety gate, and XML capability detection for IoT Core 17763/Core OS 20348 shapes. No UUP content is downloaded or converted by tests.
-2. **UUP media conversion — optional external-tool workflow implemented.** The app provides an observable, cancellable launcher and input/output/tool/free-space checks. The converter source exists locally but is not vendored because its .NET 10 dependency closure is unresolved in the supplied checkout (`DiscUtils` and `ManagedWimLib` missing during no-restore build) and the `cdimage.exe` redistribution provenance has not been reviewed. The user must provide a separately built converter/runtime. No converter executable is shipped or conversion performed during validation.
-3. **Safe SxS workflow — preview implemented; image operation blocked.** The SxS page presents the chosen image/output paths and a read-only preflight. It does not execute scripts or create outputs. Upstream `prepare.cmd` formats `X:`; no automated volume format path exists. `CbsExploder`/`SxSFounder` binaries and license evidence are absent.
-4. **CBS licensing/provenance — unresolved and not distributed.** Local notices identify GPL-3.0 pureSxS/explodeSxS source, but do not establish independent terms or build provenance for the referenced CBS executables; no external sources were consulted. Resolve this with authoritative source/license/build records before adding either binaries or source.
-5. **Artifacts and generation regression — partial.** UUP snapshots/download folders and generated media/CBS output paths are registered in a shared in-process registry; a unified basic existence/snapshot-payload preflight is available. Tests exercise representative XML shapes, not generation builds against real OS/ADK packages. Genuine licensed representative OS/ADK samples and generation-specific build tools are not available in this repository, so end-to-end generation regression remains blocked.
-6. **Self-contained servicing stack — in progress.** `Source/Native/OcidServicing/` re-implements the servicing behaviour OCID needs — assembly identity, manifest parsing, WCM schema handling, registry value encoding, and CMI write decisions — as project-owned C++, exposed to the application through a small C ABI. The upstream dependencies named in items 3 and 4 are being removed module by module rather than redistributed: the goal is that assembling an image from a package set no longer requires the operating system's own servicing binaries.
+`ThirdParty/THIRD-PARTY-NOTICES.md` is an inventory of provenance, not a legal opinion on
+distribution of a combined work.
+
+## Status
+
+This is an active work in progress. Two things are worth stating plainly:
+
+1. **The servicing stack rewrite is incomplete.** The modules listed above are implemented and
+   tested, but the application still drives upstream servicing binaries for CBS/CSI work. The
+   direction is to replace them module by module rather than to redistribute them, so that
+   assembling an image from a package set no longer requires the operating system's own servicing
+   components.
+2. **Some workflows depend on software the user must provide** — the ADK, the IoT Core Kits, a
+   separately built UUP converter, and administrator rights. Where a workflow cannot run it says so
+   instead of silently degrading.
 
 ## About
 
-The Help → About entry opens the Windows-provided Shell About dialog through `rundll32 shell32.dll,ShellAbout`; the application does not display a separately authored About description.
+The Help → About entry opens the Windows-provided Shell About dialog through
+`rundll32 shell32.dll,ShellAbout`; the application does not display a separately authored About
+description.

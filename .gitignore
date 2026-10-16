@@ -26,6 +26,16 @@ UupBridge/obj/
 # from Source/Native/**. They are rebuildable, so they are never committed.
 Source/Native/Output/
 
-# Local working notes: kept on the author's machine, never part of the repo.
+# Downloaded ADK tool sets land next to the output tree at runtime.
+addonkit/adk/
+
+# Author-only material: local working notes and reverse-engineering helpers are
+# kept on the author's machine, outside this repository. These patterns are only
+# a guard in case any of it is copied back in.
 CBS_TECHNICAL_NOTES.md
 CBS_SESSION_REVIEW.md
+PRODUCT_LINES.md
+check-product-lines.ps1
+install-hooks.ps1
+.githooks/
+Reference/

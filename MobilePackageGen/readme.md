@@ -9,30 +9,33 @@ GUI 产品名：**OneCore Image Designer Preview**。
 ```
 MobilePackageGen/
 ├── MobilePackageGen.sln                         解决方案文件
-├── publish_win_x64.cmd / publish_win_arm64.cmd  发布脚本
-├── src/                                         第一方代码
-│   ├── MobilePackageGen.CLI/                    命令行版本 (net8.0)
-│   ├── MobilePackageGen.GUI/                    GUI 版本 (net8.0-windows, WinForms)
-│   ├── MobilePackageGen.Common/                 公共核心库（含 CatBuilder、NSudo 提权、TrustedInstallerHelper）
-│   ├── MobilePackageGen.Adapters/               镜像读取适配器（FFU/VHDX/WIM/目录/裸FS/存储池）
-│   │   ├── Adapters/FileSystemImage/            （新增）裸 NTFS/FAT 文件系统镜像适配器
-│   │   ├── Adapters/StorageSpace/               （新增）存储池磁盘阵列适配器
-│   │   ├── GPT/                                  GPT 解析（含边界修复）
-│   │   └── Adapters/DiskCommon.cs                多磁盘阵列合并读取
-│   ├── WPMT.Core/                               （新增）自 WPMT 迁移的压缩/哈希/目录库
-│   ├── Archives.DiscUtils/                      DiscUtils 扩展
-│   ├── Img2Ffu.Library/                         FFU 镜像读写库（本地版）
-│   ├── Img2Ffu.Library.Compression.Windows/     Windows 压缩实现
-│   ├── StorageSpace/                            OSPool/Storage Spaces 解析库（本地版）
-│   ├── LibSxS/                                  SxS Delta 清单解析库
-│   ├── Microsoft.Deployment.Compression/        CAB 压缩基础库 (来自 WiX)
-│   └── Microsoft.Deployment.Compression.Cab/    CAB 压缩实现
-└── thirdparty/                                  第三方库（子模块声明保留，见 .gitmodules）
-    ├── DotnetPackaging.Msix/                    MSIX/Appx 打包库
-    ├── DeflateBlockCompressor/                  Deflate 块压缩库
-    ├── StorageSpace/                            子模块（上游引用）
-    ├── Img2Ffu/                                 子模块（上游引用）
-    └── EDLProgram2VHDX/                         子模块（上游引用）
+├── publish_cli_win-{x64,x86,arm64}.cmd          CLI 发布脚本
+├── publish_win_{x64,arm64}.cmd                  GUI 发布脚本
+├── MobilePackageGen.CLI/                        命令行版本 (net8.0)
+├── MobilePackageGen.GUI/                        GUI 版本 (net8.0-windows, WinForms)
+├── MobilePackageGen.Common/                     公共核心库（含 CatBuilder、NSudo 提权、TrustedInstallerHelper）
+├── MobilePackageGen.Adapters/                   镜像读取适配器（FFU/VHDX/WIM/目录/裸FS/存储池）
+│   ├── Adapters/FileSystemImage/                裸 NTFS/FAT 文件系统镜像适配器
+│   ├── Adapters/StorageSpace/                   存储池磁盘阵列适配器
+│   ├── GPT/                                     GPT 解析（含边界修复）
+│   └── Adapters/DiskCommon.cs                   多磁盘阵列合并读取
+├── CbsTools/                                    CBS 包工具库
+├── CbsxCli/                                     CBS 控制台工具（OneCore Image Designer 的 CBS 组件）
+├── SxSFounderCli/                               SxS 源组装控制台工具
+├── WPMT.Core/                                   自 WPMT 迁移的压缩/哈希/目录库
+├── Cabinet/                                     CAB 压缩库 (Cabinet.Net.csproj)
+├── Archives.DiscUtils/                          DiscUtils 扩展（含 SevenZipExtractor）
+├── Img2Ffu.Library/                             FFU 镜像读写库（本地版）
+├── Img2Ffu.Library.Compression.Windows/         Windows 压缩实现
+├── StorageSpace/                                OSPool/Storage Spaces 解析库（本地版）
+├── LibSxS/                                      SxS Delta 清单解析库
+├── DeflateBlockCompressor/                      Deflate 块压缩库
+├── DotnetPackaging.Msix/                        MSIX/Appx 打包库
+├── Microsoft.Deployment.Compression/            CAB 压缩基础库 (来自 WiX)
+└── Microsoft.Deployment.Compression.Cab/        CAB 压缩实现
+
+所有第三方代码都**平铺**在 `MobilePackageGen/` 下（没有 `src/` 与 `thirdparty/` 二级目录，
+也没有 Git 子模块）：克隆后不需要初始化任何子模块即可直接编译。
 ```
 
 ## 编译方法
@@ -40,29 +43,29 @@ MobilePackageGen/
 ### 命令行版本
 
 ```bash
-dotnet build src/MobilePackageGen.CLI/MobilePackageGen.csproj -c Release
+dotnet build MobilePackageGen.CLI/MobilePackageGen.csproj -c Release
 ```
 
 ### GUI 版本
 
 ```bash
-dotnet build src/MobilePackageGen.GUI/MobilePackageGen.GUI.csproj -c Release
+dotnet build MobilePackageGen.GUI/MobilePackageGen.GUI.csproj -c Release
 ```
 
 ### 发布 (self-contained, 免安装运行库)
 
 ```bash
 # amd64
-dotnet publish src/MobilePackageGen.CLI/MobilePackageGen.csproj -c Release -r win-x64 --self-contained true -o output/amd64
-dotnet publish src/MobilePackageGen.GUI/MobilePackageGen.GUI.csproj -c Release -r win-x64 --self-contained true -o output/amd64
+dotnet publish MobilePackageGen.CLI/MobilePackageGen.csproj -c Release -r win-x64 --self-contained true -o output/amd64
+dotnet publish MobilePackageGen.GUI/MobilePackageGen.GUI.csproj -c Release -r win-x64 --self-contained true -o output/amd64
 
 # x86
-dotnet publish src/MobilePackageGen.CLI/MobilePackageGen.csproj -c Release -r win-x86 --self-contained true -o output/x86
-dotnet publish src/MobilePackageGen.GUI/MobilePackageGen.GUI.csproj -c Release -r win-x86 --self-contained true -o output/x86
+dotnet publish MobilePackageGen.CLI/MobilePackageGen.csproj -c Release -r win-x86 --self-contained true -o output/x86
+dotnet publish MobilePackageGen.GUI/MobilePackageGen.GUI.csproj -c Release -r win-x86 --self-contained true -o output/x86
 
 # arm64
-dotnet publish src/MobilePackageGen.CLI/MobilePackageGen.csproj -c Release -r win-arm64 --self-contained true -o output/arm64
-dotnet publish src/MobilePackageGen.GUI/MobilePackageGen.GUI.csproj -c Release -r win-arm64 --self-contained true -o output/arm64
+dotnet publish MobilePackageGen.CLI/MobilePackageGen.csproj -c Release -r win-arm64 --self-contained true -o output/arm64
+dotnet publish MobilePackageGen.GUI/MobilePackageGen.GUI.csproj -c Release -r win-arm64 --self-contained true -o output/arm64
 ```
 
 ## 使用方法
@@ -93,26 +96,26 @@ MobilePackageGen.exe <Path to image file(s)> <Output folder CBSs>
 | 组件 | 来源 | 许可证 | 本仓库位置 |
 |---|---|---|---|
 | LTRData.DiscUtils | [LTRData/DiscUtils](https://github.com/LTRData/DiscUtils)（NuGet，升级版） | MIT | NuGet 包 |
-| WPMT.Core（压缩/哈希/目录库） | 自 WPMT（Windows Package Management Tool）迁移，以 `D:\wpmtcli\Compression` 修正版为权威 | - | `src/WPMT.Core` |
-| NSudo（TrustedInstaller 提权） | [UUP-Project/NSudo](https://github.com/UUP-Project/NSudo) | MIT | `src/MobilePackageGen.Common/NSudo` |
-| msdelta.dll（DCM 压缩 API） | Windows 系统 DLL | 系统组件 | 运行期调用 |
-| Img2Ffu | [WOA-Project/Img2Ffu](https://github.com/WOA-Project/Img2Ffu) | MIT | `src/Img2Ffu.Library`（本地版，含压缩实现） |
-| StorageSpace | [gus33000/StorageSpace](https://github.com/gus33000/StorageSpace) | MIT | `src/StorageSpace`（本地版）；`thirdparty/StorageSpace` 保留子模块声明 |
-| DotnetPackaging.Msix | [dotnet-packaging/MSIX](https://github.com/dotnet-packaging/MSIX) | MIT | `thirdparty/DotnetPackaging.Msix` |
-| DeflateBlockCompressor | 随 WSK Tools 分发 | - | `thirdparty/DeflateBlockCompressor` |
-| Microsoft.Deployment.Compression | WiX 工具集 | MS-RL | `src/Microsoft.Deployment.Compression(.Cab)` |
-| LibSxS | 随 WSK Tools 分发 | - | `src/LibSxS` |
-| SevenZipExtractor / 7-Zip | [adoconnection/SevenZipExtractor](https://github.com/adoconnection/SevenZipExtractor) | LGPL-2.1 | `src/Archives.DiscUtils/SevenZipExtractor` |
+| WPMT.Core（压缩/哈希/目录库） | 自 WPMT（Windows Package Management Tool）迁移，以 `D:\wpmtcli\Compression` 修正版为权威 | - | `WPMT.Core` |
+| NSudo（TrustedInstaller 提权） | [UUP-Project/NSudo](https://github.com/UUP-Project/NSudo) | MIT | `MobilePackageGen.Common/NSudo` |
+| msdelta.dll（DCM 压缩 API） | Windows 系统 DLL | 系统组件 | 运行期调用（不随仓库分发） |
+| Img2Ffu | [WOA-Project/Img2Ffu](https://github.com/WOA-Project/Img2Ffu) | MIT | `Img2Ffu.Library`（本地版，含压缩实现） |
+| StorageSpace | [gus33000/StorageSpace](https://github.com/gus33000/StorageSpace) | MIT | `StorageSpace`（本地版） |
+| DotnetPackaging.Msix | [dotnet-packaging/MSIX](https://github.com/dotnet-packaging/MSIX) | MIT | `DotnetPackaging.Msix` |
+| DeflateBlockCompressor | 随 WSK Tools 分发 | - | `DeflateBlockCompressor` |
+| Cabinet | 随 UUPMediaCreator / WPMT 分发 | MIT | `Cabinet`（`Cabinet.Net.csproj`） |
+| Microsoft.Deployment.Compression | WiX 工具集 | MS-RL | `Microsoft.Deployment.Compression(.Cab)` |
+| LibSxS | 随 WSK Tools 分发 | - | `LibSxS` |
+| SevenZipExtractor / 7-Zip | [adoconnection/SevenZipExtractor](https://github.com/adoconnection/SevenZipExtractor) | LGPL-2.1 | `Archives.DiscUtils/SevenZipExtractor` |
 | RawDiskLib | NuGet 0.2.1 | - | NuGet 包 |
-| EDLProgram2VHDX | [gus33000/EDLProgram2VHDX](https://github.com/gus33000/EDLProgram2VHDX) | - | `thirdparty/EDLProgram2VHDX`（子模块声明） |
 
-> **子模块说明**：`thirdparty/StorageSpace`、`thirdparty/Img2Ffu`、`thirdparty/EDLProgram2VHDX` 在 `.gitmodules` 中保留了上游的子模块引用声明（fork 结构沿用上游）。本仓库**实际编译使用的是 `src/` 下的本地代码**（StorageSpace、Img2Ffu.Library），克隆后**不需要**初始化子模块即可直接编译。
+> **没有子模块**：上游 fork 曾在 `.gitmodules` 里声明 `thirdparty/StorageSpace`、`thirdparty/Img2Ffu`、`thirdparty/EDLProgram2VHDX`，但本仓库实际编译使用的是平铺在 `MobilePackageGen/` 下的本地代码（`StorageSpace`、`Img2Ffu.Library`）。该失效的 `.gitmodules` 与其子模块声明已删除，克隆后直接编译即可。
 >
-> **WPMT.Core 迁移注意**：`src/WPMT.Core` 的压缩逻辑以 WPMT 的 `Compression` 目录修正版为权威；`parital source code` 目录中部分文件存在已知问题（如共享静态字典被原地修改导致连续解压第二个 DCM manifest 损坏，需每次使用前深拷贝字典）。详见 `src/WPMT.Core` 内实现。
+> **WPMT.Core 迁移注意**：`WPMT.Core` 的压缩逻辑以 WPMT 的 `Compression` 目录修正版为权威；`parital source code` 目录中部分文件存在已知问题（如共享静态字典被原地修改导致连续解压第二个 DCM manifest 损坏，需每次使用前深拷贝字典）。详见 `WPMT.Core` 内实现。
 
 ## 与上游 fork 的主要差异
 
-- 代码结构重组为 `src/` + `thirdparty/` 布局（保留上游组织方式）
+- 代码结构平铺在 `MobilePackageGen/` 下（第三方库与第一方代码并列，不再用 `src/` + `thirdparty/` 二级目录，也移除了失效的子模块声明）
 - 新增 `MobilePackageGen.GUI`（WinForms 图形界面，产品名 OneCore Image Designer Preview）与 `MobilePackageGen.CLI` 分离
 - `LTRData.DiscUtils` 升级（修复 WOF/XPRESS 压缩文件读取导致的数组越界崩溃）
 - **多磁盘阵列读取**：支持存储池被拆散成多个 VHD/分区镜像的场景，跨分区剥离分区链接前缀（superfloppy 回退）合并提取，防止单分区文件缺失
@@ -129,6 +132,6 @@ MobilePackageGen.exe <Path to image file(s)> <Output folder CBSs>
 
 - 来源: WSK Tools v1.0.4（fork 自 MobileTooling/MobilePackageGen）
 - 导出日期: 2026-08-30（后续持续改造至 2026-10）
-- 项目数: 15（src/ 13 + thirdparty/ 2）
+- 项目数: 解决方案含 16 个项目，另有 `CbsTools`、`CbsxCli`、`SxSFounderCli`、`Cabinet` 四个独立工程
 - CLI 目标框架: net8.0
 - GUI 目标框架: net8.0-windows (WinForms)

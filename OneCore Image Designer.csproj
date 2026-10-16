@@ -19,7 +19,7 @@
   <ItemGroup>
     <Resource Include="Assets\app.ico" />
     <Resource Include="Assets\banner.png" />
-    <!-- 璁惧甯冨眬鍐呯疆妯℃澘 + 鎸?Windows 绯荤粺 build 褰掓。鐨勫畼鏂规牎楠岃鍒欙紙闈?ADK 鐗堟湰锛夛細闅忚緭鍑虹洰褰曞彂甯冿紝杩愯鏃舵寜璺緞鍔犺浇 -->
+    <!-- 设备布局内置模板 + 按 Windows 系统 build 归档的官方校验规则（非 ADK 版本）：随输出目录发布，运行时按路径加载 -->
     <None Include="Assets\Templates\**\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Assets\ValidationRules\**\*.xml" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
@@ -56,8 +56,8 @@
     <EmbeddedResource Include="Tools\wcpex\wcpex.exe" />
     <EmbeddedResource Include="Tools\wcpex\wcp.dll" />
     <EmbeddedResource Include="Services\guids.csv" />
-    <!-- 瀹樻柟 ADK featureapi.dll 鍐呭祵鐨?OEMInput schema锛岀敤浜庣湡瀹炴牎楠屻€?         鏃犲悗缂€=20348 鍩虹嚎锛涘甫 build 鍖洪棿鍚庣紑=鎸夌洰鏍?build 閫夋嫨鐨?schema 瀹舵棌
-         锛?1 鐗?featureapi 鍝堝笇褰掔粍瀹炶瘉锛岃 Services/OemInputSchemaFamilyService.cs锛?-->
+    <!-- 官方 ADK featureapi.dll 内嵌的 OEMInput schema，用于真实校验。无后缀=20348 基线；
+         带 build 区间后缀=按目标 build 选择的 schema 家族（41 个 featureapi 哈希归组实证，见 Services/OemInputSchemaFamilyService.cs） -->
     <EmbeddedResource Include="Schemas\OEMInput.V1.xsd" />
     <EmbeddedResource Include="Schemas\OEMInput.V2.xsd" />
     <EmbeddedResource Include="Schemas\OEMInput.V1.10527-14959.xsd" />
@@ -71,7 +71,8 @@
     <EmbeddedResource Include="Schemas\OEMInput.V2.22621.xsd" />
   </ItemGroup>
 
-  <!-- 鍐呯疆寰蒋 iot-adk-addonkit 17763-v7锛氭暣鐩綍鎷峰叆杈撳嚭 addonkit\锛?       杩愯鏃朵笅杞界殑 ADK 宸ュ叿钀藉湪 addonkit\adk\锛堟湰鐩爣鍙鏀逛笉鍒狅紝淇濈暀宸茶宸ュ叿锛?-->
+  <!-- 内置微软 iot-adk-addonkit 17763-v7：整目录拷入输出 addonkit\；
+       运行时下载的 ADK 工具落在 addonkit\adk\（本目标只增改不删，保留已装工具） -->
   <Target Name="CopyAddonKitToOutput" AfterTargets="Build">
     <ItemGroup>
       <AddonKitSource Include="$(MSBuildProjectDirectory)\addonkit\**\*.*" />
