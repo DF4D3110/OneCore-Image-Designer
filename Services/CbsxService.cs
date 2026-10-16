@@ -823,6 +823,13 @@ namespace OneCore_Image_Designer.Services
                 Release(pSession);
                 log?.Invoke("ICbsSession 已取得");
 
+                // ★ 再装一次钩子：`CbsCoreInitialize` 之后那一次只来得及覆盖当时已加载的模块
+                //   （实测只打到 `wcp.dll` + `DrUpdate.dll`）。而真正做 hive 挂载的
+                //   `cmiv2.dll` / `smiengine.dll`、以及 `cbscore.dll` 往往**这时才加载**
+                //   ⇒ 少打一次它们的导入表，`NtLoadKey` 就永远钩不到，改挂载名的修法也就无从生效。
+                //   重复调用是安全的：`Install` 会重新遍历模块、只补还没打的那些。
+                TryInstallRegHook(log);
+
                 string bootDrive = DeriveBootDrive(winDir);
                 hr = session.Initialize(CbsSessionOption.None, clientId, bootDrive, winDir);
 

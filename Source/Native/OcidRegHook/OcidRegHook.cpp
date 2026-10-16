@@ -247,8 +247,18 @@ static std::wstring g_moduleFilter;
 // 只记录"写/删"类调用，跳过 NtCreateKey/NtOpenKey（它们占了绝大多数行且信息量低）
 static bool g_writesOnly = false;
 
+// ★ 全局窄改写模式：在【所有模块】的导入表里只做 `…/config/SOFTWARE` → `…/config/SOFTWAREX`
+//   这一条变换，且**只在真的改写时记一行日志**。
+//
+//   为什么必须"全局"：实测逐个补消费者补不完 —— 每补一个，失败点就前移一次
+//     （`NtLoadKey` 没触发 → `advapi32!RegLoadKeyW` → `RegOpenKeyExW` → `RegUnLoadKey`/CSI store …）。
+//   为什么必须"静默"：上次"遍历所有模块 + 记日志 + 钩写值"截获了整个进程的注册表流量，
+//     把 CBS 搞坏（连 manifest 都解析不了）。窄变换 + 静默才有可能安全。
+static bool g_globalRewrite = false;
+
 static bool ShouldLog(const std::wstring& mod, bool isWrite)
 {
+    if (g_globalRewrite) return false;      // 全局模式：静默（改写时才单独记一行）
     if (g_writesOnly && !isWrite) return false;
     if (!g_moduleFilter.empty())
     {
@@ -675,6 +685,208 @@ static NTSTATUS NTAPI Hook_NtLoadKey(POBJECT_ATTRIBUTES target, POBJECT_ATTRIBUT
 #undef OCID_SWAP_OBJECTNAME
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 挂载 hive（advapi32 那条路）：`RegLoadKey`
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 【为什么还要钩它】实测 `NtLoadKey`/`NtLoadKey2` 的钩子【一次都没触发】——
+// 而字符串扫描显示 `CbsCore.dll` 导入的是 **`RegLoadKey`（advapi32）**，
+// 只有 `cmiv2.dll` / `smiengine.dll` 才导入 `NtLoadKey` 系列。
+// ⇒ **真正把离线 hive 挂上去的是 `advapi32!RegLoadKey` 这条路。**
+//
+// ⚠ 注意打在【哪个模块的导入表】上：只在**白名单模块**（cbscore/cmiv2/wcp/…）的 IAT 里
+//   把 `advapi32!RegLoadKey` 换掉，**绝不去 patch `advapi32.dll` 本身** ——
+//   那样会截获整个进程的注册表流量（实测把 CBS 搞坏、连 manifest 都解析不了）。
+typedef LONG (WINAPI *PFN_RegLoadKeyW)(HKEY, LPCWSTR, LPCWSTR);
+typedef LONG (WINAPI *PFN_RegLoadKeyA)(HKEY, LPCSTR, LPCSTR);
+static PFN_RegLoadKeyW Real_RegLoadKeyW = NULL;
+static PFN_RegLoadKeyA Real_RegLoadKeyA = NULL;
+
+static LONG WINAPI Hook_RegLoadKeyW(HKEY hKey, LPCWSTR lpSubKey, LPCWSTR lpFile)
+{
+    InterlockedIncrement(&g_callCount);
+    std::wstring want = lpSubKey ? lpSubKey : L"(null)";
+    std::wstring use  = RenameSoftwareSegment(want);
+    LogW(L"[RegLoadKeyW] sub=%s%s  file=%s", want.c_str(),
+         (use != want ? (L"   ==> " + use).c_str() : L""),
+         lpFile ? lpFile : L"(null)");
+    if (!Real_RegLoadKeyW) return 87;   // ERROR_INVALID_PARAMETER：真身没解析出来
+    return Real_RegLoadKeyW(hKey, use.c_str(), lpFile);   // use 是局部量，调用期间一直活着
+}
+
+static LONG WINAPI Hook_RegLoadKeyA(HKEY hKey, LPCSTR lpSubKey, LPCSTR lpFile)
+{
+    InterlockedIncrement(&g_callCount);
+    // A 版少见（CBS 用宽字符）；这里只记录、不改写，免得宽窄转换出错
+    if (lpSubKey) LogW(L"[RegLoadKeyA] sub=%S file=%S", lpSubKey, lpFile ? lpFile : "(null)");
+    if (!Real_RegLoadKeyA) return 87;
+    return Real_RegLoadKeyA(hKey, lpSubKey, lpFile);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// advapi32 的【打开/创建】那条路：`RegOpenKeyExW` / `RegOpenKeyW` / `RegCreateKeyExW`
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 【为什么必须补这三个】实测证据：钩上 `RegLoadKeyW` 之后，挂载名确实被改成了
+// `/config/SOFTWAREX`；**但随后 CBS 按【原名字】去打开那个挂载点，报
+//   `Failed to open offline registry key … into registry key '{bf1a281b-…}…SOFTWARE'
+//    [0x80070002 - ERROR_FILE_NOT_FOUND]`
+// ⇒ 因为那个打开调用走的是 **`advapi32!RegOpenKeyExW`**，而不是我们已钩的 `NtOpenKey`
+//   （advapi32 内部才转成 NtOpenKey，而 advapi32 自身我们**刻意不 patch**）。
+// ⇒ 于是"改名"只改了一半：挂载点换了名，找它的人还用旧名。
+//
+// ⚠ 同样只打在【白名单模块】的 IAT 上，不碰 advapi32.dll 本身。
+typedef LONG (WINAPI *PFN_RegOpenKeyExW)(HKEY, LPCWSTR, DWORD, REGSAM, PHKEY);
+typedef LONG (WINAPI *PFN_RegOpenKeyW)(HKEY, LPCWSTR, PHKEY);
+typedef LONG (WINAPI *PFN_RegCreateKeyExW)(HKEY, LPCWSTR, DWORD, LPWSTR, DWORD, REGSAM,
+                                           LPSECURITY_ATTRIBUTES, PHKEY, LPDWORD);
+static PFN_RegOpenKeyExW   Real_RegOpenKeyExW   = NULL;
+static PFN_RegOpenKeyW     Real_RegOpenKeyW     = NULL;
+static PFN_RegCreateKeyExW Real_RegCreateKeyExW = NULL;
+
+static LONG WINAPI Hook_RegOpenKeyExW(HKEY hKey, LPCWSTR lpSubKey, DWORD ulOptions,
+                                      REGSAM samDesired, PHKEY phkResult)
+{
+    InterlockedIncrement(&g_callCount);
+    std::wstring want = lpSubKey ? lpSubKey : L"(null)";
+    std::wstring use  = RenameSoftwareSegment(want);
+    if (use != want)
+        LogW(L"[RegOpenKeyExW] sub=%s   ==> %s", want.c_str(), use.c_str());
+    if (!Real_RegOpenKeyExW) return 87;
+    return Real_RegOpenKeyExW(hKey, use.c_str(), ulOptions, samDesired, phkResult);
+}
+
+static LONG WINAPI Hook_RegOpenKeyW(HKEY hKey, LPCWSTR lpSubKey, PHKEY phkResult)
+{
+    InterlockedIncrement(&g_callCount);
+    std::wstring want = lpSubKey ? lpSubKey : L"(null)";
+    std::wstring use  = RenameSoftwareSegment(want);
+    if (use != want)
+        LogW(L"[RegOpenKeyW] sub=%s   ==> %s", want.c_str(), use.c_str());
+    if (!Real_RegOpenKeyW) return 87;
+    return Real_RegOpenKeyW(hKey, use.c_str(), phkResult);
+}
+
+static LONG WINAPI Hook_RegCreateKeyExW(HKEY hKey, LPCWSTR lpSubKey, DWORD Reserved,
+                                        LPWSTR lpClass, DWORD dwOptions, REGSAM samDesired,
+                                        LPSECURITY_ATTRIBUTES sa, PHKEY phkResult, LPDWORD lpdwDisp)
+{
+    InterlockedIncrement(&g_callCount);
+    std::wstring want = lpSubKey ? lpSubKey : L"(null)";
+    std::wstring use  = RenameSoftwareSegment(want);
+    if (use != want)
+        LogW(L"[RegCreateKeyExW] sub=%s   ==> %s", want.c_str(), use.c_str());
+    if (!Real_RegCreateKeyExW) return 87;
+    return Real_RegCreateKeyExW(hKey, use.c_str(), Reserved, lpClass, dwOptions,
+                                samDesired, sa, phkResult, lpdwDisp);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// advapi32：卸载 hive `RegUnLoadKey`（日志里 CBS 卸载时还用原名 ⇒ 也得改写）
+// ─────────────────────────────────────────────────────────────────────────────
+typedef LONG (WINAPI *PFN_RegUnLoadKeyW)(HKEY, LPCWSTR);
+static PFN_RegUnLoadKeyW Real_RegUnLoadKeyW = NULL;
+
+static LONG WINAPI Hook_RegUnLoadKeyW(HKEY hKey, LPCWSTR lpSubKey)
+{
+    InterlockedIncrement(&g_callCount);
+    std::wstring want = lpSubKey ? lpSubKey : L"(null)";
+    std::wstring use  = RenameSoftwareSegment(want);
+    if (use != want) LogW(L"[RegUnLoadKeyW] sub=%s   ==> %s", want.c_str(), use.c_str());
+    if (!Real_RegUnLoadKeyW) return 87;
+    return Real_RegUnLoadKeyW(hKey, use.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 观察 `WcpInitialize` 的参数（唯一剩下的入口）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 【为什么盯它】链条已闭合：CBS 的离线 hive 路径是**硬编码**的
+// （日志原文：`Loading offline registry hive: SOFTWARE, into registry key
+//   '{bf1a281b-…}<drive>:/Windows/System32/config/SOFTWARE' from path '\\?\…\SOFTWARE'`），
+// 所以挂载名恒以 `SOFTWARE` 结尾 ⇒ 子键 `Classes` 恒拼出 `SOFTWARE\Classes`
+// ⇒ 内核的关联保护恒拦那笔 `shell` 默认值写。
+// 改名文件（CBS 找不到）、改挂载名（消费者无穷）、改叶子名/manifest（用户否决）**全都堵死了**。
+//
+// 而 `wcp.dll` 里 `WcpInitialize(pParameters)` 的参数结构含：
+//     pszHostRegistryMachineSAMPath / pszHostRegistryMachineComponentsPath /
+//     pszHostRegistryUserDotDefaultPath / pszHostRegistryDefaultUserPath / dwFlags /
+//     ulProcessorArchitecture
+// ⇒ **那批 `pszHostRegistry*Path` 很可能就是"离线 hive 挂到宿主机哪个键名"的【输入】**，
+//   也就是唯一能覆盖那套硬编码路径的地方。
+//
+// ⚠ 本步【只观察不改】：cbscore 是用 `GetProcAddress("WcpInitialize")` 取的，
+//   所以钩 cbscore 的 `GetProcAddress`，把 `WcpInitialize` 换成我们的包装，
+//   **把 pParameters 里的字段逐个记下来**，再原样转发给真身。
+typedef FARPROC (WINAPI *PFN_GetProcAddress)(HMODULE, LPCSTR);
+typedef HRESULT (WINAPI *PFN_WcpInitialize)(PVOID);
+static PFN_GetProcAddress Real_GetProcAddress = NULL;
+static PFN_WcpInitialize Real_WcpInitialize = NULL;
+static bool g_observeWcpInit = false;
+
+// ⚠ 这两个辅助函数【不能】有带析构的 C++ 局部量，否则 __try 会报 C2712。
+//   所以把 SEH 读操作单独放这里。
+static bool SafeReadWord(DWORD_PTR p, DWORD_PTR* out)
+{
+    __try { *out = *(DWORD_PTR*)p; return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// 把一个指针当宽字符串试读；返回长度（-1 = 不可读，0 = 不像字符串）
+static int SafeReadWStr(DWORD_PTR p, wchar_t* buf, int cap)
+{
+    __try
+    {
+        const wchar_t* w = (const wchar_t*)p;
+        if (w[0] < 0x20 || w[0] >= 0x7F) return 0;
+        int n = 0;
+        while (n < cap - 1 && w[n] >= 0x20 && w[n] < 0x7F) { buf[n] = w[n]; ++n; }
+        buf[n] = 0;
+        return n;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+static HRESULT WINAPI Hook_WcpInitialize(PVOID pParameters)
+{
+    LogW(L"[WcpInitialize] called, pParameters=%p", pParameters);
+    if (pParameters)
+    {
+        // 结构布局未知 ⇒ 把前 20 个机器字都打出来，像指针的当宽字符串试读一次
+        for (int i = 0; i < 20; ++i)
+        {
+            DWORD_PTR v = 0;
+            if (!SafeReadWord((DWORD_PTR)pParameters + i * sizeof(DWORD_PTR), &v))
+            { LogW(L"    [%02d] <unreadable>", i); break; }
+
+            std::wstring s;
+            if (v > 0x10000 && v < 0x7FFFFFFF)
+            {
+                wchar_t buf[260];
+                int n = SafeReadWStr((DWORD_PTR)v, buf, 260);
+                if (n < 0) s = L"  (unreadable ptr)";
+                else if (n >= 2) { s = L"  str='"; s += buf; s += L"'"; }
+            }
+            LogW(L"    [%02d] 0x%08X%s", i, (unsigned)v, s.c_str());
+        }
+    }
+    if (!Real_WcpInitialize) { LogW(L"[WcpInitialize] real pointer is NULL - cannot forward"); return (HRESULT)0x80004005; }
+    HRESULT hr = Real_WcpInitialize(pParameters);
+    LogW(L"[WcpInitialize] real returned 0x%08X", (unsigned)hr);
+    return hr;
+}
+
+static FARPROC WINAPI Hook_GetProcAddress(HMODULE hMod, LPCSTR lpProcName)
+{
+    FARPROC r = Real_GetProcAddress ? Real_GetProcAddress(hMod, lpProcName) : NULL;
+    if (g_observeWcpInit && r && lpProcName && strcmp(lpProcName, "WcpInitialize") == 0)
+    {
+        Real_WcpInitialize = (PFN_WcpInitialize)r;
+        LogW(L"[GetProcAddress] WcpInitialize=0x%08X -> returning our observing wrapper", (unsigned)(DWORD_PTR)r);
+        return (FARPROC)Hook_WcpInitialize;
+    }
+    return r;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // IAT 打补丁
 // ─────────────────────────────────────────────────────────────────────────────
 static void* PatchIAT(HMODULE mod, const char* dllName, const char* funcName, void* newFn, void** oldFn)
@@ -768,7 +980,9 @@ static int PatchAllModules(const char* dllName,
     for (BOOL ok = Module32FirstW(snap, &me); ok; ok = Module32NextW(snap, &me))
     {
         if (_wcsicmp(me.szModule, L"OcidRegHook.dll") == 0) continue;   // 跳过自己
-        if (!IsTargetModule(me.szModule)) continue;                     // 只打服务栈家族
+        // 全局窄改写模式：所有模块都打（但只做窄变换、且静默）；
+        // 否则只打服务栈家族（用于观察/排障）。
+        if (!g_globalRewrite && !IsTargetModule(me.szModule)) continue;
 
         int hit = 0;
         for (int i = 0; i < count; ++i)
@@ -818,6 +1032,21 @@ int __stdcall OcidRegHook_Install(const wchar_t* logPath,
             g_renameSoftware = true;
             LogW(L"[install] rename /config/SOFTWARE -> /config/SOFTWAREX = ON");
         }
+        // 观察 WcpInitialize 的参数（唯一剩下的入口；只观察不改）
+        wchar_t wi[8] = { 0 };
+        if (GetEnvironmentVariableW(L"OCID_REGHOOK_WCPINIT", wi, 8) > 0 && wi[0] == L'1')
+        {
+            g_observeWcpInit = true;
+            LogW(L"[install] observe WcpInitialize = ON");
+        }
+        // 全局窄改写：所有模块都打补丁，但只做窄变换、且静默
+        wchar_t gr[8] = { 0 };
+        if (GetEnvironmentVariableW(L"OCID_REGHOOK_GLOBAL", gr, 8) > 0 && gr[0] == L'1')
+        {
+            g_globalRewrite = true;
+            g_renameSoftware = true;   // 全局模式隐含开启改名
+            LogW(L"[install] GLOBAL narrow rewrite = ON (all modules, silent, rename SOFTWARE->SOFTWAREX)");
+        }
     }
 
     // ★ 主动从 ntdll 解析【所有】真身指针 —— 不要依赖"某个模块的 IAT 恰好被我们打过补丁时
@@ -839,26 +1068,46 @@ int __stdcall OcidRegHook_Install(const wchar_t* logPath,
             if (!Real_NtLoadKey)            Real_NtLoadKey            = (PFN_NtLoadKey)GetProcAddress(ntdll, "NtLoadKey");
             if (!Real_NtLoadKey2)           Real_NtLoadKey2           = (PFN_NtLoadKey2)GetProcAddress(ntdll, "NtLoadKey2");
         }
-        LogW(L"[install] reals: NtQueryKey=%p NtOpenKey=%p NtSetValueKey=%p NtCreateKey=%p",
-             Real_NtQueryKey, Real_NtOpenKey, Real_NtSetValueKey, Real_NtCreateKey);
+        // RegLoadKey 来自 advapi32（不是 ntdll）
+        HMODULE adv = GetModuleHandleW(L"advapi32.dll");
+        if (adv)
+        {
+            if (!Real_RegLoadKeyW) Real_RegLoadKeyW = (PFN_RegLoadKeyW)GetProcAddress(adv, "RegLoadKeyW");
+            if (!Real_RegLoadKeyA) Real_RegLoadKeyA = (PFN_RegLoadKeyA)GetProcAddress(adv, "RegLoadKeyA");
+            if (!Real_RegOpenKeyExW)   Real_RegOpenKeyExW   = (PFN_RegOpenKeyExW)GetProcAddress(adv, "RegOpenKeyExW");
+            if (!Real_RegOpenKeyW)     Real_RegOpenKeyW     = (PFN_RegOpenKeyW)GetProcAddress(adv, "RegOpenKeyW");
+            if (!Real_RegCreateKeyExW) Real_RegCreateKeyExW = (PFN_RegCreateKeyExW)GetProcAddress(adv, "RegCreateKeyExW");
+            if (!Real_RegUnLoadKeyW)   Real_RegUnLoadKeyW   = (PFN_RegUnLoadKeyW)GetProcAddress(adv, "RegUnLoadKeyW");
+        }
+        LogW(L"[install] reals: NtOpenKey=%p NtSetValueKey=%p RegLoadKeyW=%p",
+             Real_NtOpenKey, Real_NtSetValueKey, Real_RegLoadKeyW);
     }
 
     static const char* funcs[] = {
         "NtCreateKey", "NtCreateKeyTransacted", "NtOpenKey", "NtOpenKeyEx",
         "NtSetValueKey", "NtDeleteKey", "NtDeleteValueKey",
         "NtLoadKey", "NtLoadKey2",
+        "RegLoadKeyW", "RegLoadKeyA",          // ← advapi32：真正在用的挂载入口
+        "RegOpenKeyExW", "RegOpenKeyW", "RegCreateKeyExW",   // ← advapi32：挂载之后按名字打开它
+        "RegUnLoadKeyW",                                     // ← advapi32：卸载时也要用同一个名字
     };
     static void* hooks[] = {
         (void*)Hook_NtCreateKey, (void*)Hook_NtCreateKeyTransacted, (void*)Hook_NtOpenKey,
         (void*)Hook_NtOpenKeyEx, (void*)Hook_NtSetValueKey, (void*)Hook_NtDeleteKey,
         (void*)Hook_NtDeleteValueKey,
         (void*)Hook_NtLoadKey, (void*)Hook_NtLoadKey2,
+        (void*)Hook_RegLoadKeyW, (void*)Hook_RegLoadKeyA,
+        (void*)Hook_RegOpenKeyExW, (void*)Hook_RegOpenKeyW, (void*)Hook_RegCreateKeyExW,
+        (void*)Hook_RegUnLoadKeyW,
     };
     static void** reals[] = {
         (void**)&Real_NtCreateKey, (void**)&Real_NtCreateKeyTransacted, (void**)&Real_NtOpenKey,
         (void**)&Real_NtOpenKeyEx, (void**)&Real_NtSetValueKey, (void**)&Real_NtDeleteKey,
         (void**)&Real_NtDeleteValueKey,
         (void**)&Real_NtLoadKey, (void**)&Real_NtLoadKey2,
+        (void**)&Real_RegLoadKeyW, (void**)&Real_RegLoadKeyA,
+        (void**)&Real_RegOpenKeyExW, (void**)&Real_RegOpenKeyW, (void**)&Real_RegCreateKeyExW,
+        (void**)&Real_RegUnLoadKeyW,
     };
     const int N = (int)(sizeof(funcs) / sizeof(funcs[0]));
 
@@ -892,9 +1141,32 @@ int __stdcall OcidRegHook_Install(const wchar_t* logPath,
     LogW(L"[install] done: %d patched, scope=%s, rewrite=%s, mappings=%zu",
          patched, (onlyWcp ? L"wcp.dll only" : L"all loaded modules"),
          (g_enableRewrite ? L"ON" : L"off"), g_mappings.size());
+    // ★ 观察 WcpInitialize：cbscore 是用 GetProcAddress 取它的，
+    //   所以只在 cbscore/CbsCore 的 IAT 里把 GetProcAddress 换成我们的包装。
+    if (g_observeWcpInit)
+    {
+        HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
+        if (k32 && !Real_GetProcAddress)
+            Real_GetProcAddress = (PFN_GetProcAddress)GetProcAddress(k32, "GetProcAddress");
+        LogW(L"[install] Real_GetProcAddress=%p", Real_GetProcAddress);
+
+        const wchar_t* names[] = { L"cbscore.dll", L"CbsCore.dll" };
+        for (int i = 0; i < 2; ++i)
+        {
+            HMODULE m = GetModuleHandleW(names[i]);
+            if (!m) { LogW(L"[install] %s not loaded", names[i]); continue; }
+            void* real = PatchIAT(m, "kernel32.dll", "GetProcAddress",
+                                  (void*)Hook_GetProcAddress, (void**)&Real_GetProcAddress);
+            LogW(L"[install] %s GetProcAddress patched: %s", names[i], real ? L"YES" : L"no (not imported?)");
+            if (real) ++patched;
+        }
+    }
+
     return patched;
 }
-
+// ─────────────────────────────────────────────────────────────────────────────
+// 导出（.def 里声明；__stdcall 会修饰名，靠 .def 导出未修饰名）
+// ─────────────────────────────────────────────────────────────────────────────
 extern "C" __declspec(dllexport)
 int __stdcall OcidRegHook_Uninstall(void)
 {
