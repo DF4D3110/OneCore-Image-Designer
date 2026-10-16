@@ -371,32 +371,81 @@ static NTSTATUS RetrySetValueWithWriteHandle(const std::wstring& keyPath,
         return (NTSTATUS)0xC0000022;
     }
 
-    UNICODE_STRING us;
-    RtlInitUnicodeString(&us, keyPath.c_str());
+    // ── 核心思路：不要用绝对路径重开 ──
+    //
+    // 根因已确认：内核按【路径字符串】匹配 `…\SOFTWARE\Classes\…\shell` 的默认值写并拒绝，
+    // 它不关心 hive 是活是离线。实测（挂到 HKLM\OCID_PAT_xxx）：
+    //     HKLM\…\Classes\Unknown\shell            ✅
+    //     HKLM\…\SOFTWARE\Classes\Unknown\shell   ❌   ← 只因路径里多了 SOFTWARE 段
+    //     HKLM\…\SOFTWARE\Unknown\shell           ✅
+    //     HKLM\…\SOFTWARE\Classes\Unknown         ✅
+    //   （改大小写无效；用绝对路径 + KEY_SET_VALUE 重开也无效 —— open=0 但写仍被拒。）
+    //
+    // ⇒ 那就让【传给内核的字符串】里根本不出现 `SOFTWARE\Classes`：
+    //   先按绝对路径打开【父键】（打开不受拦，实测 open=0），
+    //   再用父句柄做 RootDirectory、只用【叶子名】做 ObjectName 打开目标键。
+    //   这样第二次调用的路径参数只有 "shell"，匹配不上那个模式。
 
-    // 不用 InitializeObjectAttributes 宏，手工填，避免宏展开依赖
-    OBJECT_ATTRIBUTES oa;
-    oa.Length = sizeof(OBJECT_ATTRIBUTES);
-    oa.RootDirectory = NULL;
-    oa.ObjectName = &us;
-    oa.Attributes = OBJ_CASE_INSENSITIVE;
-    oa.SecurityDescriptor = NULL;
-    oa.SecurityQualityOfService = NULL;
-
-    HANDLE hk = NULL;
-    NTSTATUS stOpen = Real_NtOpenKey(&hk, KEY_SET_VALUE, &oa);
-    if (stOpen < 0)
+    size_t pos = keyPath.find_last_of(L'\\');
+    if (pos == std::wstring::npos || pos == 0)
     {
-        // 打开就失败了 —— 必须区分出来，否则会误判成"写被拒"
-        LogW(L"[RETRY] open FAILED st=0x%08X  key=%s", (unsigned)stOpen, keyPath.c_str());
-        return stOpen;
+        LogW(L"[RETRY] abort: cannot split path '%s'", keyPath.c_str());
+        return (NTSTATUS)0xC0000022;
+    }
+    std::wstring parentPath = keyPath.substr(0, pos);
+    std::wstring leafName   = keyPath.substr(pos + 1);
+    if (leafName.empty())
+    {
+        LogW(L"[RETRY] abort: empty leaf in '%s'", keyPath.c_str());
+        return (NTSTATUS)0xC0000022;
     }
 
-    NTSTATUS st = Real_NtSetValueKey(hk, name, titleIdx, type, data, size);
-    CloseHandle(hk);
-    // 打开成功、写被拒 ⇒ 强烈指向"内核层保护 / 事务语义"，而不是句柄权限
-    LogW(L"[RETRY] open=0  write=0x%08X  key=%s", (unsigned)st, keyPath.c_str());
-    return st;
+    UNICODE_STRING usParent;
+    RtlInitUnicodeString(&usParent, parentPath.c_str());
+
+    // 不用 InitializeObjectAttributes 宏，手工填，避免宏展开依赖
+    OBJECT_ATTRIBUTES oaParent;
+    oaParent.Length = sizeof(OBJECT_ATTRIBUTES);
+    oaParent.RootDirectory = NULL;
+    oaParent.ObjectName = &usParent;
+    oaParent.Attributes = OBJ_CASE_INSENSITIVE;
+    oaParent.SecurityDescriptor = NULL;
+    oaParent.SecurityQualityOfService = NULL;
+
+    HANDLE hParent = NULL;
+    NTSTATUS st = Real_NtOpenKey(&hParent, KEY_ALL_ACCESS, &oaParent);
+    if (st < 0)
+    {
+        LogW(L"[RETRY] open parent FAILED st=0x%08X  parent=%s", (unsigned)st, parentPath.c_str());
+        return st;
+    }
+
+    // 相对打开：ObjectName 只有叶子名 "shell"，RootDirectory 是父句柄
+    UNICODE_STRING usLeaf;
+    RtlInitUnicodeString(&usLeaf, leafName.c_str());
+    OBJECT_ATTRIBUTES oaLeaf;
+    oaLeaf.Length = sizeof(OBJECT_ATTRIBUTES);
+    oaLeaf.RootDirectory = hParent;          // ★ 关键：相对打开
+    oaLeaf.ObjectName = &usLeaf;
+    oaLeaf.Attributes = OBJ_CASE_INSENSITIVE;
+    oaLeaf.SecurityDescriptor = NULL;
+    oaLeaf.SecurityQualityOfService = NULL;
+
+    HANDLE hLeaf = NULL;
+    st = Real_NtOpenKey(&hLeaf, KEY_SET_VALUE, &oaLeaf);
+    if (st < 0)
+    {
+        LogW(L"[RETRY] rel-open leaf FAILED st=0x%08X  leaf=%s", (unsigned)st, leafName.c_str());
+        CloseHandle(hParent);
+        return st;
+    }
+
+    NTSTATUS stWrite = Real_NtSetValueKey(hLeaf, name, titleIdx, type, data, size);
+    CloseHandle(hLeaf);
+    CloseHandle(hParent);
+    LogW(L"[RETRY-REL] parent=0  leaf=0  write=0x%08X  path=%s",
+         (unsigned)stWrite, keyPath.c_str());
+    return stWrite;
 }
 
 static NTSTATUS NTAPI Hook_NtSetValueKey(HANDLE h, PUNICODE_STRING name,
