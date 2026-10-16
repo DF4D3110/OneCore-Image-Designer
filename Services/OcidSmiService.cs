@@ -113,8 +113,159 @@ namespace OneCore_Image_Designer.Services
             public string ValueType = "REG_SZ";
             /// <summary>值数据（字符串形式；DWORD 用十进制/0x 前缀，BINARY 用十六进制）。</summary>
             public string Data = "";
-            /// <summary>来源（清单文件名），仅用于日志/排障。</summary>
+            /// <summary>
+            /// `owner`（清单里 <c>owner="true"</c>）—— 该组件是否**拥有**这个值。
+            /// ⚠ 这是真实语义，不能省：它关系到组件卸载时"该不该删"以及冲突判定。
+            /// </summary>
+            public bool Owner;
+            /// <summary>`operationHint`，实测几乎全是 <c>replace</c>（以本声明覆盖既有值）。</summary>
+            public string OperationHint = "replace";
+            /// <summary>
+            /// 作用域：<c>allUsers</c>（落 SOFTWARE/SYSTEM 等机器 hive）或
+            /// <c>perUser</c>（落默认用户 hive —— 见 <see cref="MapLogicalToHive"/>）。
+            /// </summary>
+            public string Scope = "";
+            /// <summary>来源（清单里的设置项名 / 清单文件名），仅用于日志与排障。</summary>
             public string Source = "";
+            /// <summary>来源组件名（用于日志）。</summary>
+            public string Component = "";
+        }
+
+        /// <summary>
+        /// 从组件清单批量应用注册表设置。
+        ///
+        /// 实现方式：调用原生工具 <c>ocid_manifest.exe export-ops</c>（C++ 服务栈的控制台入口）
+        /// 把清单里的 <c>configurationSchema</c> 推导成注册表操作（JSONL），再逐条落到离线 hive。
+        ///
+        /// 为什么走这个方式（而不是在 C# 里再实现一遍）：
+        /// 解析规则是从反编译与真实数据里解出来的（例如组件名缩写、`wcm:handler`/`legacy*` 语义），
+        /// **只应有一份实现**，否则两边一定会漂移。C++ 侧拥有服务栈逻辑，C# 侧只负责编排与落盘。
+        ///
+        /// ⚠ 需要原生工具在同目录或 <paramref name="toolPath"/> 指定；找不到时抛异常而不是静默跳过
+        /// （静默跳过 = 设置全丢，最难发现的那类故障）。
+        /// </summary>
+        public static int ApplyManifests(
+            string imageRoot,
+            IEnumerable<string> manifestPaths,
+            Action<string>? log = null,
+            bool dryRun = false,
+            string? toolPath = null)
+        {
+            string tool = toolPath ?? FindManifestTool();
+            if (tool == null)
+                throw new FileNotFoundException(
+                    "找不到 ocid_manifest.exe（OCID 服务栈控制台入口）。" +
+                    "请先用 Source/Native/OcidServicing 构建，或用 toolPath 显式指定。");
+
+            var paths = manifestPaths.ToList();
+            var listFile = Path.Combine(Path.GetTempPath(), "ocid_manifest_list_" + Guid.NewGuid().ToString("N")[..8] + ".txt");
+            File.WriteAllLines(listFile, paths);
+            log?.Invoke($"[SMI] 从清单应用：{paths.Count} 份，工具 {Path.GetFileName(tool)}");
+
+            var settings = new List<RegSetting>();
+            int failed = 0;
+
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = tool,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                };
+                psi.ArgumentList.Add("export-ops");
+                psi.ArgumentList.Add("--list");
+                psi.ArgumentList.Add(listFile);
+
+                using var p = System.Diagnostics.Process.Start(psi)!;
+                string? line;
+                while ((line = p.StandardOutput.ReadLine()) != null)
+                {
+                    if (line.Length == 0 || line[0] != '{') continue;
+                    var s = ParseOpJson(line);
+                    if (s != null) settings.Add(s);
+                }
+                string stderr = p.StandardError.ReadToEnd();
+                p.WaitForExit();
+                log?.Invoke($"[SMI] 原生工具诊断：{stderr.Trim()}");
+                if (p.ExitCode != 0)
+                {
+                    failed = 1;
+                    log?.Invoke($"[SMI] ⚠ 原生工具退出码 {p.ExitCode}（部分清单解析失败）");
+                }
+            }
+            finally
+            {
+                try { File.Delete(listFile); } catch { }
+            }
+
+            log?.Invoke($"[SMI] 推导出注册表操作 {settings.Count} 条");
+            int written = Apply(imageRoot, settings, log, dryRun);
+            return failed == 0 ? written : -written;
+        }
+
+        /// <summary>在若干常见位置找 <c>ocid_manifest.exe</c>。</summary>
+        public static string? FindManifestTool()
+        {
+            var baseDir = AppContext.BaseDirectory;
+            var candidates = new List<string>
+            {
+                Path.Combine(baseDir, "ocid_manifest.exe"),
+                Path.Combine(baseDir, "CBS", "ocid_manifest.exe"),
+                // 仓库里原生构建的输出目录（开发期）
+                Path.Combine(baseDir, "..", "..", "..", "..", "Source", "Native", "Output", "x86", "ocid_manifest.exe"),
+            };
+            foreach (var c in candidates)
+            {
+                try { if (File.Exists(c)) return Path.GetFullPath(c); } catch { }
+            }
+            return null;
+        }
+
+        /// <summary>解析一行 export-ops 的 JSON。字段固定，用手写解析避免引入 JSON 依赖。</summary>
+        private static RegSetting? ParseOpJson(string line)
+        {
+            string? Get(string key)
+            {
+                string pat = "\"" + key + "\":\"";
+                int i = line.IndexOf(pat, StringComparison.Ordinal);
+                if (i < 0) return null;
+                i += pat.Length;
+                var sb = new StringBuilder();
+                for (; i < line.Length; i++)
+                {
+                    char c = line[i];
+                    if (c == '\\' && i + 1 < line.Length)
+                    {
+                        char n = line[++i];
+                        sb.Append(n switch { 'n' => '\n', 'r' => '\r', 't' => '\t', '"' => '"', '\\' => '\\', _ => n });
+                        continue;
+                    }
+                    if (c == '"') break;
+                    sb.Append(c);
+                }
+                return sb.ToString();
+            }
+
+            var root = Get("root");
+            if (string.IsNullOrEmpty(root)) return null;
+
+            return new RegSetting
+            {
+                Root = root!,
+                SubKey = Get("subKey") ?? "",
+                ValueName = Get("valueName") ?? "",
+                ValueType = Get("valueType") ?? "REG_SZ",
+                Data = Get("data") ?? "",
+                Scope = Get("scope") ?? "",
+                Source = Get("sourceItem") ?? "",
+                Component = Get("component") ?? "",
+                // owner/operationHint 尚未从原生工具导出（下一步补），先按清单默认语义
+                Owner = true,
+                OperationHint = "replace",
+            };
         }
 
         /// <summary>
@@ -213,6 +364,25 @@ namespace OneCore_Image_Designer.Services
             if (hkcr)
                 return (HiveSoftware, Combine("Classes", sub));
 
+            // ⚠ HKEY_CURRENT_USER 在【离线】镜像里没有当前用户，正确的落点是把设置写进
+            //   **默认用户**的 hive，这样新建用户时才会带上这些设置。
+            //   镜像里对应 `Windows\System32\config\DEFAULT`。
+            //   实测 CBS 自己也会挂载 DEFAULT 与 `Users\default\ntuser.dat` 两份。
+            //   清单里的判据是 `wcm:scope="perUser"`（handler 根为 HKEY_CURRENT_USER）。
+            bool hkcu = r.Equals("HKEY_CURRENT_USER", StringComparison.OrdinalIgnoreCase)
+                     || r.Equals("HKCU", StringComparison.OrdinalIgnoreCase);
+            if (hkcu)
+                return (HiveDefault, sub);
+
+            // HKEY_USERS\<SID>\...：离线时只认 .DEFAULT（其余 SID 不在镜像里）
+            bool hku = r.Equals("HKEY_USERS", StringComparison.OrdinalIgnoreCase)
+                    || r.Equals("HKU", StringComparison.OrdinalIgnoreCase);
+            if (hku)
+            {
+                if (StartsWithSegment(sub, ".DEFAULT")) return (HiveDefault, StripFirstSegment(sub));
+                return (null, "");   // 具名 SID 的 hive 不在镜像里，属未支持
+            }
+
             if (hklm)
             {
                 if (StartsWithSegment(sub, "SOFTWARE")) return (HiveSoftware, StripFirstSegment(sub));
@@ -224,7 +394,6 @@ namespace OneCore_Image_Designer.Services
                 return (null, "");
             }
 
-            // HKEY_CURRENT_USER / HKEY_USERS 需要 per-user hive（ntuser.dat），暂不在 SMI 第一版范围
             return (null, "");
         }
 

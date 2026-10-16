@@ -1,4 +1,4 @@
-﻿// OCID 服务栈 · 控制台入口
+// OCID 服务栈 · 控制台入口
 //
 // 用户明确说过"有些东西有必要留个控制台入口方便操作也是可以的"，这个就是服务栈的第一个入口。
 // 它让"清单 → 可执行的注册表操作"这条链可以在命令行上直接观察和验证，
@@ -364,6 +364,90 @@ static int CmdVerifyNames(const std::wstring& dir, int maxFiles)
 #endif
 }
 
+// ── 批量导出注册表操作（JSONL，给 C# 侧流式消费）────────────────────────
+//
+// 为什么要有这个：镜像里 5664 份清单，每份都起一次进程太慢。
+// 这里一次扫描整个目录（或读一份路径清单），把**每条操作打成一个 JSON 对象一行**（JSONL），
+// 调用方可以边读边处理，也不必先把全部内容读进内存。
+//
+// 用法：
+//   ocid_manifest export-ops <dir> [maxFiles]        目录里所有 *.manifest
+//   ocid_manifest export-ops --list <fileOfPaths>    从文本文件读清单路径（一行一个）
+static int CmdExportOps(const std::wstring& dir, const std::wstring& listFile, int maxFiles)
+{
+#ifdef _WIN32
+    std::vector<std::wstring> files;
+
+    if (!listFile.empty()) {
+        std::wstring text, err;
+        if (!ReadFileUtf8(listFile, text, err)) { Err(ToUtf8(err)); return 2; }
+        size_t start = 0;
+        while (start <= text.size()) {
+            size_t nl = text.find(L'\n', start);
+            std::wstring line = (nl == std::wstring::npos) ? text.substr(start)
+                                                           : text.substr(start, nl - start);
+            while (!line.empty() && (line.back() == L'\r' || line.back() == L' ')) line.pop_back();
+            if (!line.empty()) files.push_back(line);
+            if (nl == std::wstring::npos) break;
+            start = nl + 1;
+        }
+    } else {
+        WIN32_FIND_DATAW fd;
+        std::wstring pattern = dir + L"\\*.manifest";
+        HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) { Err("no .manifest found"); return 2; }
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (maxFiles > 0 && (int)files.size() >= maxFiles) break;
+            files.push_back(dir + L"\\" + fd.cFileName);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+
+    size_t totalOps = 0, okManifests = 0, badManifests = 0, noSchema = 0;
+    for (const auto& path : files) {
+        std::wstring text, err;
+        if (!ReadFileUtf8(path, text, err)) { ++badManifests; continue; }
+
+        ComponentManifest m;
+        auto r = ParseComponentManifest(text, m);
+        if (!r.ok) { ++badManifests; continue; }
+        ++okManifests;
+
+        if (m.configurationSchema.xsdText.empty()) { ++noSchema; continue; }
+
+        WcmConfigurationSchema schema;
+        auto sr = schema.Parse(m.configurationSchema.xsdText);
+        if (!sr.ok) { ++badManifests; continue; }
+
+        std::wstring compName = m.identity.ComponentNamePrefix();
+        auto ops = ToRegistryOperations(schema);
+        for (const auto& o : ops) {
+            // 一行一个对象，带上来源（组件名 + 设置项名），排障时能直接定位到哪份清单的哪一条
+            std::string line = "{\"component\":\"" + JsonEscape(compName)
+                             + "\",\"identity\":\"" + JsonEscape(m.identity.ToString())
+                             + "\",\"root\":\"" + JsonEscape(o.root)
+                             + "\",\"subKey\":\"" + JsonEscape(o.subKey)
+                             + "\",\"valueName\":\"" + JsonEscape(o.valueName)
+                             + "\",\"valueType\":\"" + JsonEscape(o.valueType)
+                             + "\",\"data\":\"" + JsonEscape(o.data)
+                             + "\",\"scope\":\"" + JsonEscape(o.scope)
+                             + "\",\"sourceItem\":\"" + JsonEscape(o.sourceItem) + "\"}";
+            OutLn(line);
+            ++totalOps;
+        }
+    }
+
+    Err("manifests=" + std::to_string(okManifests)
+      + " failed=" + std::to_string(badManifests)
+      + " noSchema=" + std::to_string(noSchema)
+      + " ops=" + std::to_string(totalOps));
+    return badManifests == 0 ? 0 : 1;
+#else
+    (void)dir; (void)listFile; (void)maxFiles; return 2;
+#endif
+}
+
 static int CmdDumpXsd(const std::wstring& manifest, const std::wstring& outPath)
 {
 #ifdef _WIN32
@@ -420,6 +504,19 @@ int main(int argc, char** argv)
     if (cmd == L"scan" && argc >= 3) {
         int maxFiles = (argc >= 4) ? atoi(argv[3]) : 0;
         return CmdScan(FromUtf8OrAnsi(argv[2]), maxFiles);
+    }
+
+    if (cmd == L"export-ops") {
+        std::wstring dir, listFile;
+        int mx = 0;
+        for (int i = 2; i < argc; ++i) {
+            std::string a = argv[i];
+            if (a == "--list" && i + 1 < argc) { listFile = FromUtf8OrAnsi(argv[++i]); }
+            else if (a.rfind("--", 0) == 0) { /* 其它开关忽略 */ }
+            else if (dir.empty()) { dir = FromUtf8OrAnsi(argv[i]); }
+            else { mx = atoi(argv[i]); }
+        }
+        return CmdExportOps(dir, listFile, mx);
     }
 
     if (cmd == L"verify-names" && argc >= 3) {
