@@ -12,7 +12,8 @@
 #   Output\x86\ocid_wcm_tests.exe
 #   Output\x86\ocid_value_tests.exe
 #   Output\x86\ocid_cmi_tests.exe
-#   Output\x86\ocid_manifest.exe       identity + manifest + wcm + registryvalue + cmi
+#   Output\x86\ocid_macro_tests.exe
+#   Output\x86\ocid_manifest.exe       identity + manifest + wcm + registryvalue + cmi + macros
 #
 # Why both DLL bitnesses: the C# app (OneCore Image Designer) is built with
 # <Platforms>x64;x86;ARM64</Platforms>, so the process may be 64-bit while the
@@ -65,11 +66,17 @@ function New-Dirs {
     }
 }
 
+# `|| exit /b 1` on EVERY command is load-bearing. Without it a failing `cl` still
+# leaves cmd.exe running the next line, `link` links whatever .obj happens to be on
+# disk from the previous build, and the whole target reports OK -- i.e. exactly the
+# "stale .obj hid a real compile error" failure this script was written to prevent.
+# It happened again: a missing #include in tools\ocid_manifest.cpp printed C3861
+# errors and the script still said "[build] OK ocid_manifest.exe".
 function Invoke-Batch {
     param([string]$Vcvars, [string]$Obj, [string]$Name, [string[]]$Lines)
     if (-not (Test-Path $Vcvars)) { throw "vcvars not found: $Vcvars" }
     $bat = Join-Path $Obj "_build_$Name.cmd"
-    $body = "@echo off`r`ncall `"$Vcvars`" >nul`r`n" + ($Lines -join "`r`n") + "`r`n"
+    $body = "@echo off`r`ncall `"$Vcvars`" >nul`r`n" + (($Lines | ForEach-Object { "$_ || exit /b 1" }) -join "`r`n") + "`r`n"
     Set-Content -Path $bat -Value $body -Encoding ASCII
     & cmd.exe /c "`"$bat`""
     if ($LASTEXITCODE -ne 0) { throw "build failed for $Name (exit $LASTEXITCODE)" }
@@ -122,7 +129,7 @@ function Build-Dll {
 Get-Toolchain 'x86' | ForEach-Object { New-Dirs -Out $_.Out -Obj $_.Obj }
 Get-Toolchain 'x64' | ForEach-Object { New-Dirs -Out $_.Out -Obj $_.Obj }
 
-$core = @('src\Identity.cpp', 'src\Manifest.cpp', 'src\WcmSchema.cpp', 'src\RegistryValue.cpp', 'src\CmiInstaller.cpp')
+$core = @('src\Identity.cpp', 'src\Manifest.cpp', 'src\WcmSchema.cpp', 'src\RegistryValue.cpp', 'src\CmiInstaller.cpp', 'src\MacroExpander.cpp')
 $api  = $core + @('src\OcidServicingApi.cpp')
 $def  = Join-Path $src 'src\OcidServicing.def'
 
@@ -134,6 +141,7 @@ Build-Target 'ocid_manifest_tests.exe' @('src\Identity.cpp', 'src\Manifest.cpp',
 Build-Target 'ocid_wcm_tests.exe'      @('src\Identity.cpp', 'src\Manifest.cpp', 'src\WcmSchema.cpp', 'tests\wcm_tests.cpp')
 Build-Target 'ocid_value_tests.exe'    @('src\RegistryValue.cpp', 'tests\registryvalue_tests.cpp')
 Build-Target 'ocid_cmi_tests.exe'      @('src\RegistryValue.cpp', 'src\CmiInstaller.cpp', 'tests\cmiinstaller_tests.cpp')
+Build-Target 'ocid_macro_tests.exe'    @('src\MacroExpander.cpp', 'tests\macroexpander_tests.cpp')
 Build-Target 'ocid_manifest.exe'       ($core + @('tools\ocid_manifest.cpp'))
 
 Write-Host "[build] done -> $(Join-Path $root 'Output')"

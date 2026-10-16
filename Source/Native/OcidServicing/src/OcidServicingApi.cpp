@@ -24,6 +24,7 @@
 //    异常情况，见下面各自的返回码。
 
 #include "ocid/CmiInstaller.h"
+#include "ocid/MacroExpander.h"
 #include "ocid/RegistryValue.h"
 #include "ocid/WcmSchema.h"
 
@@ -68,6 +69,29 @@ namespace {
     }
 
     std::wstring W(const wchar_t* s) { return s ? std::wstring(s) : std::wstring(); }
+
+    /// 宽字符串出参：`cap` 以**字符**计（含结尾 NUL）。不够 ⇒ `OCID_ERR_BUFFER`，
+    /// 且 `*outLen` 已写成"不含 NUL 的所需长度"，调用方据此扩容重试。
+    int CopyOutStr(const std::wstring& s, wchar_t* out, unsigned int cap, unsigned int* outLen)
+    {
+        if (outLen) *outLen = (unsigned int)s.size();
+        if (!out) return s.empty() ? OCID_OK : OCID_ERR_ARGUMENT;
+        if (cap < s.size() + 1) return OCID_ERR_BUFFER;
+        if (!s.empty()) memcpy(out, s.c_str(), s.size() * sizeof(wchar_t));
+        out[s.size()] = L'\0';
+        return OCID_OK;
+    }
+
+    /// 空指针视为"不覆盖"。
+    std::wstring Opt(const wchar_t* s) { return (s && *s) ? std::wstring(s) : std::wstring(); }
+
+    RuntimePaths MakePaths(const wchar_t* windowsDir, const wchar_t* pf, const wchar_t* pfX86,
+                           const wchar_t* cf, const wchar_t* pd, const wchar_t* users)
+    {
+        RuntimePaths p = RuntimePaths::FromWindowsDir( W( windowsDir ) );
+        p.ApplyImageOverrides( Opt( pf ), Opt( pfX86 ), Opt( cf ), Opt( pd ), Opt( users ) );
+        return p;
+    }
 
 } // namespace
 
@@ -226,6 +250,102 @@ extern "C" {
     const wchar_t* __cdecl OcidWriteActionName(int action)
     {
         return WriteActionName((WriteAction)action);
+    }
+
+    /// 展开清单里的 `$(runtime.*)` 宏。基础路径按 `windowsDir`（例如 `P:\Windows`）推导；
+    /// 其余 5 个目录传 NULL 或空串表示"不覆盖"（用约定值）。
+    ///
+    /// 不认识的宏（`$(build.nttree)` / `$(string.*)` / `$(runtime.telnetClientsGroupSID)` …）
+    /// **原样保留**，并把名字写进 `leftoverBuf`（`;` 分隔，便于调用方打日志）。
+    /// 残留本身**不算失败**：调用方按返回值 0 成功处理，自己看 `leftoverLen` 决定是否告警。
+    int __cdecl OcidExpandMacros(const wchar_t* windowsDir, const wchar_t* text,
+                                 wchar_t* outBuf, unsigned int outCap, unsigned int* outLen,
+                                 wchar_t* leftoverBuf, unsigned int leftoverCap,
+                                 unsigned int* leftoverLen)
+    {
+        if (outLen) *outLen = 0;
+        if (leftoverLen) *leftoverLen = 0;
+        try
+        {
+            const RuntimePaths p = MakePaths(windowsDir, nullptr, nullptr, nullptr, nullptr, nullptr);
+            const MacroExpansion r = ExpandMacros(W(text), p);
+
+            std::wstring leftover;
+            for (std::size_t i = 0; i < r.unresolved.size(); ++i)
+            {
+                if (i) leftover += L";";
+                leftover += r.unresolved[i];
+            }
+            if (leftoverLen) *leftoverLen = (unsigned int)leftover.size();
+            if (leftoverBuf && leftoverCap >= leftover.size() + 1)
+            {
+                if (!leftover.empty())
+                    memcpy(leftoverBuf, leftover.c_str(), leftover.size() * sizeof(wchar_t));
+                leftoverBuf[leftover.size()] = L'\0';
+            }
+
+            return CopyOutStr(r.text, outBuf, outCap, outLen);
+        }
+        catch (...)
+        {
+            return OCID_ERR_INTERNAL;
+        }
+    }
+
+    /// 同上，但允许用镜像自己声明的目录覆盖基础路径（`x:\Program Files` 那种占位盘符）。
+    int __cdecl OcidExpandMacrosEx(const wchar_t* windowsDir,
+                                   const wchar_t* programFilesDir,
+                                   const wchar_t* programFilesX86Dir,
+                                   const wchar_t* commonFilesDir,
+                                   const wchar_t* programDataDir,
+                                   const wchar_t* usersDir,
+                                   const wchar_t* text,
+                                   wchar_t* outBuf, unsigned int outCap, unsigned int* outLen,
+                                   wchar_t* leftoverBuf, unsigned int leftoverCap,
+                                   unsigned int* leftoverLen)
+    {
+        if (outLen) *outLen = 0;
+        if (leftoverLen) *leftoverLen = 0;
+        try
+        {
+            const RuntimePaths p = MakePaths(windowsDir, programFilesDir, programFilesX86Dir,
+                                             commonFilesDir, programDataDir, usersDir);
+            const MacroExpansion r = ExpandMacros(W(text), p);
+
+            std::wstring leftover;
+            for (std::size_t i = 0; i < r.unresolved.size(); ++i)
+            {
+                if (i) leftover += L";";
+                leftover += r.unresolved[i];
+            }
+            if (leftoverLen) *leftoverLen = (unsigned int)leftover.size();
+            if (leftoverBuf && leftoverCap >= leftover.size() + 1)
+            {
+                if (!leftover.empty())
+                    memcpy(leftoverBuf, leftover.c_str(), leftover.size() * sizeof(wchar_t));
+                leftoverBuf[leftover.size()] = L'\0';
+            }
+
+            return CopyOutStr(r.text, outBuf, outCap, outLen);
+        }
+        catch (...)
+        {
+            return OCID_ERR_INTERNAL;
+        }
+    }
+
+    /// 已知的 `runtime.*` 宏名表，`;` 分隔（工具/诊断用）。
+    int __cdecl OcidKnownMacroNames(wchar_t* outBuf, unsigned int outCap, unsigned int* outLen)
+    {
+        std::size_t n = 0;
+        const wchar_t* const* names = KnownRuntimeMacroNames(&n);
+        std::wstring all;
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            if (i) all += L";";
+            all += names[i];
+        }
+        return CopyOutStr(all, outBuf, outCap, outLen);
     }
 
 } // extern "C"

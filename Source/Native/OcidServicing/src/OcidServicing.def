@@ -16,3 +16,6 @@ EXPORTS
     OcidRegValueMerge
     OcidCmiResolve
     OcidWriteActionName
+    OcidExpandMacros
+    OcidExpandMacrosEx
+    OcidKnownMacroNames

@@ -187,8 +187,28 @@ namespace OneCore_Image_Designer.Services
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr OcidWriteActionName(int action);
 
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int OcidExpandMacros(
+            string windowsDir, string text,
+            [Out] char[]? outBuf, uint outCap, out uint outLen,
+            [Out] char[]? leftoverBuf, uint leftoverCap, out uint leftoverLen);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int OcidExpandMacrosEx(
+            string windowsDir,
+            string programFilesDir, string programFilesX86Dir,
+            string commonFilesDir, string programDataDir, string usersDir,
+            string text,
+            [Out] char[]? outBuf, uint outCap, out uint outLen,
+            [Out] char[]? leftoverBuf, uint leftoverCap, out uint leftoverLen);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int OcidKnownMacroNames(
+            [Out] char[]? outBuf, uint outCap, out uint outLen);
+
         private const int ErrCap = 1024;
         private const int NoteCap = 1024;
+        private const int LeftoverCap = 2048;
 
         /// <summary>清单里的 <c>valueType</c> 文本 → 真实 Win32 REG_* 码；0 = 未知。</summary>
         public static uint RegValueTypeCode(string valueType) => OcidRegValueTypeCode(valueType ?? "");
@@ -292,6 +312,100 @@ namespace OneCore_Image_Designer.Services
                 return p == IntPtr.Zero ? action.ToString() : (Marshal.PtrToStringUni(p) ?? action.ToString());
             }
             catch { return action.ToString(); }
+        }
+
+        /// <summary>
+        /// 展开清单值里的 <c>$(runtime.*)</c> 宏。基础路径按 <paramref name="windowsDir"/>
+        /// （离线镜像形如 <c>P:\Windows</c>）推导，**离线 hive 给不出这些路径**，详见
+        /// <c>Source\Native\OcidServicing\include\ocid\MacroExpander.h</c>。
+        /// </summary>
+        /// <param name="leftover">
+        /// 没展开、原样保留的宏（<c>;</c> 分隔）。**不是错误** —— <c>$(string.*)</c>、
+        /// <c>$(build.nttree)</c> 这些本来就不是路径宏，调用方自己决定要不要告警。
+        /// </param>
+        public static bool TryExpandMacros(string windowsDir, string text,
+                                           out string expanded, out string leftover, out string error)
+            => ExpandCore(null, windowsDir, text, out expanded, out leftover, out error);
+
+        /// <summary>同上，但用镜像自己声明的目录覆盖（<c>x:\Program Files</c> 那种占位盘符）。</summary>
+        public static bool TryExpandMacrosEx(string windowsDir,
+                                             string programFilesDir, string programFilesX86Dir,
+                                             string commonFilesDir, string programDataDir,
+                                             string usersDir, string text,
+                                             out string expanded, out string leftover, out string error)
+            => ExpandCore(ImageDirs.Of(programFilesDir, programFilesX86Dir, commonFilesDir,
+                                       programDataDir, usersDir),
+                          windowsDir, text, out expanded, out leftover, out error);
+
+        /// <summary>镜像自己声明的目录；全空表示不覆盖。</summary>
+        private readonly struct ImageDirs
+        {
+            public readonly string Pf, PfX86, Cf, Pd, Users;
+            private ImageDirs(string pf, string pfX86, string cf, string pd, string users)
+            { Pf = pf; PfX86 = pfX86; Cf = cf; Pd = pd; Users = users; }
+
+            public static ImageDirs Of(string pf, string pfX86, string cf, string pd, string users)
+                => new(pf ?? "", pfX86 ?? "", cf ?? "", pd ?? "", users ?? "");
+        }
+
+        private static bool ExpandCore(ImageDirs? dirs, string windowsDir, string text,
+                                       out string expanded, out string leftover, out string error)
+        {
+            expanded = text ?? "";
+            leftover = "";
+            error = "";
+
+            try
+            {
+                var lf = new char[LeftoverCap];
+
+                int Call(char[]? buf, uint cap, out uint len, out uint lfLen)
+                {
+                    if (dirs is { } d)
+                        return OcidExpandMacrosEx(windowsDir ?? "", d.Pf, d.PfX86, d.Cf, d.Pd, d.Users,
+                                                  text ?? "", buf, cap, out len, lf, LeftoverCap, out lfLen);
+                    return OcidExpandMacros(windowsDir ?? "", text ?? "",
+                                            buf, cap, out len, lf, LeftoverCap, out lfLen);
+                }
+
+                int rc = Call(Array.Empty<char>(), 0, out uint need, out _);
+                if (rc == (int)Rc.Buffer)
+                {
+                    // `need` 已是"不含结尾 NUL 的字符数"（C++ 侧 CopyOutStr 的约定）。
+                    var buf = new char[need + 1];
+                    rc = Call(buf, (uint)buf.Length, out need, out _);
+                    if (rc == (int)Rc.Ok) expanded = new string(buf, 0, (int)need);
+                }
+                else if (rc == (int)Rc.Ok)
+                {
+                    expanded = "";
+                }
+
+                if (rc != (int)Rc.Ok)
+                {
+                    error = RcText(rc, new char[ErrCap]);
+                    return false;
+                }
+
+                leftover = CStr(lf);
+                return true;
+            }
+            catch (DllNotFoundException ex) { error = $"未找到原生库：{ex.Message}"; return false; }
+            catch (EntryPointNotFoundException ex) { error = $"原生库缺少宏展开导出（版本不同步）：{ex.Message}"; return false; }
+            catch (BadImageFormatException) { error = "架构不匹配：OcidServicing.dll 位数与本进程不同"; return false; }
+            catch (Exception ex) { error = ex.Message; return false; }
+        }
+
+        /// <summary>已知的 <c>$(runtime.*)</c> 宏名（<c>;</c> 分隔），工具/诊断用。</summary>
+        public static string KnownMacroNames()
+        {
+            try
+            {
+                var buf = new char[1024];
+                int rc = OcidKnownMacroNames(buf, (uint)buf.Length, out uint len);
+                return rc == (int)Rc.Ok ? new string(buf, 0, (int)len) : "";
+            }
+            catch { return ""; }
         }
 
         private static string CStr(char[] buf)

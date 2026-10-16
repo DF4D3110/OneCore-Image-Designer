@@ -343,6 +343,11 @@ namespace OneCore_Image_Designer.Services
             if (!Directory.Exists(configDir))
                 throw new DirectoryNotFoundException($"镜像里找不到 config 目录：{configDir}");
 
+            // `$(runtime.*)` 宏的基准目录。**只能这样算**：离线 hive 里根本没有
+            // SystemRoot / ProgramFiles / ProgramData（SYSTEM 的 Environment 只有
+            // windir=%SystemRoot% 这种循环项，且 CurrentControlSet 离线不存在）。
+            string windowsDir = Path.Combine(imageRoot.TrimEnd('\\'), "Windows");
+
             var list = new List<RegSetting>(settings ?? Array.Empty<RegSetting>());
             log?.Invoke($"[SMI] 待应用注册表设置 {list.Count} 条（镜像 {imageRoot}）");
 
@@ -353,7 +358,7 @@ namespace OneCore_Image_Designer.Services
             {
                 try
                 {
-                    if (ApplyOne(mount, s, log, dryRun)) written++;
+                    if (ApplyOne(mount, s, windowsDir, log, dryRun)) written++;
                 }
                 catch (Exception ex)
                 {
@@ -366,7 +371,8 @@ namespace OneCore_Image_Designer.Services
             return written;
         }
 
-        private static bool ApplyOne(OfflineHiveMountScope mount, RegSetting s, Action<string>? log, bool dryRun)
+        private static bool ApplyOne(OfflineHiveMountScope mount, RegSetting s, string windowsDir,
+                                     Action<string>? log, bool dryRun)
         {
             var (hive, relPath) = MapLogicalToHive(s.Root, s.SubKey);
             if (hive == null)
@@ -404,10 +410,42 @@ namespace OneCore_Image_Designer.Services
                 return false;
             }
 
+            // ── `$(runtime.*)` 宏：**先展开再编码** ──────────────────────────────
+            // 语料实测 5715 处值含宏（如 `$(runtime.system32)`）。原样写进 hive 一定是错的
+            // —— `%` 号不会被展开，落盘的是一串字面 `$(runtime.…)`。
+            // 展开表来自服务栈反编译（smiengine 的 ExpandDollarVar + winsockai 的 12 项表）
+            // 与目标镜像实测目录，见 Source\Native\...\include\ocid\MacroExpander.h。
+            string data = s.Data;
+            string macroLeftover = "";
+            if (s.HasMacro)
+            {
+                if (!OcidServicingNative.TryExpandMacros(windowsDir, s.Data, out string expanded,
+                                                         out macroLeftover, out string macroErr))
+                {
+                    // 展不开就**不写**：写半截路径比不写更坏（而且很难查）。
+                    log?.Invoke($"[SMI] ✗ 宏展开失败，**跳过不写**：{s.Root}\\{s.SubKey} " +
+                                $"[{valueDisplay}] — {macroErr}");
+                    return false;
+                }
+                data = expanded;
+
+                if (macroLeftover.Length > 0)
+                {
+                    // `$(string.*)` / `$(build.nttree)` / `$(resourceString.*)` 本来就不是路径宏，
+                    // 这里展开不了是正常的；报出来是为了不让人以为"所有宏都解决了"。
+                    log?.Invoke($"[SMI] ⚠ 仍含未展开的宏（非路径宏，原样写入）：" +
+                                $"{s.Root}\\{s.SubKey} [{valueDisplay}] — {macroLeftover}");
+                }
+                else if (!string.Equals(data, s.Data, StringComparison.Ordinal))
+                {
+                    log?.Invoke($"[SMI]   · 宏已展开：{Truncate(s.Data, 50)} ⇒ {Truncate(data, 80)}");
+                }
+            }
+
             bool exists = TryReadExistingValue(key.Handle, s.ValueName, out uint curType, out byte[] curData);
 
             if (!OcidServicingNative.TryResolveWrite(
-                    s.Mechanism, s.OperationHint, s.Owner, s.ValueType, s.Data,
+                    s.Mechanism, s.OperationHint, s.Owner, s.ValueType, data,
                     exists, curType, curData, out var decision, out string decideErr))
             {
                 log?.Invoke($"[SMI] ✗ 落地决策失败，**跳过不写**：{s.Root}\\{s.SubKey} [{valueDisplay}] " +
@@ -429,14 +467,6 @@ namespace OneCore_Image_Designer.Services
             {
                 // 仅排障用：非 CMI 那套（WCM/SMI）语义就是"设成这个值"，类型变了也照写。
                 log?.Invoke($"[SMI]   · 覆盖类型 {curType} ⇒ {decision.TypeCode}：{fullPath} [{valueDisplay}]");
-            }
-
-            if (s.HasMacro)
-            {
-                // 值里含 `$(...)` 宏（真实数据里 5715 处，如 `$(runtime.system32)`）。
-                // 这类值原样写下去一定是错的，但**我们还没有宏展开器**，所以先显式告警再写，
-                // 让上层能看见，而不是假装成功。⚠ 未完成项，勿当成已解决。
-                log?.Invoke($"[SMI] ⚠ 值含未展开的 $(…) 宏：{s.Root}\\{s.SubKey} [{valueDisplay}] = {Truncate(s.Data, 80)}");
             }
 
             byte[] bytes = decision.Data;

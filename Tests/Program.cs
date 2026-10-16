@@ -19,7 +19,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("SxS preview is non-executing and blocks unsafe scripts", () => { SxsPreview(); return Task.CompletedTask; }),
     ("OS generation XML regressions", () => { GenerationRegression(); return Task.CompletedTask; }),
     ("Validation rule families wire-up and hard-intercept templates", () => { RuleFamiliesRegression(); return Task.CompletedTask; }),
-    ("Ocid servicing native library (ABI, value encoding, CMI decisions)", () => { OcidServicingNativeAbi(); return Task.CompletedTask; })
+    ("Ocid servicing native library (ABI, value encoding, CMI decisions)", () => { OcidServicingNativeAbi(); return Task.CompletedTask; }),
+    ("Ocid $(runtime.*) macro expansion through the native library", () => { OcidMacroExpansion(); return Task.CompletedTask; })
 };
 
 var failures = new List<string>();
@@ -363,6 +364,66 @@ static void OcidServicingNativeAbi()
     // ⑥ 路径层数回归：原来写死 4 层往上，主程序布局（3 层）永远找不到工具。
     True(OcidSmiService.FindManifestTool() != null,
         "FindManifestTool() 没找到 ocid_manifest.exe（路径层数逻辑坏了）");
+}
+
+static void OcidMacroExpansion()
+{
+    True(OcidServicingNative.Available, "OcidServicing.dll 未找到（先跑 Source\\Native\\build-servicing.ps1）");
+
+    // $(runtime.*) 的基础路径来自**镜像自身** —— 离线 hive 里没有这些路径，所以 windowsDir
+    // 参数就是唯一来源。这里模拟离线镜像 P:\Windows（挂载出来的 8061 ARM 盘）。
+    const string Win = @"P:\Windows";
+
+    // ① 最常用的一个：Windows 目录本身。
+    True(OcidServicingNative.TryExpandMacros(Win, "$(runtime.windows)", out string x1, out string l1, out string e1),
+        "①失败：" + e1);
+    Equal(@"P:\Windows", x1);
+    Equal("", l1);
+
+    // ② 宏名**大小写不敏感**：清单里 $(runtime.Windows) 与 $(runtime.windows) 并存。
+    True(OcidServicingNative.TryExpandMacros(Win, "$(runtime.Windows)", out string x2, out _, out string e2),
+        "②失败：" + e2);
+    Equal(@"P:\Windows", x2);
+
+    // ③ system32 是**小写**拼上去的（不是 Win32 常见的 System32 大小写）——
+    //    这是照 smiengine!ExpandDollarVar / wcp 的权威表抄的，不是我们随手拼的。
+    True(OcidServicingNative.TryExpandMacros(Win, "$(runtime.system32)", out string x3, out _, out string e3),
+        "③失败：" + e3);
+    Equal(@"P:\Windows\system32", x3);
+
+    // ④ $(runtime.system) 是 **NTVDM 的 System** 目录，不是 system32 的别名。
+    //    实测依据：NTVDM 相关注册表里 COMMDLG.DLL / MMSYSTEM.DLL / keyboard.drv 等都在 <Windows>\System。
+    True(OcidServicingNative.TryExpandMacros(Win, "$(runtime.system)", out string x4, out _, out string e4),
+        "④失败：" + e4);
+    Equal(@"P:\Windows\System", x4);
+
+    // ⑤ 一个值里可以混多个宏与普通文本，非宏部分必须原样保留。
+    True(OcidServicingNative.TryExpandMacros(Win, @"pre $(runtime.windows)\Sysnative post",
+            out string x5, out _, out string e5), "⑤失败：" + e5);
+    Equal(@"pre P:\Windows\Sysnative post", x5);
+
+    // ⑥ 调用方没有覆盖时，Program Files 由 windowsDir 的盘符推导（P:\Program Files）。
+    True(OcidServicingNative.TryExpandMacros(Win, @"$(runtime.programFiles)\Sub",
+            out string x6, out _, out string e6), "⑥失败：" + e6);
+    Equal(@"P:\Program Files\Sub", x6);
+
+    // ⑦ 镜像自己声明了目录（清单里 x:\Program Files 那种占位盘符）⇒ 必须用声明值覆盖。
+    True(OcidServicingNative.TryExpandMacrosEx(Win, @"X:\Program Files", "", "", "", "",
+            @"$(runtime.programFiles)\App", out string x7, out _, out string e7), "⑦失败：" + e7);
+    Equal(@"X:\Program Files\App", x7);
+
+    // ⑧ 非路径宏（$(string.*)、$(build.nttree) 等）**不是错误**：原样保留，
+    //    并通过 leftover 报给调用方，由产品侧决定要不要告警。
+    True(OcidServicingNative.TryExpandMacros(Win, "$(string.foo)", out string x8, out string l8, out string e8),
+        "⑧失败（未展开的宏不该算错误）：" + e8);
+    Equal("$(string.foo)", x8);
+    True(l8.Contains("$(string.foo)"), "⑧ leftover 应报出未展开的宏，实际：" + l8);
+
+    // ⑨ 宏名清单与产品侧诊断共用同一份原生表，数量固定 23（`;` 分隔）。
+    string names = OcidServicingNative.KnownMacroNames();
+    True(names.Contains("runtime.system32"), "⑨ 缺少 runtime.system32：" + names);
+    True(names.Contains("runtime.public"), "⑨ 缺少 runtime.public：" + names);
+    Equal(23, names.Split(';', StringSplitOptions.RemoveEmptyEntries).Length);
 }
 
 static byte[] Bytes(string s)

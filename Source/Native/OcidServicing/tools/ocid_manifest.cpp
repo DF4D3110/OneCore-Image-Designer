@@ -14,6 +14,7 @@
 // 输出约定：**数据走 stdout，诊断走 stderr** —— 这样 C# 侧可以干净地消费 stdout。
 
 #include "ocid/ConsoleUtf8.h"
+#include "ocid/MacroExpander.h"
 #include "ocid/Manifest.h"
 #include "ocid/RegistryValue.h"
 #include "ocid/WcmSchema.h"
@@ -452,6 +453,52 @@ static int CmdDumpXsd(const std::wstring& manifest, const std::wstring& outPath)
 #endif
 }
 
+// ── expand / macros ──────────────────────────────────────────────────────
+//
+// 清单里的 `$(runtime.*)` 展开。基础路径从 Windows 目录推（离线服务时形如
+// `P:\Windows`），因为离线镜像的 SYSTEM hive 里**没有** SystemRoot / ProgramFiles /
+// ProgramData（实测只有 windir=%SystemRoot% 这种循环项，且 CurrentControlSet 离线不存在）。
+// 详见 `ocid/MacroExpander.h`。
+
+static int CmdExpand(const std::wstring& windowsDir, const std::wstring& text, bool showPaths)
+{
+    const RuntimePaths p = RuntimePaths::FromWindowsDir(windowsDir);
+
+    if (showPaths) {
+        Err("windowsDir        = " + ToUtf8(p.windows));
+        Err("bootDrive         = " + ToUtf8(p.bootDrive));
+        Err("programFiles      = " + ToUtf8(p.programFiles));
+        Err("programFilesX86   = " + ToUtf8(p.programFilesX86));
+        Err("commonFiles       = " + ToUtf8(p.commonFiles));
+        Err("programData       = " + ToUtf8(p.programData));
+        Err("users             = " + ToUtf8(p.users));
+        Err("public            = " + ToUtf8(p.publicDir));
+        Err("startMenu         = " + ToUtf8(p.startMenu));
+    }
+
+    const MacroExpansion r = ExpandMacros(text, p);
+    OutLn(ToUtf8(r.text));
+
+    if (!r.unresolved.empty()) {
+        std::string s;
+        for (size_t i = 0; i < r.unresolved.size(); ++i) {
+            if (i) s += ";";
+            s += ToUtf8(r.unresolved[i]);
+        }
+        Err("未展开的宏（非路径/未知，原样保留）: " + s);
+    }
+    return 0;
+}
+
+static int CmdMacros()
+{
+    size_t n = 0;
+    const wchar_t* const* names = KnownRuntimeMacroNames(&n);
+    for (size_t i = 0; i < n; ++i)
+        OutLn(ToUtf8(std::wstring(names[i])));
+    return 0;
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 
 static void Usage()
@@ -463,6 +510,8 @@ static void Usage()
     OutLn("  ocid_manifest scan <dir> [maxFiles]");
     OutLn("  ocid_manifest dump-xsd <manifest> <outFile>");
     OutLn("  ocid_manifest verify-names <dir> [maxFiles]   (check component names against real file names)");
+    OutLn("  ocid_manifest expand <windowsDir> <text...>   expand $(runtime.*); --paths to also show base paths");
+    OutLn("  ocid_manifest macros                          list known $(runtime.*) macro names");
     OutLn("");
     OutLn("Data goes to stdout, diagnostics to stderr.");
 }
@@ -509,6 +558,20 @@ int main(int argc, char** argv)
 
     if (cmd == L"dump-xsd" && argc >= 4)
         return CmdDumpXsd(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]));
+
+    if (cmd == L"expand" && argc >= 4) {
+        bool paths = false;
+        std::wstring text;
+        for (int i = 3; i < argc; ++i) {
+            if (std::string(argv[i]) == "--paths") { paths = true; continue; }
+            if (!text.empty()) text += L' ';
+            text += FromUtf8OrAnsi(argv[i]);
+        }
+        return CmdExpand(FromUtf8OrAnsi(argv[2]), text, paths);
+    }
+
+    if (cmd == L"macros")
+        return CmdMacros();
 
     Usage();
     return 1;
