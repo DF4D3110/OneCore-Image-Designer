@@ -18,8 +18,9 @@
 //   <securityDescriptorDefinition> 定义    47986 条
 // 也就是说 ACL 不是边角料，漏掉它等于**所有键/目录/文件的安全属性都不对**。
 //
-// 本模块只负责"文本 → 描述符"，不碰注册表；落盘（RegSetKeySecurity）由调用方做。
-// 这样绝大多数逻辑可以在**不需要管理员、不需要挂载 hive** 的情况下被测试。
+// 本模块负责"文本 → 描述符"，并提供把它写进**已打开的键句柄**的动作与回读；
+// hive 的挂载/卸载仍由调用方负责（见 Services/OcidSmiService.cs）。这样绝大多数逻辑
+// 可以在**不需要管理员、不需要挂载 hive** 的情况下被测试。
 //
 #include <map>
 #include <string>
@@ -95,5 +96,39 @@ namespace ocid {
     /// 自相对 SD 字节 → SDDL 文本（回读校验、日志、测试用）。
     bool SelfRelativeToSddl(const unsigned char* data, std::size_t len,
                             std::wstring& out, std::wstring& err);
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 落盘：把 SDDL 应用到键（RegSetKeySecurity）与回读
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// 这段 SDDL 需要设置哪些 `SECURITY_INFORMATION` 位。
+    ///
+    /// 由 `SddlInfo` 的**段存在性**决定，而不是"全都设一遍" —— 清单里只写了 `D:` 的段落，
+    /// 就不该去动 owner/group；否则会把镜像里原有的 owner 覆盖成当前用户。
+    unsigned SddlSecurityInformation(const SddlInfo& info);
+
+    enum class SddlApplyResult
+    {
+        Applied,         // 已写入
+        SkippedInherit,  // sddl == "(inherit)"：按语义跳过，**不是**失败
+        Failed,          // 失败，err 里有原因
+    };
+
+    /// 把一个 SDDL 应用到已打开的键句柄（`HKEY`，以 `void*` 传以避免头文件暴露 windows.h）。
+    ///
+    /// 需要的特权（缺了会返回 `ERROR_ACCESS_DENIED`，由调用方先行启用）：
+    ///   · 写 owner（`O:`）        → `SeRestorePrivilege`（或 `SeTakeOwnershipPrivilege`）
+    ///   · 写 SACL（`S:`）         → `SeSecurityPrivilege`
+    ///   · 只写 DACL（`D:`）       → 键的 owner 即可，通常不需要额外特权
+    SddlApplyResult ApplySddlToKey(void* keyHandle, const std::wstring& sddl, std::wstring& err);
+
+    /// 回读键的安全描述符并转成 SDDL 文本。
+    ///
+    /// 【为什么必须能回读】"写进去"不算完成，"读回来逐字符对上"才算 —— 与注册表值那边
+    /// 同一条规矩（见 RegistryValue.h 的三重证据）。`informationBits` 为 0 时读
+    /// OWNER|GROUP|DACL：读 SACL 需要 `SeSecurityPrivilege`，拿不到是常态，所以默认不读，
+    /// 由调用方按需显式传入 SECURITY_INFORMATION 位。
+    bool ReadKeySddl(void* keyHandle, unsigned informationBits,
+                     std::wstring& out, std::wstring& err);
 
 } // namespace ocid

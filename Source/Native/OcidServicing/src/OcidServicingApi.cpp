@@ -26,6 +26,7 @@
 #include "ocid/CmiInstaller.h"
 #include "ocid/MacroExpander.h"
 #include "ocid/RegistryValue.h"
+#include "ocid/SecurityDescriptor.h"
 #include "ocid/WcmSchema.h"
 
 #include <cstring>
@@ -346,6 +347,100 @@ extern "C" {
             all += names[i];
         }
         return CopyOutStr(all, outBuf, outCap, outLen);
+    }
+
+    /// 把 SDDL 写到**已打开的键句柄**上（`RegSetKeySecurity`）。
+    ///
+    /// `keyHandle` 是 `HKEY`（C# 侧用 `RegistryKey.Handle.DangerousGetHandle()`）。
+    /// `*outApplied`：1 = 已写入，0 = 该 SDDL 是 `(inherit)` 被按语义跳过 —— **两者都算成功**，
+    /// 把"跳过"混进失败里会让上层的计数失去意义。
+    ///
+    /// 返回 0 成功 / 1 参数错 / 4 规则或 Win32 失败（原因在 errBuf）。
+    int __cdecl OcidApplyKeySddl(void* keyHandle, const wchar_t* sddl,
+                                 int* outApplied,
+                                 wchar_t* errBuf, unsigned int errCap)
+    {
+        if (outApplied) *outApplied = 0;
+        if (!keyHandle || !sddl) return OCID_ERR_ARGUMENT;
+        try
+        {
+            std::wstring err;
+            const SddlApplyResult r = ApplySddlToKey(keyHandle, W(sddl), err);
+            if (r == SddlApplyResult::SkippedInherit) return OCID_OK;   // 合法跳过
+            if (r == SddlApplyResult::Failed)
+            {
+                SetErr(errBuf, errCap, err);
+                return OCID_ERR_BAD_VALUE;
+            }
+            if (outApplied) *outApplied = 1;
+            return OCID_OK;
+        }
+        catch (...)
+        {
+            SetErr(errBuf, errCap, L"应用 SDDL 时发生未预期异常");
+            return OCID_ERR_INTERNAL;
+        }
+    }
+
+    /// 回读键的安全描述符 → SDDL 文本（`informationBits` 为 0 ⇒ OWNER|GROUP|DACL）。
+    int __cdecl OcidReadKeySddl(void* keyHandle, unsigned int informationBits,
+                                wchar_t* outBuf, unsigned int outCap, unsigned int* outLen,
+                                wchar_t* errBuf, unsigned int errCap)
+    {
+        if (outLen) *outLen = 0;
+        if (!keyHandle) return OCID_ERR_ARGUMENT;
+        try
+        {
+            std::wstring sddl, err;
+            if (!ReadKeySddl(keyHandle, informationBits, sddl, err))
+            {
+                SetErr(errBuf, errCap, err);
+                return OCID_ERR_BAD_VALUE;
+            }
+            return CopyOutStr(sddl, outBuf, outCap, outLen);
+        }
+        catch (...)
+        {
+            SetErr(errBuf, errCap, L"回读安全描述符时发生未预期异常");
+            return OCID_ERR_INTERNAL;
+        }
+    }
+
+    /// SDDL 的文本级解读（段存在性 / ACE 计数 / 需设置的 SECURITY_INFORMATION 位）。
+    /// 供上层在落盘前决策与告警，不碰注册表。
+    int __cdecl OcidDescribeSddl(const wchar_t* sddl,
+                                 int* outHasOwner, int* outHasGroup, int* outHasDacl, int* outHasSacl,
+                                 int* outDaclProtected, int* outDaclNoAccessControl,
+                                 int* outDaclAceCount, int* outSaclAceCount,
+                                 unsigned int* outSecurityInformation,
+                                 wchar_t* errBuf, unsigned int errCap)
+    {
+        if (!sddl) return OCID_ERR_ARGUMENT;
+        try
+        {
+            SddlInfo info;
+            std::wstring err;
+            if (!DescribeSddl(W(sddl), info, err))
+            {
+                SetErr(errBuf, errCap, err);
+                return OCID_ERR_BAD_VALUE;
+            }
+            if (outHasOwner) *outHasOwner = info.hasOwner ? 1 : 0;
+            if (outHasGroup) *outHasGroup = info.hasGroup ? 1 : 0;
+            if (outHasDacl)  *outHasDacl  = info.hasDacl  ? 1 : 0;
+            if (outHasSacl)  *outHasSacl  = info.hasSacl  ? 1 : 0;
+            if (outDaclProtected) *outDaclProtected = info.daclProtected ? 1 : 0;
+            if (outDaclNoAccessControl) *outDaclNoAccessControl = info.daclNoAccessControl ? 1 : 0;
+            if (outDaclAceCount) *outDaclAceCount = info.daclAceCount;
+            if (outSaclAceCount) *outSaclAceCount = info.saclAceCount;
+            if (outSecurityInformation) *outSecurityInformation = SddlSecurityInformation(info);
+            return OCID_OK;
+        }
+        catch (...)
+        {
+            SetErr(errBuf, errCap, L"解读 SDDL 时发生未预期异常");
+            return OCID_ERR_INTERNAL;
+        }
     }
 
 } // extern "C"

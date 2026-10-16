@@ -334,6 +334,140 @@ int main()
         Check(!SelfRelativeToSddl(tiny, sizeof(tiny), out, err),    "太短被拒");
     }
 
+    // ── 6. 落盘前：SECURITY_INFORMATION 位要按"段存在性"选，不能一律全设 ──────
+    //
+    // 为什么这条重要：清单里绝大多数键的 SDDL 只写 `D:`。如果一律按
+    // OWNER|GROUP|DACL|SACL 设一遍，就会把镜像里原有的 owner 覆盖成当前用户 ——
+    // 那是**静默改坏**，而且改的是安全属性。
+    {
+        SddlInfo i;
+        std::wstring e;
+
+        Check(DescribeSddl(L"D:P(A;;FA;;;SY)", i, e), "D: 段可解析");
+        CheckInt((int)SddlSecurityInformation(i), (int)DACL_SECURITY_INFORMATION,
+                 "只写 D: ⇒ 只设 DACL 位");
+
+        Check(DescribeSddl(L"O:BAG:SYD:(A;;FA;;;SY)", i, e), "O:G:D: 可解析");
+        CheckInt((int)SddlSecurityInformation(i),
+                 (int)(OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION),
+                 "O:G:D: ⇒ owner+group+dacl 三位，不含 SACL");
+
+        Check(DescribeSddl(L"S:(AU;SA;FA;;;SY)", i, e), "S: 段可解析");
+        CheckInt((int)SddlSecurityInformation(i), (int)SACL_SECURITY_INFORMATION,
+                 "只写 S: ⇒ 只设 SACL 位");
+    }
+
+    // ── 7. 真正落盘到键，再读回来比对（HKCU，不需要管理员） ─────────────────
+    //
+    // 【为什么必须读回】写进去不算完成。这条用例的目标是把"写—读回—结构与原文一致"
+    // 变成一个可重复的断言，而不是靠一次手工 reg 观察。
+    // 只设 DACL 时不需要任何特权（键的 owner 天然可以改自己的 DACL），
+    // 所以这条用例在普通权限下也能跑 —— owner/SACL 需要 SeRestore/SeSecurity，另测。
+    {
+        wchar_t sub[160];
+        swprintf(sub, 160, L"Software\\OcidSddlTest_%lu", (unsigned long)GetCurrentProcessId());
+
+        HKEY root = nullptr;
+        const LONG cr = RegCreateKeyExW(HKEY_CURRENT_USER, sub, 0, nullptr,
+                                        REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, nullptr,
+                                        &root, nullptr);
+        if (cr != ERROR_SUCCESS)
+        {
+            printf("  [skip] 无法创建测试键（Win32 %ld）—— 跳过落盘用例\n", (long)cr);
+        }
+        else
+        {
+            std::wstring err;
+
+            // 先记下写入前的 owner/group，用来证明"只设 DACL 时它们没被动过"。
+            std::wstring fullBefore;
+            SddlInfo ib, ia;
+            const bool beforeOk = ReadKeySddl(root, 0, fullBefore, err)
+                               && DescribeSddl(fullBefore, ib, err);
+            Check(beforeOk, "新建键可以回读安全描述符（含 O:/G:/D:）");
+
+            std::wstring daclOnly;
+            Check(ReadKeySddl(root, DACL_SECURITY_INFORMATION, daclOnly, err),
+                  "可以只回读 DACL");
+            Check(daclOnly.find(L"D:") != std::wstring::npos, "回读的 DACL 段存在");
+
+            // 目标：受保护的 DACL（D:P = 不继承父级）+ 三条 ACE。
+            // 特意给 OW（Owner Rights，即当前 owner）全权，既验证 `P` 与 ACE 计数，
+            // 又保证这条用例自己还能把这个键删掉（否则会把测试环境锁死）。
+            const std::wstring target = L"D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)";
+            const SddlApplyResult ar = ApplySddlToKey(root, target, err);
+            if (ar != SddlApplyResult::Applied)
+                printf("         原因：%s\n", ToUtf8(err).c_str());
+            Check(ar == SddlApplyResult::Applied, "D:P 的 DACL 写入成功");
+
+            std::wstring back;
+            if (!ReadKeySddl(root, DACL_SECURITY_INFORMATION, back, err))
+                printf("         回读失败：%s\n", ToUtf8(err).c_str());
+            Check(!back.empty(), "写入后可以回读 DACL");
+
+            SddlInfo want, got;
+            const bool shapeOk = DescribeSddl(target, want, err)
+                              && DescribeSddl(back, got, err)
+                              && SameShape(want, got);
+            if (!shapeOk)
+                printf("         写入 = %s\n         回读 = %s\n",
+                       ToUtf8(target).c_str(), ToUtf8(back).c_str());
+            Check(shapeOk, "回读的结构与写入的 SDDL 完全一致");
+
+            Check(got.daclProtected, "回读的 DACL 带保护标志 P（不继承父级）");
+            CheckInt(got.daclAceCount, 3, "回读的 DACL ACE 数 = 3");
+
+            std::wstring fullAfter;
+            Check(ReadKeySddl(root, 0, fullAfter, err) && DescribeSddl(fullAfter, ia, err),
+                  "写入后仍可回读完整描述符");
+            Check(ib.ownerSid == ia.ownerSid && ib.groupSid == ia.groupSid,
+                  "只设 DACL 位 ⇒ owner/group 没有被触碰");
+
+            // `(inherit)` 是"保持继承"，跳过是正确行为，绝不能被算成失败。
+            std::wstring e2;
+            Check(ApplySddlToKey(root, L"(inherit)", e2) == SddlApplyResult::SkippedInherit,
+                  "(inherit) 被判为跳过而不是失败");
+            Check(e2.empty(), "(inherit) 跳过时不产生错误文本");
+
+            std::wstring e3;
+            Check(ApplySddlToKey(nullptr, L"D:P(A;;FA;;;SY)", e3) == SddlApplyResult::Failed,
+                  "空键句柄被拒");
+            Check(!e3.empty(), "空句柄失败时给出原因");
+
+            Check(ApplySddlToKey(root, L"这不是 SDDL", e3) == SddlApplyResult::Failed,
+                  "畸形 SDDL 被拒");
+
+            // 【最容易踩的坑，必须钉住】句柄上**必须有 WRITE_DAC**。
+            // KEY_WRITE(0x20006) 里**没有** WRITE_DAC(0x40000)（含它的是 KEY_ALL_ACCESS），
+            // 拿这种句柄调 RegSetKeySecurity 只会得到 ERROR_ACCESS_DENIED —— 症状像"缺特权"，
+            // 实际是句柄访问权不够。C# 侧就栽过一次：CreateSubKey 的句柄全挂，
+            // 换成显式请求 WRITE_DAC 重开就通了。这条用例钉住"报错必须指对方向"。
+            {
+                HKEY weak = nullptr;
+                if (RegOpenKeyExW(HKEY_CURRENT_USER, sub, 0, KEY_WRITE, &weak) == ERROR_SUCCESS)
+                {
+                    std::wstring e4;
+                    const SddlApplyResult weakAr =
+                        ApplySddlToKey(weak, L"D:P(A;;FA;;;SY)", e4);
+                    Check(weakAr == SddlApplyResult::Failed,
+                          "只有 KEY_WRITE（无 WRITE_DAC）的句柄改不了 DACL");
+                    Check(e4.find(L"WRITE_DAC") != std::wstring::npos,
+                          "该失败的原因指向 WRITE_DAC，而不是笼统一句“缺特权”");
+                    RegCloseKey(weak);
+                }
+                else
+                {
+                    printf("  [skip] 无法以 KEY_WRITE 打开测试键\n");
+                }
+            }
+
+            RegDeleteTreeW(HKEY_CURRENT_USER, sub);
+            RegCloseKey(root);
+            Check(RegOpenKeyExW(HKEY_CURRENT_USER, sub, 0, KEY_READ, &root) != ERROR_SUCCESS,
+                  "测试键已清理（不留在用户注册表里）");
+        }
+    }
+
     printf("\n通过 %d / 失败 %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

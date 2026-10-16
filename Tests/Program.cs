@@ -21,7 +21,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Validation rule families wire-up and hard-intercept templates", () => { RuleFamiliesRegression(); return Task.CompletedTask; }),
     ("Ocid servicing native library (ABI, value encoding, CMI decisions)", () => { OcidServicingNativeAbi(); return Task.CompletedTask; }),
     ("Ocid $(runtime.*) macro expansion through the native library", () => { OcidMacroExpansion(); return Task.CompletedTask; }),
-    ("Ocid registryKeys wire format (key-only keys and key SDDL)", () => { OcidRegistryOpShape(); return Task.CompletedTask; })
+    ("Ocid registryKeys wire format (key-only keys and key SDDL)", () => { OcidRegistryOpShape(); return Task.CompletedTask; }),
+    ("Ocid key SDDL is applied and verified by read-back", () => { OcidSddlApplyAndReadback(); return Task.CompletedTask; }),
+    ("Ocid key SDDL survives an offline hive load/unload cycle", () => { OcidSddlPersistsInOfflineHive(); return Task.CompletedTask; })
 };
 
 var failures = new List<string>();
@@ -365,6 +367,200 @@ static void OcidServicingNativeAbi()
     // ⑥ 路径层数回归：原来写死 4 层往上，主程序布局（3 层）永远找不到工具。
     True(OcidSmiService.FindManifestTool() != null,
         "FindManifestTool() 没找到 ocid_manifest.exe（路径层数逻辑坏了）");
+}
+
+/// <summary>
+/// 安全描述符（SDDL）真的落到**键**上，并且写完立刻回读比对。
+/// </summary>
+/// <remarks>
+/// 为什么在 HKCU 下测、而不是造一个 hive 文件：这里要验的是 C# ↔ 原生的**接线**
+/// （导出名、句柄传递、三态结果、回读路径、错误文本）。注册表语义本身已在
+/// `Source\Native\OcidServicing\tests\securitydescriptor_tests.cpp` 里对真实键验过；
+/// 而 "离线 hive" 与 "活注册表" 走的是同一套内核代码路径（差别只在 hive 从哪来）。
+/// HKCU 可写可删，不会碰到别人的键。
+/// </remarks>
+static void OcidSddlApplyAndReadback()
+{
+    True(OcidServicingNative.Available, "OcidServicing.dll 未找到（先跑 Source\\Native\\build-servicing.ps1）");
+
+    // ① 文本解读（不碰注册表）
+    const string sddl = "D:P(A;;GA;;;SY)(A;;GR;;;BA)(A;;GR;;;BU)";
+    True(OcidServicingNative.TryDescribeSddl(sddl, out var facts, out string e1), "解读 SDDL 失败：" + e1);
+    True(facts.HasDacl, "应识别出 D: 段");
+    Equal(false, facts.HasOwner);
+    Equal(false, facts.HasGroup);
+    Equal(true, facts.DaclProtected);
+    Equal(3, facts.DaclAceCount);
+    Equal(0, facts.SaclAceCount);
+
+    string sub = "Software\\OCID_SelfTest\\Sddl_" + Guid.NewGuid().ToString("N");
+    var hkcu = Microsoft.Win32.Registry.CurrentUser;
+    try
+    {
+        using (var key = hkcu.CreateSubKey(sub, writable: true))
+        {
+            True(key != null, "建测试键失败：" + sub);
+            IntPtr raw = key!.Handle.DangerousGetHandle();
+
+            // ② 先记下 owner/group，待会儿要证明"只设 D: 没碰它们"
+            True(OcidServicingNative.TryReadKeySddl(raw,
+                     OcidServicingNative.SecInfo.Owner | OcidServicingNative.SecInfo.Group,
+                     out string ownBefore, out string e0), "回读 owner/group 失败：" + e0);
+
+            // ③ 走**产品路径**：ApplyAndVerifyKeySddl 自己以 WRITE_DAC 重开句柄，
+            //    写完立刻回读比对。写值用的 CreateSubKey 句柄**没有** WRITE_DAC，
+            //    这正是最早让 C# 侧全挂（ERROR_ACCESS_DENIED 5）的那个坑。
+            var r = OcidSmiService.ApplyAndVerifyKeySddl(hkcu, sub, sddl);
+            True(r.Outcome == OcidServicingNative.SddlApplyOutcome.Applied,
+                 $"应写入成功：outcome={r.Outcome} err={r.Error}");
+            True(r.Verified == true,
+                 $"回读比对应一致：verified={r.Verified} back={r.Got} err={r.Error}");
+            True(r.Got.Contains("D:", StringComparison.Ordinal), "回读应含 D: 段：" + r.Got);
+
+            // ④ 只设 D: ⇒ owner/group 一字未动
+            True(OcidServicingNative.TryReadKeySddl(raw,
+                     OcidServicingNative.SecInfo.Owner | OcidServicingNative.SecInfo.Group,
+                     out string ownAfter, out string e4), "回读 owner/group 失败：" + e4);
+            Equal(ownBefore, ownAfter);
+
+            // ⑤ `(inherit)` ⇒ 跳过（合法结果），不是失败
+            Equal(OcidServicingNative.SddlApplyOutcome.SkippedInherit,
+                  OcidSmiService.ApplyAndVerifyKeySddl(hkcu, sub, "(inherit)").Outcome);
+
+            // ⑥ 畸形 SDDL ⇒ 失败**且必须给出原因**（"失败了但不知道为什么"等于没报）
+            var bad = OcidSmiService.ApplyAndVerifyKeySddl(hkcu, sub, "D:(A;;GA;;;SY");
+            Equal(OcidServicingNative.SddlApplyOutcome.Failed, bad.Outcome);
+            True(bad.Error.Length > 0, "失败必须带原因");
+        }
+    }
+    finally
+    {
+        // 绝不能在用户注册表里留测试键。注意：上面写进去的 `D:P(...)` 把当前用户
+        // 挡在门外了（BA/BU 只有读权）—— 这恰好**证明** DACL 真写进去了。
+        // 但 owner 恒有 WRITE_DAC，先给自己补一条再删，才删得掉。
+        try
+        {
+            OcidSmiService.ApplyAndVerifyKeySddl(hkcu, sub, "D:(A;;KA;;;WD)");
+            hkcu.DeleteSubKeyTree(sub, throwOnMissingSubKey: false);
+
+            // 容器键（Software\OCID_SelfTest）是 CreateSubKey 顺手建的，也要收掉 ——
+            // 用户注册表里不该留下任何 OCID 痕迹。
+            using (var parent = hkcu.OpenSubKey("Software\\OCID_SelfTest"))
+            {
+                if (parent != null && parent.SubKeyCount == 0 && parent.ValueCount == 0)
+                    hkcu.DeleteSubKey("Software\\OCID_SelfTest", throwOnMissingSubKey: false);
+            }
+        }
+        catch { /* 清理本身失败不影响上面的结论 */ }
+    }
+
+    True(hkcu.OpenSubKey(sub) == null, "测试键没清理掉：" + sub);
+}
+
+static bool Reg(params string[] args)
+{
+    var psi = new System.Diagnostics.ProcessStartInfo("reg.exe")
+    {
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+    };
+    foreach (string a in args) psi.ArgumentList.Add(a);
+    using var p = System.Diagnostics.Process.Start(psi);
+    if (p == null) return false;
+    p.StandardOutput.ReadToEnd();
+    p.StandardError.ReadToEnd();
+    p.WaitForExit();
+    return p.ExitCode == 0;
+}
+
+/// <summary>
+/// DACL 是不是真的**落进 hive 文件**了（而不是只活在内存里）。
+/// </summary>
+/// <remarks>
+/// 做法：拿一份最小真实 hive（`reg save HKLM\SAM` 出来的副本）当离线 hive：
+/// 载入 → 建键 → 走产品路径写 SDDL（写完回读）→ **卸载** → **重新载入同一个文件** → 再回读。
+/// 只有跨载入周期仍在，才算落盘。
+///
+/// 两个坑：① hive 文件必须本身已经是合法 hive（`reg save` 一份现成的最省事，
+/// 空文件 load 不了）；② **卸载前必须没有任何键句柄**，否则 `reg unload` 报
+/// "拒绝访问"（实测踩到，GC 之后立刻就能卸）。
+/// 载入/卸载需要管理员；拿不到就明确 skip，不假装通过。
+/// </remarks>
+static void OcidSddlPersistsInOfflineHive()
+{
+    True(OcidServicingNative.Available, "OcidServicing.dll 未找到（先跑 Source\\Native\\build-servicing.ps1）");
+
+    string tmp = Path.Combine(Path.GetTempPath(),
+                              "ocid_acl_probe_" + Guid.NewGuid().ToString("N") + ".hive");
+    const string Mount = "OCID_ACL_PROBE";
+    const string Sub = "Probe\\SddlPersisted";
+    const string Sddl = "D:P(A;;GA;;;SY)(A;;GR;;;BA)";
+
+    if (!Reg("save", @"HKLM\SAM", tmp, "/y"))
+    {
+        Console.WriteLine("  [skip] reg save 不出探针 hive（需要管理员）—— 跳过落盘持久化用例");
+        return;
+    }
+
+    bool loaded = false;
+    try
+    {
+        if (!Reg("load", @"HKLM\" + Mount, tmp))
+        {
+            Console.WriteLine("  [skip] 载入探针 hive 失败（需要管理员）—— 跳过");
+            return;
+        }
+        loaded = true;
+
+        string rel = Mount + "\\" + Sub;
+
+        // ① 在**离线 hive** 里建键（SMI 的服务路径也是这么建的）
+        using (var k = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(rel, writable: true))
+            True(k != null, "在载入的离线 hive 里建键失败：" + rel);
+
+        // ② 产品路径：写 SDDL + 立刻回读比对
+        var r = OcidSmiService.ApplyAndVerifyKeySddl(
+                    Microsoft.Win32.Registry.LocalMachine, rel, Sddl);
+        True(r.Outcome == OcidServicingNative.SddlApplyOutcome.Applied,
+             $"离线 hive 里写 DACL 应成功：outcome={r.Outcome} err={r.Error}");
+        True(r.Verified == true,
+             $"离线 hive 里写完回读应一致：back={r.Got} err={r.Error}");
+
+        // 卸载前把句柄放干净
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        True(Reg("unload", @"HKLM\" + Mount),
+             "卸载离线 hive（句柄没关干净时这一步会失败）");
+        loaded = false;
+
+        // ③ 重新载入**同一个文件**：DACL 还在，才叫落进 hive
+        True(Reg("load", @"HKLM\" + Mount, tmp), "重新载入同一份 hive 文件");
+        loaded = true;
+
+        using (var k2 = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(rel))
+        {
+            True(k2 != null, "重载后键还在（顺便证明这次写真的进了文件）");
+            IntPtr raw = k2!.Handle.DangerousGetHandle();
+
+            True(OcidServicingNative.TryReadKeySddl(raw, OcidServicingNative.SecInfo.Dacl,
+                     out string back, out string e3), "重载后回读 DACL 失败：" + e3);
+            True(OcidServicingNative.TryDescribeSddl(back, out var got, out string e4),
+                 "重载后回读的 SDDL 无法解读：" + e4);
+            Equal(true, got.DaclProtected);
+            Equal(2, got.DaclAceCount);
+        }
+    }
+    finally
+    {
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        if (loaded) Reg("unload", @"HKLM\" + Mount);
+        try { File.Delete(tmp); } catch { /* 临时 hive 删不掉不影响结论 */ }
+    }
 }
 
 static void OcidMacroExpansion()

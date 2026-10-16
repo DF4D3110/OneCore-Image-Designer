@@ -1,11 +1,13 @@
 //
 // SecurityDescriptor.cpp —— SDDL 文本解析 + 与 Win32 描述符二进制互转
 //
-// 分成两层，刻意分开：
+// 分成三层，刻意分开：
 //   1) DescribeSddl / ResolveSddl / IsInheritSddl —— 纯文本，零 API，可无管理员测试
-//   2) SddlToSelfRelative / SelfRelativeToSddl    —— 只有这两处碰 advapi32
+//   2) SddlToSelfRelative / SelfRelativeToSddl    —— 文本 ↔ 自相对二进制，碰 sddl.h
+//   3) ApplySddlToKey / ReadKeySddl               —— 落到**已打开的键**上并读回，碰 winreg
 //
-// 这样"决策"（要不要设、设什么、有什么风险）不与"编码"（SID/ACE 的二进制格式）耦合。
+// 这样"决策"（要不要设、设什么、有什么风险）既不与"编码"（SID/ACE 的二进制格式）耦合，
+// 也不与"挂哪个 hive、开哪个键"耦合。
 //
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -269,6 +271,107 @@ namespace ocid {
         out = text;
         LocalFree(text);
         return true;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 落盘：应用到键 + 回读
+    // ─────────────────────────────────────────────────────────────────────────
+
+    unsigned SddlSecurityInformation(const SddlInfo& info)
+    {
+        unsigned bits = 0;
+        if (info.hasOwner) bits |= OWNER_SECURITY_INFORMATION;
+        if (info.hasGroup) bits |= GROUP_SECURITY_INFORMATION;
+        if (info.hasDacl)  bits |= DACL_SECURITY_INFORMATION;
+        if (info.hasSacl)  bits |= SACL_SECURITY_INFORMATION;
+        return bits;
+    }
+
+    SddlApplyResult ApplySddlToKey(void* keyHandle, const std::wstring& sddl, std::wstring& err)
+    {
+        err.clear();
+
+        if (keyHandle == nullptr) { err = L"键句柄为空"; return SddlApplyResult::Failed; }
+
+        // `(inherit)` 的意思是"保持继承、别显式设置"，跳过是**正确行为**而不是失败。
+        if (IsInheritSddl(sddl)) return SddlApplyResult::SkippedInherit;
+
+        SddlInfo info;
+        std::wstring perr;
+        if (!DescribeSddl(sddl, info, perr)) {
+            err = L"SDDL 解析失败：" + perr;
+            return SddlApplyResult::Failed;
+        }
+
+        const unsigned bits = SddlSecurityInformation(info);
+        if (bits == 0) {
+            err = L"SDDL 里没有任何可设置的段（O:/G:/D:/S: 全缺）";
+            return SddlApplyResult::Failed;
+        }
+
+        std::vector<unsigned char> sd;
+        if (!SddlToSelfRelative(sddl, sd, perr)) {
+            err = L"SDDL 转自相对描述符失败：" + perr;
+            return SddlApplyResult::Failed;
+        }
+        if (sd.empty()) { err = L"自相对描述符为空"; return SddlApplyResult::Failed; }
+
+        const DWORD rc = ::RegSetKeySecurity(
+            static_cast<HKEY>(keyHandle), bits,
+            reinterpret_cast<PSECURITY_DESCRIPTOR>(sd.data()));
+
+        if (rc != ERROR_SUCCESS) {
+            err = L"RegSetKeySecurity 失败，Win32 错误 " + std::to_wstring(rc);
+            // ERROR_ACCESS_DENIED 有好几个**完全不同**的原因，必须分开说：混成一句"缺特权"
+            // 会把人引到错的方向。实测踩过：写 DACL 被拒，真正的原因是**句柄上没有 WRITE_DAC**，
+            // 而 `RegistryKey.CreateSubKey(..., writable: true)` 给的是 KEY_READ|KEY_WRITE，
+            // KEY_WRITE 的值是 0x20006，**不包含** WRITE_DAC(0x40000)（含它的是 KEY_ALL_ACCESS）。
+            // 只有特权是错的时候，"以 WRITE_DAC 重开键"才是白费力气。
+            if (rc == ERROR_ACCESS_DENIED) {
+                if (bits & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION)) {
+                    err += L"：句柄未请求 WRITE_DAC，或进程缺 SeRestorePrivilege（写 owner/group 用它）";
+                } else if (bits & SACL_SECURITY_INFORMATION) {
+                    err += L"：句柄未请求 WRITE_DAC，或进程缺 SeSecurityPrivilege（写 SACL 用它）";
+                } else {
+                    err += L"：句柄上缺 WRITE_DAC —— 注意 KEY_WRITE 里没有 WRITE_DAC 这一位，"
+                           L"打开键时必须显式请求 WRITE_DAC（或 KEY_ALL_ACCESS）";
+                }
+            }
+            return SddlApplyResult::Failed;
+        }
+        return SddlApplyResult::Applied;
+    }
+
+    bool ReadKeySddl(void* keyHandle, unsigned informationBits,
+                     std::wstring& out, std::wstring& err)
+    {
+        out.clear();
+        err.clear();
+
+        if (keyHandle == nullptr) { err = L"键句柄为空"; return false; }
+
+        // 默认不读 SACL：读它需要 SeSecurityPrivilege，拿不到是常态；
+        // 硬要读会让"验证"这一步在普通权限下整体失败，反而掩盖了 DACL 是否写对。
+        SECURITY_INFORMATION want = informationBits != 0
+            ? static_cast<SECURITY_INFORMATION>(informationBits)
+            : (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION);
+
+        DWORD need = 0;
+        DWORD rc = ::RegGetKeySecurity(static_cast<HKEY>(keyHandle), want, nullptr, &need);
+        if (rc != ERROR_INSUFFICIENT_BUFFER || need == 0) {
+            err = L"RegGetKeySecurity 探测长度失败，Win32 错误 " + std::to_wstring(rc);
+            return false;
+        }
+
+        std::vector<unsigned char> buf(need);
+        rc = ::RegGetKeySecurity(static_cast<HKEY>(keyHandle), want,
+                                 reinterpret_cast<PSECURITY_DESCRIPTOR>(buf.data()), &need);
+        if (rc != ERROR_SUCCESS) {
+            err = L"RegGetKeySecurity 失败，Win32 错误 " + std::to_wstring(rc);
+            return false;
+        }
+
+        return SelfRelativeToSddl(buf.data(), need, out, err);
     }
 
 } // namespace ocid

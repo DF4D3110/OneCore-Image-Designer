@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Text;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
@@ -388,14 +389,22 @@ namespace OneCore_Image_Designer.Services
             log?.Invoke($"[SMI] 待应用注册表设置 {list.Count} 条（镜像 {imageRoot}）");
 
             int written = 0;
-            int aclPending = 0;
+            var acl = new AclTracker();
+
+            // ACL 落盘要动特权：写 owner/group 需要 `SeRestorePrivilege`、写 SACL 需要
+            // `SeSecurityPrivilege`。管理员令牌本来就有这两个，但**默认处于禁用状态**，
+            // 必须显式启用；只写 DACL 时不需要（键的 owner 天然能改自己的 DACL）。
+            // 只在真的有条目带 SDDL 时才去动令牌，避免无谓的特权开启。
+            if (!dryRun && list.Exists(s => s.KeySddl.Length > 0))
+                PrivilegeHelper.EnableServicingPrivileges(log);
+
             using var mount = new OfflineHiveMountScope(configDir, log);
 
             foreach (var s in list)
             {
                 try
                 {
-                    if (ApplyOne(mount, s, windowsDir, log, dryRun, ref aclPending)) written++;
+                    if (ApplyOne(mount, s, windowsDir, log, dryRun, acl)) written++;
                 }
                 catch (Exception ex)
                 {
@@ -404,21 +413,205 @@ namespace OneCore_Image_Designer.Services
                 }
             }
 
-            // ⚠ 未做的部分必须报出来。ACL 没写却一声不响，等于"看起来全绿但镜像不对"，
-            //   而这一类键占全部键的 38.6%（30712/79572，8400 x86 语料实测）。
-            if (aclPending > 0)
+            // ACL 的账必须**单独**报：它是键级属性，跟"写了几条值"根本不是一回事。
+            // 之前这里只报"有多少条带 SDDL 的键没写"，现在真的写了，就得报清四个数。
+            if (acl.Written + acl.SkippedInherit + acl.Mismatched + acl.Failed > 0)
             {
-                log?.Invoke($"[SMI] ⚠ 其中 {aclPending} 条带安全描述符（ACL）的键**本版本不写 ACL**：" +
-                            $"SDDL 的解析与编码已就绪（SecurityDescriptor.cpp），落盘（RegSetKeySecurity）尚未接。" +
-                            $"这些键的安全属性会继承父键。");
+                var parts = new List<string> { $"写入 {acl.Written} 个键" };
+                if (acl.SkippedInherit > 0) parts.Add($"跳过 {acl.SkippedInherit} 个（(inherit) 保持继承）");
+                if (acl.Mismatched > 0) parts.Add($"**回读不一致 {acl.Mismatched} 个**");
+                if (acl.Failed > 0) parts.Add($"**失败 {acl.Failed} 个**");
+                log?.Invoke($"[SMI] ACL：{string.Join("，", parts)}");
             }
 
             log?.Invoke($"[SMI] 完成：写入 {written}/{list.Count} 条");
             return written;
         }
 
+        /// <summary>
+        /// ACL 落盘的统计与去重状态。
+        /// </summary>
+        /// <remarks>
+        /// <see cref="Applied"/> 按**键全路径**去重：同一个键在清单里往往被多条设置命中
+        /// （多个值、默认值、仅键各一条），全路径相同、SDDL 也相同时重复设 ACL 没有意义，
+        /// 还会让日志里的 ACL 行数远超实际键数，把"到底给多少个键设了安全属性"淹掉。
+        /// 记录的是"这个键上最后写入的 SDDL"，用于发现同一键被声明了两套不同 SDDL 的冲突。
+        /// </remarks>
+        private sealed class AclTracker
+        {
+            public readonly Dictionary<string, string> Applied = new(StringComparer.OrdinalIgnoreCase);
+            public int Written;
+            public int SkippedInherit;
+            public int Mismatched;
+            public int Failed;
+        }
+
+        /// <summary>
+        /// 把一个键的 SDDL 写下去（<c>RegSetKeySecurity</c>），写完立刻回读比对。
+        /// </summary>
+        /// <remarks>
+        /// 失败**不**中断这条设置：值才是主体载荷，ACL 写不上却把值也丢掉只会更糟。
+        /// 但失败一定计数 + 逐条打日志 + 末尾汇总，绝不静默降级。
+        /// </remarks>
+        private static void ApplyKeySddl(string fullPath, RegSetting s, Action<string>? log, AclTracker acl)
+        {
+            if (acl.Applied.TryGetValue(fullPath, out string? done))
+            {
+                if (string.Equals(done, s.KeySddl, StringComparison.Ordinal))
+                    return;   // 同一个键、同一套 SDDL：已经设过，不重复设
+
+                // 同一个键被两个组件声明了**不同**的安全描述符。真实服务栈里后写者生效，
+                // 这里照做，但必须报出来 —— 否则"最终 ACL 是哪一套"事后无法追溯。
+                log?.Invoke($"[SMI]   ⚠ ACL 冲突（同一键两套 SDDL），以本条为准：{fullPath}");
+            }
+
+            if (!OcidServicingNative.Available)
+            {
+                acl.Failed++;
+                log?.Invoke($"[SMI]   ✗ ACL 未写：原生库 {OcidServicingNative.DllName} 不可用：{fullPath}");
+                return;
+            }
+
+            // 真正干活的在 ApplyAndVerifyKeySddl（它自己开带 WRITE_DAC 的句柄，写完回读比对）。
+            // 这里只负责去重、计数、日志 —— 自检调的是**同一个**方法，保证"测的就是产品路径"。
+            var r = ApplyAndVerifyKeySddl(Registry.LocalMachine, fullPath, s.KeySddl);
+
+            switch (r.Outcome)
+            {
+                case OcidServicingNative.SddlApplyOutcome.Applied:
+                    acl.Applied[fullPath] = s.KeySddl;
+                    acl.Written++;
+                    log?.Invoke($"[SMI]   + ACL ⇐ {Truncate(s.KeySddl, 90)}：{fullPath}");
+
+                    if (r.Verified == true)
+                    {
+                        log?.Invoke($"[SMI]   ✓ ACL 回读一致（DACL {AceCountOf(r.Got)} 条 ACE）：{fullPath}");
+                    }
+                    else if (r.Verified == null)
+                    {
+                        log?.Invoke($"[SMI]   · ACL 已写入，未做 DACL 回读比对：{fullPath} — {r.Error}");
+                    }
+                    else
+                    {
+                        // 不一致必须落成一行：否则"写进去了"只是自称。
+                        acl.Mismatched++;
+                        log?.Invoke($"[SMI]   ✗ ACL 回读**不一致**：{fullPath}\n" +
+                                    $"[SMI]       写入 {Truncate(r.Want, 90)}\n" +
+                                    $"[SMI]       回读 {Truncate(r.Got, 90)}");
+                    }
+                    break;
+
+                case OcidServicingNative.SddlApplyOutcome.SkippedInherit:
+                    acl.SkippedInherit++;
+                    log?.Invoke($"[SMI]   ⊘ ACL 跳过（(inherit)：保持继承，不显式设置）：{fullPath}");
+                    break;
+
+                default:
+                    acl.Failed++;
+                    log?.Invoke($"[SMI]   ✗ ACL 写失败：{fullPath} — {r.Error}");
+                    break;
+            }
+        }
+
+        /// <summary>回读结果里的 DACL ACE 条数（日志用；解不开给 -1）。</summary>
+        private static int AceCountOf(string sddl)
+            => OcidServicingNative.TryDescribeSddl(sddl, out var f, out _) ? f.DaclAceCount : -1;
+
+        /// <summary>给一个键设 SDDL 的结果。</summary>
+        internal readonly struct KeyAclResult
+        {
+            public OcidServicingNative.SddlApplyOutcome Outcome { get; init; }
+            /// <summary>回读比对三态：true=一致；false=**不一致**；null=没比（无 DACL 段或回读失败）。</summary>
+            public bool? Verified { get; init; }
+            /// <summary>要求写入的 SDDL。</summary>
+            public string Want { get; init; }
+            /// <summary>回读到的 SDDL。</summary>
+            public string Got { get; init; }
+            /// <summary>失败原因，或"为什么没比对"。</summary>
+            public string Error { get; init; }
+        }
+
+        /// <summary>
+        /// 给一个键设安全描述符，并**立刻回读比对**。SMI 与自检都走这里。
+        /// </summary>
+        /// <remarks>
+        /// 句柄由本方法**自己开**，且显式带上 `WRITE_DAC` + `READ_CONTROL`：
+        /// `WRITE_DAC(0x40000)` **不在 `KEY_WRITE(0x20006)` 里**（含它的是 KEY_ALL_ACCESS），
+        /// 所以拿 `CreateSubKey(..., writable: true)` 的句柄调 `RegSetKeySecurity`
+        /// 只会得到 `ERROR_ACCESS_DENIED(5)` —— 现象像"缺特权"，实际缺的是句柄上的访问权。
+        /// 实测踩过一次：C++ 自检用 KEY_ALL_ACCESS 全过，C# 走 CreateSubKey 全挂。
+        ///
+        /// 回读只做**结构级**比对：`RegGetKeySecurity` 回读时 SID 的写法可能变
+        /// （别名 `BA` 会回读成 `S-1-5-32-544`），逐字符比必然假失败。DACL 是否存在、
+        /// ACE 条数、是否带 `P` 保护标志，才是"确实写进去了"的凭据。
+        /// 非保护 DACL（无 `P`）时系统会把父键的可继承 ACE 并进来，回读可能**多于**写入，
+        /// 因此那种情况只要求"不少于"。
+        /// </remarks>
+        internal static KeyAclResult ApplyAndVerifyKeySddl(RegistryKey root, string relativePath, string sddl)
+        {
+            using var key = root.OpenSubKey(
+                relativePath,
+                RegistryKeyPermissionCheck.ReadWriteSubTree,
+                RegistryRights.ChangePermissions | RegistryRights.ReadPermissions);
+
+            if (key == null)
+            {
+                return new KeyAclResult
+                {
+                    Outcome = OcidServicingNative.SddlApplyOutcome.Failed,
+                    Want = sddl ?? "",
+                    Got = "",
+                    Error = "无法以 WRITE_DAC|READ_CONTROL 打开键（拿不到 WRITE_DAC 就写不了 ACL）",
+                };
+            }
+
+            IntPtr hKey = key.Handle.DangerousGetHandle();
+            var outcome = OcidServicingNative.ApplyKeySddl(hKey, sddl, out string err);
+
+            bool? verified = null;
+            string got = "";
+            string note = err ?? "";
+
+            if (outcome == OcidServicingNative.SddlApplyOutcome.Applied)
+            {
+                if (!OcidServicingNative.TryDescribeSddl(sddl, out var want, out string werr))
+                {
+                    note = "已写入，但原文解读失败，未比对：" + werr;
+                }
+                else if (!want.HasDacl)
+                {
+                    note = "已写入；该 SDDL 无 DACL 段，没有可比的 DACL 事实";
+                }
+                else if (!OcidServicingNative.TryReadKeySddl(hKey, OcidServicingNative.SecInfo.Dacl,
+                                                             out got, out string rerr))
+                {
+                    note = "已写入，但回读失败（无法确认）：" + rerr;
+                }
+                else if (!OcidServicingNative.TryDescribeSddl(got, out var rb, out string gerr))
+                {
+                    note = "已写入，但回读的 SDDL 解读失败：" + gerr;
+                }
+                else
+                {
+                    verified = want.DaclProtected
+                        ? (rb.DaclProtected && rb.DaclAceCount == want.DaclAceCount)
+                        : (rb.DaclAceCount >= want.DaclAceCount);
+                    note = "";
+                }
+            }
+
+            return new KeyAclResult
+            {
+                Outcome = outcome,
+                Verified = verified,
+                Want = sddl ?? "",
+                Got = got,
+                Error = note,
+            };
+        }
+
         private static bool ApplyOne(OfflineHiveMountScope mount, RegSetting s, string windowsDir,
-                                     Action<string>? log, bool dryRun, ref int aclPending)
+                                     Action<string>? log, bool dryRun, AclTracker acl)
         {
             var (hive, relPath) = MapLogicalToHive(s.Root, s.SubKey);
             if (hive == null)
@@ -443,12 +636,10 @@ namespace OneCore_Image_Designer.Services
                 return false;
             }
 
-            // ★ 键级属性：安全描述符（ACL）属于**键**。
-            //   本版本只把 SDDL 解析/编码做完了（Source/Native/…/SecurityDescriptor.*），
-            //   **还没有**把它写下去（RegSetKeySecurity + SeRestorePrivilege/SeSecurityPrivilege）。
-            //   这里只计数、在末尾汇总告警：绝不能让它看起来"已经做过了" ——
-            //   实测带 SD 引用的键有 30712 个（占全部键的 38.6%），静默不做就是一大片错。
-            if (s.KeySddl.Length > 0) aclPending++;
+            // ★ 键级属性：安全描述符（ACL）属于**键**，不属于值 —— 所以在"键已建好"之后、
+            //   写值之前落下去（真实服务栈里安全属性就是随键创建一起设的）。
+            //   实测带 SD 引用的键有 30712 个（占全部键的 38.6%，8400 x86 语料）。
+            if (s.KeySddl.Length > 0) ApplyKeySddl(fullPath, s, log, acl);
 
             // ★ 只有键、没有值的设置（实测带安全描述符的键里 18.3% 是这种）：
             //   到这里"建键"已经做完了，**绝不能**再往下走 —— 下面会把 valueName="" 当成

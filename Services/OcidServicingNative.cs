@@ -206,6 +206,26 @@ namespace OneCore_Image_Designer.Services
         private static extern int OcidKnownMacroNames(
             [Out] char[]? outBuf, uint outCap, out uint outLen);
 
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int OcidApplyKeySddl(
+            IntPtr keyHandle, string sddl, out int outApplied,
+            [Out] char[]? errBuf, uint errCap);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int OcidReadKeySddl(
+            IntPtr keyHandle, uint informationBits,
+            [Out] char[]? outBuf, uint outCap, out uint outLen,
+            [Out] char[]? errBuf, uint errCap);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int OcidDescribeSddl(
+            string sddl,
+            out int hasOwner, out int hasGroup, out int hasDacl, out int hasSacl,
+            out int daclProtected, out int daclNoAccessControl,
+            out int daclAceCount, out int saclAceCount,
+            out uint securityInformation,
+            [Out] char[]? errBuf, uint errCap);
+
         private const int ErrCap = 1024;
         private const int NoteCap = 1024;
         private const int LeftoverCap = 2048;
@@ -406,6 +426,168 @@ namespace OneCore_Image_Designer.Services
                 return rc == (int)Rc.Ok ? new string(buf, 0, (int)len) : "";
             }
             catch { return ""; }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // 安全描述符（SDDL）→ 离线 hive 里的键
+        // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>`SECURITY_INFORMATION` 位（winnt.h）。</summary>
+        internal static class SecInfo
+        {
+            public const uint Owner = 0x00000001;
+            public const uint Group = 0x00000002;
+            public const uint Dacl = 0x00000004;
+            public const uint Sacl = 0x00000010;
+
+            /// <summary>
+            /// 回读时的默认位：OWNER|GROUP|DACL，**不读 SACL**。
+            /// 读 SACL 需要 `SeSecurityPrivilege`，拿不到是常态；硬要读会让"回读校验"整体失败，
+            /// 反而把真正关心的 DACL 是否正确给掩盖掉。
+            /// </summary>
+            public const uint DefaultRead = Owner | Group | Dacl;
+        }
+
+        /// <summary>SDDL 的结构事实（纯文本解读，不碰注册表）。</summary>
+        internal readonly struct SddlFacts
+        {
+            public bool HasOwner { get; init; }
+            public bool HasGroup { get; init; }
+            public bool HasDacl { get; init; }
+            public bool HasSacl { get; init; }
+            public bool DaclProtected { get; init; }
+            public bool DaclNoAccessControl { get; init; }
+            public int DaclAceCount { get; init; }
+            public int SaclAceCount { get; init; }
+            /// <summary>这段 SDDL 实际需要设置的 SECURITY_INFORMATION 位。</summary>
+            public uint SecurityInformation { get; init; }
+        }
+
+        /// <summary>应用 SDDL 的结果。**跳过（(inherit)）是合法结果，不是失败。**</summary>
+        internal enum SddlApplyOutcome
+        {
+            Applied,
+            SkippedInherit,
+            Failed,
+        }
+
+        /// <summary>SDDL 的文本级解读，用于落盘前决策与告警。</summary>
+        public static bool TryDescribeSddl(string sddl, out SddlFacts facts, out string error)
+        {
+            facts = default;
+            error = "";
+            var err = new char[ErrCap];
+            try
+            {
+                int rc = OcidDescribeSddl(sddl ?? "",
+                                          out int ho, out int hg, out int hd, out int hs,
+                                          out int prot, out int noAc,
+                                          out int dAce, out int sAce, out uint info,
+                                          err, ErrCap);
+                if (rc != (int)Rc.Ok) { error = ErrText(err, rc); return false; }
+
+                facts = new SddlFacts
+                {
+                    HasOwner = ho != 0,
+                    HasGroup = hg != 0,
+                    HasDacl = hd != 0,
+                    HasSacl = hs != 0,
+                    DaclProtected = prot != 0,
+                    DaclNoAccessControl = noAc != 0,
+                    DaclAceCount = dAce,
+                    SaclAceCount = sAce,
+                    SecurityInformation = info,
+                };
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = $"调用原生库失败：{ex.Message}";
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 把 SDDL 写到**已打开的键**上（<paramref name="keyHandle"/> =
+        /// <c>RegistryKey.Handle.DangerousGetHandle()</c>）。
+        /// </summary>
+        /// <remarks>
+        /// 写 owner/group 需要 `SeRestorePrivilege`、写 SACL 需要 `SeSecurityPrivilege`；
+        /// 只写 DACL 不需要额外特权。调用方应在此之前启用它们
+        /// （<see cref="PrivilegeHelper.EnableServicingPrivileges"/> 已包含）。
+        /// </remarks>
+        public static SddlApplyOutcome ApplyKeySddl(IntPtr keyHandle, string sddl, out string error)
+        {
+            error = "";
+            var err = new char[ErrCap];
+            try
+            {
+                int rc = OcidApplyKeySddl(keyHandle, sddl ?? "", out int applied, err, ErrCap);
+                if (rc == (int)Rc.Ok)
+                    return applied != 0 ? SddlApplyOutcome.Applied : SddlApplyOutcome.SkippedInherit;
+                error = ErrText(err, rc);
+                return SddlApplyOutcome.Failed;
+            }
+            catch (Exception ex)
+            {
+                error = $"调用原生库失败：{ex.Message}";
+                return SddlApplyOutcome.Failed;
+            }
+        }
+
+        /// <summary>
+        /// 回读键的安全描述符 → SDDL 文本。
+        /// </summary>
+        /// <param name="informationBits">
+        /// 0 ⇒ <see cref="SecInfo.DefaultRead"/>（OWNER|GROUP|DACL）。
+        /// 只想比对 DACL 时传 <see cref="SecInfo.Dacl"/>：读 OWNER|GROUP 时回读结果**一定**带
+        /// <c>O:</c>/<c>G:</c> 段，拿它跟"只写了 D: 的目标 SDDL"比会假失败。
+        /// </param>
+        public static bool TryReadKeySddl(IntPtr keyHandle, uint informationBits,
+                                          out string sddl, out string error)
+        {
+            sddl = "";
+            error = "";
+            var err = new char[ErrCap];
+            try
+            {
+                var buf = new char[4 * 1024];
+                int rc = OcidReadKeySddl(keyHandle, informationBits, buf, (uint)buf.Length,
+                                         out uint len, err, ErrCap);
+                if (rc == (int)Rc.Buffer && len > 0)
+                {
+                    buf = new char[len + 1];
+                    rc = OcidReadKeySddl(keyHandle, informationBits, buf, (uint)buf.Length,
+                                         out len, err, ErrCap);
+                }
+                if (rc != (int)Rc.Ok) { error = ErrText(err, rc); return false; }
+
+                sddl = new string(buf, 0, (int)len);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = $"调用原生库失败：{ex.Message}";
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 安全描述符相关的失败文本：优先用原生侧给的具体原因（它知道是 Win32 错误几号、
+        /// 需要哪个特权），退化成返回码名。
+        /// </summary>
+        private static string ErrText(char[] err, int rc)
+        {
+            string e = CStr(err);
+            if (e.Length > 0) return e;
+            return ((Rc)rc) switch
+            {
+                Rc.Argument => "参数错误",
+                Rc.BadValue => "安全描述符非法",
+                Rc.Buffer => "缓冲不足",
+                Rc.Internal => "原生侧未预期异常",
+                _ => $"rc={rc}",
+            };
         }
 
         private static string CStr(char[] buf)

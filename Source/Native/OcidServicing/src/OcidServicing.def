@@ -19,3 +19,6 @@ EXPORTS
     OcidExpandMacros
     OcidExpandMacrosEx
     OcidKnownMacroNames
+    OcidDescribeSddl
+    OcidApplyKeySddl
+    OcidReadKeySddl
