@@ -238,6 +238,12 @@ namespace OneCore_Image_Designer.Services
                 psi.ArgumentList.Add(listFile);
 
                 using var p = System.Diagnostics.Process.Start(psi)!;
+
+                // stderr **必须并发读**：先读到 stdout 的 EOF 再去读 stderr 会死锁 ——
+                // 子进程写满 stderr 管道缓冲区（约 4 KB）后就阻塞，它一阻塞
+                // stdout 的 EOF 就永远不来。40 份清单就能踩到（CSI 那条线实测挂死过）。
+                var errTask = p.StandardError.ReadToEndAsync();
+
                 string? line;
                 while ((line = p.StandardOutput.ReadLine()) != null)
                 {
@@ -245,7 +251,7 @@ namespace OneCore_Image_Designer.Services
                     var s = ParseOpJson(line);
                     if (s != null) settings.Add(s);
                 }
-                string stderr = p.StandardError.ReadToEnd();
+                string stderr = errTask.GetAwaiter().GetResult();
                 p.WaitForExit();
                 log?.Invoke($"[SMI] 原生工具诊断：{stderr.Trim()}");
                 if (p.ExitCode != 0)

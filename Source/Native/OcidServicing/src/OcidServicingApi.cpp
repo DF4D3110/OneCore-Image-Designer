@@ -443,4 +443,66 @@ extern "C" {
         }
     }
 
+    /// 把 SDDL 写到**文件/目录路径**上（`SetNamedSecurityInfoW`）—— CSI 落位用。
+    ///
+    /// 与 <c>OcidApplyKeySddl</c> 的差别不只是 API：文件这条路**必须**由调用层显式说明
+    /// DACL 是否受保护（`SetNamedSecurityInfoW` 不看描述符里的 SE_DACL_PROTECTED），
+    /// 该判断已做在 `ApplySddlToPath` 内部，C# 侧不需要（也不应该）再算一次。
+    int __cdecl OcidApplyPathSddl(const wchar_t* path, const wchar_t* sddl,
+                                  int* outApplied,
+                                  wchar_t* errBuf, unsigned int errCap)
+    {
+        if (outApplied) *outApplied = 0;
+        if (!path || !sddl) return OCID_ERR_ARGUMENT;
+        try
+        {
+            std::wstring err;
+            const SddlApplyResult r = ApplySddlToPath(W(path), W(sddl), err);
+            if (r == SddlApplyResult::SkippedInherit) return OCID_OK;   // 合法跳过
+            if (r == SddlApplyResult::Failed)
+            {
+                SetErr(errBuf, errCap, err);
+                return OCID_ERR_BAD_VALUE;
+            }
+            if (outApplied) *outApplied = 1;
+            return OCID_OK;
+        }
+        catch (...)
+        {
+            SetErr(errBuf, errCap, L"应用路径 SDDL 时发生未预期异常");
+            return OCID_ERR_INTERNAL;
+        }
+    }
+
+    /// 回读文件/目录的安全描述符 → SDDL 文本（`informationBits` 为 0 ⇒ OWNER|GROUP|DACL）。
+    int __cdecl OcidReadPathSddl(const wchar_t* path, unsigned int informationBits,
+                                 wchar_t* outBuf, unsigned int outCap, unsigned int* outLen,
+                                 wchar_t* errBuf, unsigned int errCap)
+    {
+        if (outLen) *outLen = 0;
+        if (!path) return OCID_ERR_ARGUMENT;
+        try
+        {
+            std::wstring sddl, err;
+            if (!ReadPathSddl(W(path), informationBits, sddl, err))
+            {
+                SetErr(errBuf, errCap, err);
+                return OCID_ERR_BAD_VALUE;
+            }
+            return CopyOutStr(sddl, outBuf, outCap, outLen);
+        }
+        catch (...)
+        {
+            SetErr(errBuf, errCap, L"回读路径安全描述符时发生未预期异常");
+            return OCID_ERR_INTERNAL;
+        }
+    }
+
+    /// 路径是否存在（都是"路径不存在"这种失败要用的判断，放原生侧统一）。
+    int __cdecl OcidPathExists(const wchar_t* path)
+    {
+        if (!path) return 0;
+        return PathExists(W(path)) ? 1 : 0;
+    }
+
 } // extern "C"

@@ -14,6 +14,7 @@
 // 输出约定：**数据走 stdout，诊断走 stderr** —— 这样 C# 侧可以干净地消费 stdout。
 
 #include "ocid/ConsoleUtf8.h"
+#include "ocid/FilePlacement.h"
 #include "ocid/MacroExpander.h"
 #include "ocid/Manifest.h"
 #include "ocid/RegistryValue.h"
@@ -522,6 +523,189 @@ static int CmdMacros()
 
 // ─────────────────────────────────────────────────────────────────────────
 
+// ── place-ops ────────────────────────────────────────────────────────────
+//
+// `ocid_manifest place-ops --windows <windowsDir> --list <fileOfPaths> [--packages <root>] [--image-arch <arch>]`
+// `ocid_manifest place-ops --windows <windowsDir> <dir> [maxFiles]`
+//
+// 清单 → **CSI 文件落位计划**（JSONL，给 C# 侧 `Services/CsiFileService.cs` 消费）。
+//
+// 组件目录名取**清单文件名**去掉 `.manifest`，包展开根取清单所在目录（`--packages`
+// 可显式覆盖）—— 实测镜像里平铺的 `packages\<组件目录>.manifest` 与
+// `Windows\WinSxS\Manifests\<组件目录>.manifest` 都符合这条规则。
+//
+// `--image-arch` 不给时**自动探测**（读 `<windowsDir>\System32\ntoskrnl.exe` 的 PE Machine）；
+// 探测不出来就按"不红移"走，并在 stderr 说出来。给 `none` 可显式关掉红移。
+//
+// 机制与证据见 `ocid/FilePlacement.h` 顶部（落点是硬链接、正本在 WinSxS、
+// `writeableType` 决定拷贝还是链接、非原生架构的 System32 落点红移到 SysWOW64）。
+static int CmdPlaceOps(const std::wstring& dir, const std::wstring& listFile,
+                       const std::wstring& windowsDir, const std::wstring& packageRootOverride,
+                       const std::wstring& imageArchArg,
+                       int maxFiles)
+{
+#ifdef _WIN32
+    if (windowsDir.empty()) { Err("--windows <windowsDir> is required (macro base)"); return 2; }
+
+    // 架构红移的判定基准。`none` = 显式不红移；空 = 自动探测。
+    std::wstring imageArch = imageArchArg;
+    bool archDetected = false;
+    if (_wcsicmp(imageArch.c_str(), L"none") == 0) {
+        imageArch.clear();
+        Err("imageArch=none（显式关闭架构红移）");
+    } else if (imageArch.empty()) {
+        imageArch = DetectImageArch(windowsDir);
+        archDetected = !imageArch.empty();
+        if (archDetected) {
+            Err("imageArch=" + ToUtf8(imageArch) + "（自动探测 <windowsDir>\\System32\\ntoskrnl.exe 的 PE Machine）");
+        } else {
+            Err("imageArch=(探测失败：读不到 <windowsDir>\\System32\\ntoskrnl.exe 的 PE 头)"
+                " —— 按不红移处理；可用 --image-arch <arch> 显式指定");
+        }
+    } else {
+        Err("imageArch=" + ToUtf8(imageArch) + "（--image-arch 指定）");
+    }
+
+    std::vector<std::wstring> files;
+    if (!listFile.empty()) {
+        std::wstring text, err;
+        if (!ReadFileUtf8(listFile, text, err)) { Err(ToUtf8(err)); return 2; }
+        size_t start = 0;
+        while (start <= text.size()) {
+            size_t nl = text.find(L'\n', start);
+            std::wstring line = (nl == std::wstring::npos) ? text.substr(start)
+                                                           : text.substr(start, nl - start);
+            while (!line.empty() && (line.back() == L'\r' || line.back() == L' ')) line.pop_back();
+            if (!line.empty()) files.push_back(line);
+            if (nl == std::wstring::npos) break;
+            start = nl + 1;
+        }
+    } else {
+        WIN32_FIND_DATAW fd;
+        std::wstring pattern = dir + L"\\*.manifest";
+        HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) { Err("no .manifest found"); return 2; }
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (maxFiles > 0 && (int)files.size() >= maxFiles) break;
+            files.push_back(dir + L"\\" + fd.cFileName);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    if (files.empty()) { Err("no .manifest found"); return 2; }
+
+    const RuntimePaths paths = RuntimePaths::FromWindowsDir(windowsDir);
+
+    size_t okM = 0, badM = 0, nFiles = 0, nDirs = 0, noDest = 0;
+    size_t unresolved = 0, sddlBad = 0, missingPayload = 0, execFiles = 0;
+    size_t writeable = 0, redirected = 0;
+
+    for (const auto& path : files) {
+        std::wstring text, err;
+        if (!ReadFileUtf8(path, text, err)) { ++badM; continue; }
+
+        ComponentManifest m;
+        auto r = ParseComponentManifest(text, m);
+        if (!r.ok) { ++badM; continue; }
+
+        // 组件目录名 = **清单文件名** 去掉 `.manifest`；包展开根 = 清单所在目录。
+        //
+        // 为什么不能按目录名推：实测 8061 ARM 镜像里 `packages\` 下有 **5664 份平铺**的
+        // `<组件目录>.manifest`（其中 4359 份有同名载荷目录 `packages\<组件目录>\`），
+        // 另有 118 份在 `Windows\WinSxS\Manifests\<组件目录>.manifest`。
+        // 两处都是"文件名 = 组件目录名"，按目录名推会把这 5664 份一律算成 "packages"
+        // —— 载荷路径变成 `packages\packages\x.dll`，错得彻底又看不出来。
+        // （唯一形如 `packages\<组件目录>\<别的名字>.manifest` 的 2 份是**载荷**
+        //   `WindowsShell.Manifest` / `XPThemes.manifest`，本来就不该按组件清单收。
+        //   `WinSxS\Manifests\` 里那些 `microsoft-windows-b..c-misc-tools-minwin` 缩写名
+        //   也正好与 Identity 的缩写算法一致，反过来印证了这条规则。）
+        const size_t p = path.find_last_of(L"\\/");
+        if (p == std::wstring::npos) { ++badM; continue; }
+        const std::wstring fileName = path.substr(p + 1);
+        const std::wstring suffix = L".manifest";
+        if (fileName.size() <= suffix.size() ||
+            _wcsicmp(fileName.c_str() + fileName.size() - suffix.size(), suffix.c_str()) != 0) {
+            ++badM;
+            continue;
+        }
+        const std::wstring compDir = fileName.substr(0, fileName.size() - suffix.size());
+        std::wstring pkgRoot = path.substr(0, p);
+        if (!packageRootOverride.empty()) pkgRoot = packageRootOverride;
+
+        ++okM;
+        const PlacementPlan plan = BuildPlacementPlan(m, compDir, pkgRoot, paths, imageArch);
+        const std::wstring compName = m.identity.ComponentNamePrefix();
+
+        for (const auto& f : plan.files) {
+            const std::string line =
+                "{\"component\":\"" + JsonEscape(compName)
+                + "\",\"identity\":\"" + JsonEscape(plan.identity)
+                + "\",\"componentDir\":\"" + JsonEscape(plan.componentDir)
+                + "\",\"kind\":\"file\""
+                + ",\"name\":\"" + JsonEscape(f.name)
+                + "\",\"storeDir\":\"" + JsonEscape(plan.storeDir)
+                + "\",\"storePath\":\"" + JsonEscape(f.storePath)
+                + "\",\"destinationPath\":\"" + JsonEscape(f.destinationPath)
+                + "\",\"payloadPath\":\"" + JsonEscape(f.payloadPath)
+                + "\",\"sddl\":\"" + JsonEscape(f.sddl)
+                + "\",\"sdName\":\"" + JsonEscape(f.sdName)
+                + "\",\"writeableType\":\"" + JsonEscape(f.writeableType)
+                + "\",\"writeable\":" + (f.writeable ? "true" : "false")
+                + ",\"redirected\":" + (f.redirected ? "true" : "false")
+                + ",\"unresolved\":\"" + JsonEscape(f.unresolved) + "\"}";
+            OutLn(line);
+            ++nFiles;
+        }
+
+        for (const auto& d : plan.directories) {
+            const std::string line =
+                "{\"component\":\"" + JsonEscape(compName)
+                + "\",\"identity\":\"" + JsonEscape(plan.identity)
+                + "\",\"componentDir\":\"" + JsonEscape(plan.componentDir)
+                + "\",\"kind\":\"directory\""
+                + ",\"path\":\"" + JsonEscape(d.path)
+                + "\",\"attributes\":\"" + JsonEscape(d.attributes)
+                + "\",\"owner\":" + (d.owner ? "true" : "false")
+                + ",\"sddl\":\"" + JsonEscape(d.sddl)
+                + "\",\"sdName\":\"" + JsonEscape(d.sdName)
+                + "\",\"unresolved\":\"" + JsonEscape(d.unresolved) + "\"}";
+            OutLn(line);
+            ++nDirs;
+        }
+
+        noDest         += plan.filesWithoutDestination;
+        unresolved     += plan.unresolvedCount;
+        sddlBad        += plan.sddlUnresolved;
+        missingPayload += plan.missingPayload;
+        execFiles      += plan.executableFiles();
+        writeable      += plan.writeableFiles;
+        redirected     += plan.redirectedFiles;
+
+        for (const auto& n : plan.notes) Err("note: " + ToUtf8(n));
+    }
+
+    Err("manifests=" + std::to_string(okM)
+      + " failed=" + std::to_string(badM)
+      + " files=" + std::to_string(nFiles)
+      + " dirs=" + std::to_string(nDirs)
+      + " executableFiles=" + std::to_string(execFiles)
+      + " noDestination=" + std::to_string(noDest)
+      + " missingPayload=" + std::to_string(missingPayload)
+      + " writeable=" + std::to_string(writeable)
+      + " redirected=" + std::to_string(redirected)
+      + " imageArch=" + (imageArch.empty() ? std::string("(none)") : ToUtf8(imageArch))
+      + (archDetected ? "(detected)" : "")
+      + " unresolvedMacro=" + std::to_string(unresolved)
+      + " unresolvedSddl=" + std::to_string(sddlBad));
+    // 未展开的宏与查不到的 SD 引用都**不能**当成功：写下去一定是错的（或静默丢 ACL）。
+    return (badM == 0 && unresolved == 0 && sddlBad == 0) ? 0 : 1;
+#else
+    (void)dir; (void)listFile; (void)windowsDir; (void)packageRootOverride; (void)imageArchArg;
+    (void)maxFiles;
+    return 2;
+#endif
+}
+
 static void Usage()
 {
     OutLn("OCID servicing console");
@@ -530,6 +714,10 @@ static void Usage()
     OutLn("  ocid_manifest ops  <manifest> [--json]");
     OutLn("  ocid_manifest scan <dir> [maxFiles]");
     OutLn("  ocid_manifest dump-xsd <manifest> <outFile>");
+    OutLn("  ocid_manifest export-ops <dir> [maxFiles]    registry ops as JSONL (C# consumer)");
+    OutLn("  ocid_manifest place-ops --windows <winDir> --list <pathsFile> [--packages <root>] [--image-arch <arch>]");
+    OutLn("  ocid_manifest place-ops --windows <winDir> <dir> [maxFiles]");
+    OutLn("      --image-arch: arm|arm64|amd64|x86|none（默认自动探测 ntoskrnl.exe；none = 不红移）");
     OutLn("  ocid_manifest verify-names <dir> [maxFiles]   (check component names against real file names)");
     OutLn("  ocid_manifest expand <windowsDir> <text...>   expand $(runtime.*); --paths to also show base paths");
     OutLn("  ocid_manifest macros                          list known $(runtime.*) macro names");
@@ -570,6 +758,22 @@ int main(int argc, char** argv)
             else { mx = atoi(argv[i]); }
         }
         return CmdExportOps(dir, listFile, mx);
+    }
+
+    if (cmd == L"place-ops") {
+        std::wstring dir, listFile, winDir, pkgRoot, imageArch;
+        int mx = 0;
+        for (int i = 2; i < argc; ++i) {
+            std::string a = argv[i];
+            if (a == "--list" && i + 1 < argc)              { listFile = FromUtf8OrAnsi(argv[++i]); }
+            else if (a == "--windows" && i + 1 < argc)      { winDir = FromUtf8OrAnsi(argv[++i]); }
+            else if (a == "--packages" && i + 1 < argc)     { pkgRoot = FromUtf8OrAnsi(argv[++i]); }
+            else if (a == "--image-arch" && i + 1 < argc)   { imageArch = FromUtf8OrAnsi(argv[++i]); }
+            else if (a.rfind("--", 0) == 0)                 { /* 其它开关忽略 */ }
+            else if (dir.empty())                           { dir = FromUtf8OrAnsi(argv[i]); }
+            else                                            { mx = atoi(argv[i]); }
+        }
+        return CmdPlaceOps(dir, listFile, winDir, pkgRoot, imageArch, mx);
     }
 
     if (cmd == L"verify-names" && argc >= 3) {

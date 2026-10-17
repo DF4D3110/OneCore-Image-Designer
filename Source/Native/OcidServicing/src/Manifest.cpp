@@ -207,7 +207,8 @@ namespace ocid {
                 }
             }
             else if (_wcsicmp(ln.c_str(), L"file") == 0) {
-                // 真实属性：name / destinationPath / sourceName / sourcePath / importPath
+                // 真实属性：name / destinationPath / sourceName / sourcePath / importPath /
+                //           **writeableType**（决定落点是拷贝还是硬链接，见 Manifest.h）
                 // 内嵌：<securityDescriptor name="…"/>
                 FileSpec f;
                 if (const auto* v = child.FindAttr(L"name"))            f.name = *v;
@@ -215,6 +216,7 @@ namespace ocid {
                 if (const auto* v = child.FindAttr(L"sourceName"))      f.sourceName = *v;
                 if (const auto* v = child.FindAttr(L"sourcePath"))      f.sourcePath = *v;
                 if (const auto* v = child.FindAttr(L"importPath"))      f.importPath = *v;
+                if (const auto* v = child.FindAttr(L"writeableType"))   f.writeableType = *v;
                 for (const auto& c : child.children) {
                     if (_wcsicmp(c.LocalName().c_str(), L"securityDescriptor") == 0) {
                         if (const auto* v = c.FindAttr(L"name")) f.securityDescriptorName = *v;

@@ -156,6 +156,18 @@ namespace ocid {
         std::wstring sourcePath;      // 源目录
         std::wstring importPath;      // 构建期导入路径（镜像里无意义，仅保留）
         std::wstring securityDescriptorName;  // 内嵌 <securityDescriptor name="…"/>
+
+        // `writeableType="systemData"` —— **这个属性决定了落点是不是硬链接**。
+        //
+        // 实测（8061 ARM 镜像）：<file> 带 `writeableType="systemData"` 的，
+        // 落点与 WinSxS 正本**不是同一个文件**（`fsutil hardlink list` 只有 1 条），
+        // 也就是**拷贝**一份；不带的都是 2 条链接（硬链接）。
+        // 全镜像 5666 份清单里共 446 条带该属性，取值只有 `systemData` 一种；
+        // 已落位的 206 条里正好 6 条带它（win.ini / system.ini / hosts / networks /
+        // protocol / services）—— 就是"不是硬链接"的那 6 条，一条不多一条不少。
+        //
+        // 为什么合理：这几个都是**运行期会被改写的系统数据文件**，必须与正本脱钩。
+        std::wstring writeableType;
     };
 
     struct DirectorySpec

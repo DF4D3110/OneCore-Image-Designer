@@ -23,7 +23,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Ocid $(runtime.*) macro expansion through the native library", () => { OcidMacroExpansion(); return Task.CompletedTask; }),
     ("Ocid registryKeys wire format (key-only keys and key SDDL)", () => { OcidRegistryOpShape(); return Task.CompletedTask; }),
     ("Ocid key SDDL is applied and verified by read-back", () => { OcidSddlApplyAndReadback(); return Task.CompletedTask; }),
-    ("Ocid key SDDL survives an offline hive load/unload cycle", () => { OcidSddlPersistsInOfflineHive(); return Task.CompletedTask; })
+    ("Ocid key SDDL survives an offline hive load/unload cycle", () => { OcidSddlPersistsInOfflineHive(); return Task.CompletedTask; }),
+    ("Ocid CSI copies payload to the store, hardlinks destinations and applies file ACL", () => { OcidCsiFilePlacement(); return Task.CompletedTask; })
 };
 
 var failures = new List<string>();
@@ -560,6 +561,154 @@ static void OcidSddlPersistsInOfflineHive()
         GC.Collect();
         if (loaded) Reg("unload", @"HKLM\" + Mount);
         try { File.Delete(tmp); } catch { /* 临时 hive 删不掉不影响结论 */ }
+    }
+}
+
+/// <summary>
+/// CSI 落位：**硬链接**（不是复制）+ 目录属性 + 清单声明的文件/目录 ACL。
+/// </summary>
+/// <remarks>
+/// 夹具全在临时目录里（不碰真镜像），**照真实镜像的形状**摆：
+///   <c>&lt;tmp&gt;\Windows\System32\</c>                     ← 落点父目录
+///   <c>&lt;tmp&gt;\packages\&lt;组件目录&gt;.manifest</c>        ← 清单（**平铺**在 packages 下）
+///   <c>&lt;tmp&gt;\packages\&lt;组件目录&gt;\basesrv.dll</c>       ← 载荷（在**同名子目录**里）
+/// "是硬链接"用**写一个、从另一个读**来证：复制品不会同步。
+/// **平铺**这一点是回归的重点：按"清单所在目录名"推组件目录会得到 "packages"，
+/// 载荷路径就变成 <c>packages\packages\basesrv.dll</c> —— 真实镜像上实测踩到过。
+/// </remarks>
+static void OcidCsiFilePlacement()
+{
+    True(OcidServicingNative.Available, "OcidServicing.dll 未找到（先跑 Source\\Native\\build-servicing.ps1）");
+
+    string root = NewTempDirectory();
+    try
+    {
+        string windows = Path.Combine(root, "Windows");
+        string packages = Path.Combine(root, "packages");
+        const string CompDir = "arm_microsoft-windows-basesrv_31bf3856ad364e35_6.2.8061.0_none_0123456789abcdef";
+        string compPath = Path.Combine(packages, CompDir);
+        string system32 = Path.Combine(windows, "System32");
+        Directory.CreateDirectory(system32);
+        Directory.CreateDirectory(compPath);
+
+        // 载荷：真镜像里 packges\<组件目录>\<文件> 是**独立**的一份（与 WinSxS 正本不同文件）
+        string payload = Path.Combine(compPath, "basesrv.dll");
+        var bytes = new byte[4096];
+        for (int i = 0; i < bytes.Length; i++) bytes[i] = 0xAB;
+        File.WriteAllBytes(payload, bytes);
+
+        // writeableType="systemData" 的那类（真镜像里的 win.ini / hosts）载荷
+        string writeablePayload = Path.Combine(compPath, "win.ini");
+        File.WriteAllText(writeablePayload, "[fonts]\r\n");
+
+        File.WriteAllText(Path.Combine(packages, CompDir + ".manifest"), """
+<?xml version="1.0" encoding="utf-8"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v3" manifestVersion="1.0">
+  <assemblyIdentity name="Microsoft-Windows-Basesrv" version="6.2.8061.0" processorArchitecture="arm" language="neutral" publicKeyToken="31bf3856ad364e35" buildType="release" />
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <accessControl>
+        <securityDescriptorDefinitions>
+          <securityDescriptorDefinition name="WRP_FILE_DEFAULT_SDDL" sddl="D:P(A;;GA;;;SY)(A;;GR;;;BA)(A;;GA;;;BU)" />
+          <securityDescriptorDefinition name="WRP_DIR_DEFAULT_SDDL" sddl="D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;BU)" />
+        </securityDescriptorDefinitions>
+      </accessControl>
+    </security>
+  </trustInfo>
+  <file name="basesrv.dll" destinationPath="$(runtime.system32)\" sourceName="basesrv.dll" sourcePath=".\">
+    <securityDescriptor name="WRP_FILE_DEFAULT_SDDL" />
+  </file>
+  <file name="orphan.dll" destinationPath="$(build.nttree)\" sourceName="orphan.dll" />
+  <file name="win.ini" destinationPath="$(runtime.systemRoot)\" sourceName="win.ini" writeableType="systemData" />
+  <directories>
+    <directory destinationPath="$(runtime.system32)\OcidCsiTest" owner="true" attributes="hidden">
+      <securityDescriptor name="WRP_DIR_DEFAULT_SDDL" />
+    </directory>
+  </directories>
+</assembly>
+""", new System.Text.UTF8Encoding(false));
+
+        var ops = CsiFileService.BuildPlan(packages, windows, packages);
+        Equal(4, ops.Count);
+
+        // 载荷路径必须落在**同名子目录**里（按目录名推的话这里会变成 packages\packages\…）
+        Equal(payload, ops.Single(o => o.Name == "basesrv.dll").PayloadPath);
+
+        // 展开不了的宏**必须带着 unresolved 出来**（不是悄悄丢，也不是写个错路径）
+        var orphan = ops.Single(o => o.Name == "orphan.dll");
+        True(orphan.Unresolved.Length > 0, "未展开宏的条目必须带 unresolved：" + orphan.Unresolved);
+        True(orphan.DestinationPath.Length > 0, "destinationPath 应保留原文便于定位");
+
+        var dirOp = ops.Single(o => o.IsDirectory);
+        Equal("hidden", dirOp.Attributes);
+
+        var r = CsiFileService.Place(ops);
+        foreach (var n in r.Notes) Console.WriteLine("  " + n);
+        True(r.Ok, "落位不应有错误：" + r.Summary());
+        Equal(4, r.Planned);
+        Equal(2, r.StoreCopied);      // 载荷 → WinSxS 正本是**复制**（basesrv + win.ini）
+        Equal(1, r.DestLinked);       // 正本 → System32 落点（只有 basesrv）
+        Equal(1, r.WriteableCopies);  // win.ini：writeableType ⇒ 独立副本
+        Equal(0, r.Copied);           // **不许**退化成复制
+        Equal(1, r.Dirs);
+        Equal(1, r.Skipped);          // orphan.dll（宏没展开）
+        Equal(0, r.MissingPayload);
+        Equal(2, r.AclApplied);       // 文件 1 + 目录 1
+        Equal(0, r.AclSkipped);
+        Equal(0, r.AclMismatched);
+
+        string store = Path.Combine(windows, "WinSxS", CompDir, "basesrv.dll");
+        string dest = Path.Combine(system32, "basesrv.dll");
+        True(File.Exists(store), "正本没建出来：" + store);
+        True(File.Exists(dest), "落点没建出来：" + dest);
+
+        // 硬链接的判据：写一个，另一个跟着变（复制品不会）
+        File.WriteAllBytes(dest, new byte[] { 0x11, 0x22, 0x33 });
+        True(File.ReadAllBytes(store).SequenceEqual(new byte[] { 0x11, 0x22, 0x33 }),
+             "落点与正本不是同一个文件（硬链接没生效）");
+
+        // 正本与**载荷**必须是两份：往正本里写，packages 里的载荷不能跟着变
+        File.WriteAllBytes(store, new byte[] { 0x99 });
+        True(File.ReadAllBytes(payload).SequenceEqual(bytes),
+             "正本是复制品（载荷与正本硬链接在一起了，packages 被覆盖时正本会跟着坏）");
+
+        // writeableType 那条：**必须**是独立副本 —— 往落点里写，正本不能跟着变
+        // （正本是所有组件共享的底本；跟着变就等于一次运行时写入污染了镜像）
+        string wStore = Path.Combine(windows, "WinSxS", CompDir, "win.ini");
+        string wDest = Path.Combine(windows, "win.ini");
+        True(File.Exists(wStore), "writeable 文件的正本没建出来：" + wStore);
+        True(File.Exists(wDest), "writeable 文件的落点没建出来：" + wDest);
+        Equal("[fonts]\r\n", File.ReadAllText(wDest));
+        File.WriteAllText(wDest, "[fonts]\r\n[ocid-test]\r\n");
+        Equal("[fonts]\r\n", File.ReadAllText(wStore));   // 正本一字未动
+        True(!File.ReadAllBytes(wDest).SequenceEqual(File.ReadAllBytes(wStore)),
+             "writeable 落点应是独立副本（链到正本就会一起变）");
+
+        // ACL 独立复核（不走产品路径的判断）
+        True(OcidServicingNative.TryReadPathSddl(dest, OcidServicingNative.SecInfo.Dacl,
+                 out string got, out string aerr), "回读文件 DACL 失败：" + aerr);
+        True(OcidServicingNative.TryDescribeSddl(got, out var acl, out _), "回读的 SDDL 解读失败：" + got);
+        Equal(true, acl.DaclProtected);
+        Equal(3, acl.DaclAceCount);
+
+        // 目录：建出来了 + 属性按清单置位
+        string testDir = Path.Combine(system32, "OcidCsiTest");
+        True(Directory.Exists(testDir), "目录没建出来：" + testDir);
+        True((File.GetAttributes(testDir) & FileAttributes.Hidden) != 0, "目录应带 hidden 属性");
+
+        // 未展开宏的条目**一个文件都不该产生**
+        Equal(0, Directory.GetFiles(root, "orphan.dll", SearchOption.AllDirectories).Length);
+
+        // 路径 ACL 的两种边界：合法跳过 vs 真失败
+        Equal(OcidServicingNative.SddlApplyOutcome.SkippedInherit,
+              CsiFileService.ApplyAndVerifyPathSddl(dest, "(inherit)").Outcome);
+        var bad = CsiFileService.ApplyAndVerifyPathSddl(dest, "D:(A;;GA;;;SY");
+        Equal(OcidServicingNative.SddlApplyOutcome.Failed, bad.Outcome);
+        True(bad.Error.Length > 0, "失败必须带原因");
+    }
+    finally
+    {
+        try { Directory.Delete(root, recursive: true); } catch { /* 临时树删不掉不影响结论 */ }
     }
 }
 

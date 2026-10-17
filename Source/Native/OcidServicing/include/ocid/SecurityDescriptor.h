@@ -131,4 +131,32 @@ namespace ocid {
     bool ReadKeySddl(void* keyHandle, unsigned informationBits,
                      std::wstring& out, std::wstring& err);
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // 落盘：把 SDDL 应用到**文件/目录**（SetNamedSecurityInfo / GetNamedSecurityInfo）
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // 为什么和键那条分开：句柄模型不同（文件按**路径**打开，键按已有 HKEY），API 也不同
+    // （`SetNamedSecurityInfoW` vs `RegSetKeySecurity`）。清单里 `<file>` / `<directory>`
+    // 内嵌的 `<securityDescriptor name="…"/>` 走的就是这条路。
+    //
+    // `informationBits` 同样由 `SddlSecurityInformation` 决定，理由与键一致：只写 `D:`
+    // 的清单不该顺手把文件的 owner 改成当前用户。
+    //
+    // 需要的特权（缺了会 `ERROR_ACCESS_DENIED`，由调用方先行启用）：
+    //   · 写 owner（`O:`） → `SeRestorePrivilege` / `SeTakeOwnershipPrivilege`
+    //   · 写 SACL（`S:`）  → `SeSecurityPrivilege`
+    //   · 只写 DACL（`D:`）→ 文件/目录的 owner 即可（**注意**：目录上若是受保护 DACL，
+    //     写入后不再从父目录继承 —— 这正是清单声明的意图，不是副作用）
+
+    /// 把一个 SDDL 应用到文件或目录路径。
+    SddlApplyResult ApplySddlToPath(const std::wstring& path, const std::wstring& sddl,
+                                    std::wstring& err);
+
+    /// 回读文件/目录的安全描述符并转成 SDDL 文本（与键那条同样的"必须能回读"规矩）。
+    bool ReadPathSddl(const std::wstring& path, unsigned informationBits,
+                      std::wstring& out, std::wstring& err);
+
+    /// 路径是否存在（计划阶段判"这条要不要落"用；`ApplySddlToPath` 自己不检查）。
+    bool PathExists(const std::wstring& path);
+
 } // namespace ocid

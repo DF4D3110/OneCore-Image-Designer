@@ -162,7 +162,7 @@ function Build-Dll {
 Get-Toolchain 'x86' | ForEach-Object { New-Dirs -Out $_.Out -Obj $_.Obj }
 Get-Toolchain 'x64' | ForEach-Object { New-Dirs -Out $_.Out -Obj $_.Obj }
 
-$core = @('src\Identity.cpp', 'src\Manifest.cpp', 'src\WcmSchema.cpp', 'src\RegistryValue.cpp', 'src\CmiInstaller.cpp', 'src\MacroExpander.cpp', 'src\SecurityDescriptor.cpp')
+$core = @('src\Identity.cpp', 'src\Manifest.cpp', 'src\WcmSchema.cpp', 'src\RegistryValue.cpp', 'src\CmiInstaller.cpp', 'src\MacroExpander.cpp', 'src\SecurityDescriptor.cpp', 'src\FilePlacement.cpp')
 $api  = $core + @('src\OcidServicingApi.cpp')
 $def  = Join-Path $src 'src\OcidServicing.def'
 
@@ -176,6 +176,7 @@ Build-Target 'ocid_value_tests.exe'    @('src\RegistryValue.cpp', 'tests\registr
 Build-Target 'ocid_cmi_tests.exe'      @('src\RegistryValue.cpp', 'src\CmiInstaller.cpp', 'tests\cmiinstaller_tests.cpp')
 Build-Target 'ocid_macro_tests.exe'    @('src\MacroExpander.cpp', 'tests\macroexpander_tests.cpp')
 Build-Target 'ocid_sd_tests.exe'       @('src\SecurityDescriptor.cpp', 'tests\securitydescriptor_tests.cpp')
+Build-Target 'ocid_place_tests.exe'    @('src\Identity.cpp', 'src\Manifest.cpp', 'src\MacroExpander.cpp', 'src\SecurityDescriptor.cpp', 'src\FilePlacement.cpp', 'tests\fileplacement_tests.cpp')
 Build-Target 'ocid_manifest.exe'       ($core + @('tools\ocid_manifest.cpp'))
 
 Write-Host "[build] done -> $(Join-Path $root 'Output')"

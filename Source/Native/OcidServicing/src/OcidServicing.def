@@ -22,3 +22,6 @@ EXPORTS
     OcidDescribeSddl
     OcidApplyKeySddl
     OcidReadKeySddl
+    OcidApplyPathSddl
+    OcidReadPathSddl
+    OcidPathExists

@@ -13,6 +13,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <sddl.h>
+#include <aclapi.h>
 
 #pragma comment(lib, "advapi32.lib")
 
@@ -372,6 +373,138 @@ namespace ocid {
         }
 
         return SelfRelativeToSddl(buf.data(), need, out, err);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 文件/目录那条路：SetNamedSecurityInfo / GetNamedSecurityInfo
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // 与键那条的差别不只是 API：文件按**路径**给，函数自己开句柄，所以没有"句柄上没有
+    // WRITE_DAC"这个坑（它内部开的是带 WRITE_DAC 的句柄）；反过来它会**跟随**路径，
+    // 并且目录上写受保护 DACL 会真的切断继承 —— 这正是清单 `<directory>` 声明的意图。
+
+    bool PathExists(const std::wstring& path)
+    {
+        if (path.empty()) return false;
+        const DWORD a = ::GetFileAttributesW(path.c_str());
+        return a != INVALID_FILE_ATTRIBUTES;
+    }
+
+    SddlApplyResult ApplySddlToPath(const std::wstring& path, const std::wstring& sddl,
+                                    std::wstring& err)
+    {
+        err.clear();
+
+        if (IsInheritSddl(sddl)) return SddlApplyResult::SkippedInherit;
+        if (path.empty()) { err = L"路径为空"; return SddlApplyResult::Failed; }
+
+        SddlInfo info;
+        std::wstring perr;
+        if (!DescribeSddl(sddl, info, perr)) {
+            err = L"SDDL 解析失败：" + perr;
+            return SddlApplyResult::Failed;
+        }
+
+        unsigned bits = SddlSecurityInformation(info);
+        if (bits == 0) {
+            err = L"SDDL 里没有任何可设置的段（O:/G:/D:/S: 全缺）";
+            return SddlApplyResult::Failed;
+        }
+
+        // ★ 文件/目录这条路**必须**显式告诉 API"这个 DACL 是受保护的"。
+        //   注册表那条路（`RegSetKeySecurity`）是**从描述符里读** SE_DACL_PROTECTED；
+        //   而 `SetNamedSecurityInfoW` **不看**描述符里那一位，只看 SECURITY_INFORMATION
+        //   里有没有 `PROTECTED_DACL_SECURITY_INFORMATION`。不给标志的后果实测过：
+        //   写 `D:P(A;;GA;;;SY)(A;;GR;;;BA)`（2 条）回读得到 **5 条** —— 父目录的可继承
+        //   ACE 被并了进来，而且 `P` 标志没了。清单写 `D:P` 的意图就是"断开继承"，
+        //   所以这里按 SDDL 的 P 位**双向**显式设置（没写 P 就明确要求 UNPROTECTED，
+        //   不让"当前恰好是什么"决定结果）。
+        if (bits & DACL_SECURITY_INFORMATION) {
+            bits |= info.daclProtected ? PROTECTED_DACL_SECURITY_INFORMATION
+                                       : UNPROTECTED_DACL_SECURITY_INFORMATION;
+        }
+        if (bits & SACL_SECURITY_INFORMATION) {
+            bits |= info.saclProtected ? PROTECTED_SACL_SECURITY_INFORMATION
+                                       : UNPROTECTED_SACL_SECURITY_INFORMATION;
+        }
+
+        std::vector<unsigned char> sd;
+        if (!SddlToSelfRelative(sddl, sd, perr)) {
+            err = L"SDDL 转自相对描述符失败：" + perr;
+            return SddlApplyResult::Failed;
+        }
+        if (sd.empty()) { err = L"自相对描述符为空"; return SddlApplyResult::Failed; }
+
+        // `SetNamedSecurityInfoW` 要的是**拆开的** owner/group/dacl/sacl 指针，
+        // 不是整块描述符；从自相对块里取出来即可（指针指向块内部，不需要释放）。
+        PSECURITY_DESCRIPTOR psd = reinterpret_cast<PSECURITY_DESCRIPTOR>(sd.data());
+        PSID  owner = nullptr, group = nullptr;
+        PACL  dacl  = nullptr, sacl  = nullptr;
+        BOOL  present = FALSE, defaulted = FALSE;
+
+        // 注意：按 bits 取，**不按段取**。取出来的指针可能是 NULL（例如 `D:NO_ACCESS_CONTROL`
+        // 就是 NULL DACL），那种 NULL 是有意义的"设成 NULL"，不能当成"没这一段"跳过。
+        if (bits & OWNER_SECURITY_INFORMATION) ::GetSecurityDescriptorOwner(psd, &owner, &defaulted);
+        if (bits & GROUP_SECURITY_INFORMATION) ::GetSecurityDescriptorGroup(psd, &group, &defaulted);
+        if (bits & DACL_SECURITY_INFORMATION)  ::GetSecurityDescriptorDacl (psd, &present, &dacl,  &defaulted);
+        if (bits & SACL_SECURITY_INFORMATION)  ::GetSecurityDescriptorSacl (psd, &present, &sacl,  &defaulted);
+
+        const DWORD rc = ::SetNamedSecurityInfoW(
+            const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT,
+            static_cast<SECURITY_INFORMATION>(bits), owner, group, dacl, sacl);
+
+        if (rc != ERROR_SUCCESS) {
+            err = L"SetNamedSecurityInfo 失败，Win32 错误 " + std::to_wstring(rc);
+            if (rc == ERROR_ACCESS_DENIED) {
+                if (bits & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION)) {
+                    err += L"：写 owner/group 需要 SeRestorePrivilege（或 SeTakeOwnershipPrivilege）";
+                } else if (bits & SACL_SECURITY_INFORMATION) {
+                    err += L"：写 SACL 需要 SeSecurityPrivilege";
+                } else {
+                    err += L"：当前身份对该路径没有 WRITE_DAC（离线镜像里常见于 Windows\\… 下的系统目录）";
+                }
+            } else if (rc == ERROR_FILE_NOT_FOUND || rc == ERROR_PATH_NOT_FOUND) {
+                err += L"：路径不存在";
+            }
+            return SddlApplyResult::Failed;
+        }
+        return SddlApplyResult::Applied;
+    }
+
+    bool ReadPathSddl(const std::wstring& path, unsigned informationBits,
+                      std::wstring& out, std::wstring& err)
+    {
+        out.clear();
+        err.clear();
+
+        if (path.empty()) { err = L"路径为空"; return false; }
+
+        SECURITY_INFORMATION want = informationBits != 0
+            ? static_cast<SECURITY_INFORMATION>(informationBits)
+            : (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION);
+
+        PSECURITY_DESCRIPTOR psd = nullptr;
+        const DWORD rc = ::GetNamedSecurityInfoW(
+            const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT, want,
+            nullptr, nullptr, nullptr, nullptr, &psd);
+        if (rc != ERROR_SUCCESS) {
+            err = L"GetNamedSecurityInfo 失败，Win32 错误 " + std::to_wstring(rc);
+            return false;
+        }
+
+        LPWSTR s = nullptr;
+        const BOOL okConv = ::ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            psd, SDDL_REVISION_1, want, &s, nullptr);
+        ::LocalFree(psd);
+
+        if (!okConv || s == nullptr) {
+            err = L"ConvertSecurityDescriptorToStringSecurityDescriptor 失败，GetLastError="
+                + std::to_wstring(::GetLastError());
+            return false;
+        }
+        out.assign(s);
+        ::LocalFree(s);
+        return true;
     }
 
 } // namespace ocid

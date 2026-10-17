@@ -218,6 +218,20 @@ namespace OneCore_Image_Designer.Services
             [Out] char[]? errBuf, uint errCap);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int OcidApplyPathSddl(
+            string path, string sddl, out int outApplied,
+            [Out] char[]? errBuf, uint errCap);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int OcidReadPathSddl(
+            string path, uint informationBits,
+            [Out] char[]? outBuf, uint outCap, out uint outLen,
+            [Out] char[]? errBuf, uint errCap);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int OcidPathExists(string path);
+
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
         private static extern int OcidDescribeSddl(
             string sddl,
             out int hasOwner, out int hasGroup, out int hasDacl, out int hasSacl,
@@ -570,6 +584,77 @@ namespace OneCore_Image_Designer.Services
                 error = $"调用原生库失败：{ex.Message}";
                 return false;
             }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // 安全描述符（SDDL）→ 磁盘上的文件/目录（CSI 落位）
+        // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// 把 SDDL 写到**文件或目录路径**上（<c>SetNamedSecurityInfoW</c>）。
+        /// </summary>
+        /// <remarks>
+        /// 与 <see cref="ApplyKeySddl"/> 的区别不只是 API：文件这条路的
+        /// "DACL 是否受保护"必须由 SECURITY_INFORMATION 标志说明
+        /// （<c>SetNamedSecurityInfoW</c> **不看**描述符里的 `SE_DACL_PROTECTED`），
+        /// 这个换算做在原生 <c>ApplySddlToPath</c> 里，C# 侧**不要**再算一遍。
+        /// 写 owner/group 要 `SeRestorePrivilege`、写 SACL 要 `SeSecurityPrivilege`。
+        /// </remarks>
+        public static SddlApplyOutcome ApplyPathSddl(string path, string sddl, out string error)
+        {
+            error = "";
+            var err = new char[ErrCap];
+            try
+            {
+                int rc = OcidApplyPathSddl(path ?? "", sddl ?? "", out int applied, err, ErrCap);
+                if (rc == (int)Rc.Ok)
+                    return applied != 0 ? SddlApplyOutcome.Applied : SddlApplyOutcome.SkippedInherit;
+                error = ErrText(err, rc);
+                return SddlApplyOutcome.Failed;
+            }
+            catch (Exception ex)
+            {
+                error = $"调用原生库失败：{ex.Message}";
+                return SddlApplyOutcome.Failed;
+            }
+        }
+
+        /// <summary>回读文件/目录的安全描述符 → SDDL 文本（0 ⇒ OWNER|GROUP|DACL）。</summary>
+        public static bool TryReadPathSddl(string path, uint informationBits,
+                                           out string sddl, out string error)
+        {
+            sddl = "";
+            error = "";
+            var err = new char[ErrCap];
+            try
+            {
+                var buf = new char[4 * 1024];
+                int rc = OcidReadPathSddl(path ?? "", informationBits, buf, (uint)buf.Length,
+                                          out uint len, err, ErrCap);
+                if (rc == (int)Rc.Buffer && len > 0)
+                {
+                    buf = new char[len + 1];
+                    rc = OcidReadPathSddl(path ?? "", informationBits, buf, (uint)buf.Length,
+                                          out len, err, ErrCap);
+                }
+                if (rc != (int)Rc.Ok) { error = ErrText(err, rc); return false; }
+
+                sddl = new string(buf, 0, (int)len);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = $"调用原生库失败：{ex.Message}";
+                return false;
+            }
+        }
+
+        /// <summary>路径是否存在（走原生侧，与落位时的判断同源）。</summary>
+        public static bool PathExists(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            try { return OcidPathExists(path) != 0; }
+            catch { return File.Exists(path) || Directory.Exists(path); }
         }
 
         /// <summary>
