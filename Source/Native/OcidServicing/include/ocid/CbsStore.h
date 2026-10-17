@@ -76,16 +76,36 @@ std::string CbsFormatIdentity(const CbsIdentity& identity);
 
 // ---- 组件记录 ----
 
+// 真机上的值名不是能由数据重算出来的：`f!` 后面是**文件名的小写**，而值数据
+// 是原始大小写的 UTF-16（例：值名 `f!accessibility.dll`、数据 `Accessibility.dll`；
+// 3,000 个采样里 1,468 个大小写不同）。所以记录里同时保留“完整值名”和“解码后的
+// 数据”，往返读写才无损；写新记录时用 CbsFileValueName() 按规则造名字。
+
+struct CbsMark {
+    std::string valueName;       // 完整值名："c!<部署名>"
+    std::string deploymentName;  // 去掉 "c!" 前缀的部署名
+};
+
+struct CbsFile {
+    std::string valueName;       // 完整值名："f!<文件名小写>"
+    std::wstring fileName;       // 值数据（UTF-16LE，无结尾 NUL）
+};
+
 struct CbsComponentRecord {
     std::wstring name;                          // 组件名（= WinSxS 目录名）
     std::vector<std::uint8_t> manifestSha256;   // S256H
     std::string identity;                       // identity（ASCII）
-    std::vector<std::string> deploymentMarks;   // c!<部署名>，值恒为空
-    std::vector<std::wstring> files;            // f!<文件名>
+    std::vector<CbsMark> deploymentMarks;       // c!<部署名>，值恒为空
+    std::vector<CbsFile> files;                 // f!<文件名小写> -> 真实文件名
     bool hasConfigFlags = false;
     std::uint32_t configFlags = 0;              // CF
     std::vector<CbsValue> extraValues;          // 未解释的值，原样保留
 };
+
+// 按真机规则造值名：`f!` + 文件名的 ASCII 小写。
+std::string CbsFileValueName(const std::wstring& fileName);
+// 按真机规则造值名：`c!` + 部署名。
+std::string CbsMarkValueName(const std::string& deploymentName);
 
 // 失败时返回 false 并给出可读原因；成功时 extraValues 收下所有不认识的值。
 bool CbsDecodeComponentRecord(const std::wstring& name,
@@ -96,12 +116,21 @@ std::vector<CbsValue> CbsEncodeComponentRecord(const CbsComponentRecord& record)
 
 // ---- 部署记录 ----
 
+// `p!/s!/i!` 的值名同样带派生后缀（例
+// `p!CBS_microsoft-windows-common-drivers-package-drivers~31bf3856ad3_c1a886620aabcbe2`），
+// 后缀规则尚未解出 ⇒ 完整值名原样保留。
+struct CbsPayload {
+    std::string valueName;       // 完整值名："p!/s!/i!<派生名>"
+    std::string prefix;          // "p!" / "s!" / "i!"
+    std::string identity;        // 值数据：8 字节长度前缀 + ASCII 身份
+};
+
 struct CbsDeploymentRecord {
     std::wstring name;                                   // 部署名
     std::string appId;                                   // appid（ASCII）
     bool hasCatalogThumbprint = false;
     std::string catalogThumbprint;                        // CatalogThumbprint
-    std::vector<std::pair<std::string, std::string>> payloads;  // "p!"/"s!"/"i!" -> 身份
+    std::vector<CbsPayload> payloads;
     std::vector<CbsValue> extraValues;
 };
 

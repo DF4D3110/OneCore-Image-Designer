@@ -181,7 +181,8 @@ static void ComponentRecord()
     values.push_back(CbsValue{"S256H", FromHex(kS256HHex)});
     values.push_back(CbsValue{"identity", CbsEncodeAsciiText(identityText)});
     values.push_back(CbsValue{"c!microsoft-w..-deployment_31bf3856ad364e35_6.2.8061.0_2a3c52b50797ba5a", {}});
-    values.push_back(CbsValue{"f!Accessibility.dll", FromHex(kFileNameHex)});
+    // 真机原样：值名是文件名的小写，值数据才是原始大小写。
+    values.push_back(CbsValue{"f!accessibility.dll", FromHex(kFileNameHex)});
     values.push_back(CbsValue{"CF", CbsEncodeDword(12)});
     values.push_back(CbsValue{"zz-unknown", FromHex("0102")});
 
@@ -193,32 +194,59 @@ static void ComponentRecord()
     CheckAscii(HexOf(record.manifestSha256), kS256HHex, "S256H 字节与真机一致");
     CheckAscii(record.identity, identityText, "identity 原样保留");
     CheckInt(static_cast<long long>(record.deploymentMarks.size()), 1, "识别 1 个 c! 标记");
-    CheckAscii(record.deploymentMarks.empty() ? "" : record.deploymentMarks[0],
+    CheckAscii(record.deploymentMarks.empty() ? "" : record.deploymentMarks[0].deploymentName,
                "microsoft-w..-deployment_31bf3856ad364e35_6.2.8061.0_2a3c52b50797ba5a",
                "c! 标记名去掉前缀");
+    CheckAscii(record.deploymentMarks.empty() ? "" : record.deploymentMarks[0].valueName,
+               "c!microsoft-w..-deployment_31bf3856ad364e35_6.2.8061.0_2a3c52b50797ba5a",
+               "c! 完整值名原样保留");
     CheckInt(static_cast<long long>(record.files.size()), 1, "识别 1 个 f! 文件名");
-    CheckStr(record.files.empty() ? L"" : record.files[0], L"Accessibility.dll",
-             "f! 解出文件名（UTF-16 无结尾 NUL）");
+    CheckAscii(record.files.empty() ? "" : record.files[0].valueName, "f!accessibility.dll",
+               "f! 完整值名（小写）原样保留");
+    CheckStr(record.files.empty() ? L"" : record.files[0].fileName, L"Accessibility.dll",
+             "f! 解出文件名（UTF-16 无结尾 NUL、原始大小写）");
     Check(record.hasConfigFlags, "带 CF");
     CheckInt(record.configFlags, 12, "CF = 12");
     CheckInt(static_cast<long long>(record.extraValues.size()), 1, "不认识的值原样留下");
 
-    // 编码器必须产出与真机同字节的 S256H / identity / f!
+    // 编码器必须产出与真机同字节的 S256H / identity / f!（连值名都要一样）
     const std::vector<CbsValue> back = CbsEncodeComponentRecord(record);
     bool shaOk = false, idOk = false, fileOk = false, cfOk = false, unknownOk = false;
     for (const CbsValue& value : back)
     {
         if (value.name == "S256H") shaOk = HexOf(value.data) == kS256HHex;
         else if (value.name == "identity") idOk = HexOf(value.data) == HexOf(CbsEncodeAsciiText(identityText));
-        else if (value.name == "f!Accessibility.dll") fileOk = HexOf(value.data) == kFileNameHex;
+        else if (value.name == "f!accessibility.dll") fileOk = HexOf(value.data) == kFileNameHex;
         else if (value.name == "CF") cfOk = HexOf(value.data) == "0c000000";
         else if (value.name == "zz-unknown") unknownOk = HexOf(value.data) == "0102";
     }
     Check(shaOk, "S256H 再编码与原字节相同");
     Check(idOk, "identity 再编码与原字节相同");
-    Check(fileOk, "f! 再编码与原字节相同");
+    Check(fileOk, "f! 再编码还原小写值名 + 原始大小写数据");
     Check(cfOk, "CF 再编码 = 0c000000");
     Check(unknownOk, "未知值在再编码里保留");
+
+    // 写新记录时只给文件名，值名要按真机规则造（小写）
+    CbsComponentRecord fresh;
+    fresh.name = L"x_y";
+    fresh.manifestSha256 = FromHex(kS256HHex);
+    fresh.identity = "A";
+    CbsFile newFile;
+    newFile.fileName = L"AddInProcess.exe";
+    fresh.files.push_back(newFile);
+    bool freshNameOk = false, freshDataOk = false;
+    for (const CbsValue& value : CbsEncodeComponentRecord(fresh))
+    {
+        if (value.name == "f!addinprocess.exe")
+        {
+            freshNameOk = true;
+            freshDataOk = HexOf(value.data) == HexOf(CbsEncodeUtf16Text(L"AddInProcess.exe"));
+        }
+    }
+    Check(freshNameOk, "新建记录的 f! 值名 = 文件名 ASCII 小写");
+    Check(freshDataOk, "新建记录的 f! 数据 = 原始大小写 UTF-16");
+    CheckAscii(CbsFileValueName(L"AspNetMMCExt.dll"), "f!aspnetmmcext.dll",
+               "CbsFileValueName 造名规则");
 
     // 错形态必须报错（这些错法在真机上不会出现，但写坏了会静默糟蹋台账）
     std::vector<CbsValue> badSha = values;
@@ -276,8 +304,11 @@ static void DeploymentRecord()
     CheckInt(static_cast<long long>(record.payloads.size()), 3, "识别 p!/s!/i! 三个载荷");
     if (record.payloads.size() == 3)
     {
-        CheckAscii(record.payloads[0].first, "p!", "第 1 个载荷前缀是 p!");
-        CheckAscii(record.payloads[0].second, kPayloadText, "载荷文本解出包身份");
+        CheckAscii(record.payloads[0].prefix, "p!", "第 1 个载荷前缀是 p!");
+        CheckAscii(record.payloads[0].identity, kPayloadText, "载荷文本解出包身份");
+        CheckAscii(record.payloads[0].valueName,
+                   "p!CBS_microsoft-windows-common-drivers-package-drivers~31bf3856ad3_c1a886620aabcbe2",
+                   "载荷完整值名（含派生后缀）原样保留");
     }
 
     const std::vector<CbsValue> back = CbsEncodeDeploymentRecord(record);

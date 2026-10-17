@@ -14,6 +14,7 @@
 // 输出约定：**数据走 stdout，诊断走 stderr** —— 这样 C# 侧可以干净地消费 stdout。
 
 #include "ocid/ConsoleUtf8.h"
+#include "ocid/CbsStore.h"
 #include "ocid/DriverPackage.h"
 #include "ocid/DriverInf.h"
 #include "ocid/FilePlacement.h"
@@ -22,8 +23,10 @@
 #include "ocid/RegistryValue.h"
 #include "ocid/WcmSchema.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -1111,6 +1114,369 @@ static int CmdDmiLedger(const std::wstring& repoRoot,
 #endif
 }
 
+// ── CBS 台账清点（cbs-scan）──────────────────────────────────────────────
+//
+// 读一个**已挂载**的 COMPONENTS hive，把每条记录按 CbsStore 的语义解码，再原样
+// 编码回去，和注册表里的原始字节逐值比对。这样"编解码对不对"就不是抽样而是
+// 全量自证：真机 8061 x86 有 13,325 个组件、2,283 个部署、792 个目录。
+//
+// 用法：ocid_manifest cbs-scan HKLM\OCIDCOMP [--limit N]
+#ifdef _WIN32
+namespace {
+
+struct CbsRegValue
+{
+    std::string name;
+    DWORD type = 0;
+    std::vector<std::uint8_t> data;
+};
+
+bool ParseHivePath(const std::wstring& spec, HKEY& root, std::wstring& sub, std::wstring& err)
+{
+    struct RootAlias { const wchar_t* prefix; HKEY key; };
+    static const RootAlias aliases[] = {
+        { L"HKLM\\", HKEY_LOCAL_MACHINE },
+        { L"HKEY_LOCAL_MACHINE\\", HKEY_LOCAL_MACHINE },
+        { L"HKCU\\", HKEY_CURRENT_USER },
+        { L"HKEY_CURRENT_USER\\", HKEY_CURRENT_USER },
+    };
+    for (const RootAlias& alias : aliases)
+    {
+        const size_t n = wcslen(alias.prefix);
+        if (spec.size() > n && _wcsnicmp(spec.c_str(), alias.prefix, n) == 0)
+        {
+            root = alias.key;
+            sub = spec.substr(n);
+            return true;
+        }
+    }
+    err = L"挂载路径要写成 HKLM\\<名称> 或 HKCU\\<名称>";
+    return false;
+}
+
+bool ReadAllValues(HKEY key, std::vector<CbsRegValue>& out, std::wstring& err)
+{
+    DWORD count = 0, maxName = 0, maxData = 0;
+    if (RegQueryInfoKeyW(key, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                         &count, &maxName, &maxData, nullptr, nullptr) != ERROR_SUCCESS)
+    {
+        err = L"RegQueryInfoKey 失败";
+        return false;
+    }
+    std::wstring name(maxName + 2, L'\0');
+    std::vector<std::uint8_t> data(maxData + 8);
+    out.reserve(count);
+    for (DWORD i = 0; i < count; ++i)
+    {
+        DWORD nameLen = static_cast<DWORD>(name.size());
+        DWORD dataLen = static_cast<DWORD>(data.size());
+        DWORD type = 0;
+        const LSTATUS rc = RegEnumValueW(key, i, &name[0], &nameLen, nullptr, &type,
+                                         data.data(), &dataLen);
+        if (rc != ERROR_SUCCESS)
+        {
+            err = L"RegEnumValue 失败（错误码 " + std::to_wstring(rc) + L"）";
+            return false;
+        }
+        CbsRegValue value;
+        value.name = ToUtf8(std::wstring(name.c_str(), nameLen));
+        value.type = type;
+        value.data.assign(data.begin(), data.begin() + dataLen);
+        out.push_back(std::move(value));
+    }
+    return true;
+}
+
+// 注册表值 -> 台账字节：REG_SZ 的宽文本按 ASCII 取字节，DWORD 是 4 字节小端。
+std::vector<std::uint8_t> ToCbsBytes(const CbsRegValue& value)
+{
+    if (value.type == REG_SZ || value.type == REG_EXPAND_SZ)
+    {
+        std::vector<std::uint8_t> out;
+        const size_t chars = value.data.size() / sizeof(wchar_t);
+        const wchar_t* text = reinterpret_cast<const wchar_t*>(value.data.data());
+        for (size_t i = 0; i < chars; ++i)
+        {
+            if (text[i] == 0) break;
+            out.push_back(text[i] <= 0x7F ? static_cast<std::uint8_t>(text[i])
+                                          : static_cast<std::uint8_t>('?'));
+        }
+        return out;
+    }
+    if (value.type == REG_DWORD)
+        return std::vector<std::uint8_t>(value.data.begin(),
+                                         value.data.begin() + (std::min)(size_t{4}, value.data.size()));
+    return value.data;
+}
+
+std::vector<CbsValue> ToCbsValues(const std::vector<CbsRegValue>& values)
+{
+    std::vector<CbsValue> out;
+    out.reserve(values.size());
+    for (const CbsRegValue& value : values)
+        out.push_back(CbsValue{value.name, ToCbsBytes(value)});
+    return out;
+}
+
+// 值集合比较（顺序无关）：个数、每个名字、每个字节都必须一致。
+bool SameValueSet(const std::vector<CbsValue>& want, const std::vector<CbsValue>& got,
+                  std::string& why)
+{
+    std::map<std::string, std::vector<std::uint8_t>> a, b;
+    for (const CbsValue& v : want) a[v.name] = v.data;
+    for (const CbsValue& v : got)  b[v.name] = v.data;
+    if (a.size() != b.size())
+    {
+        why = "值个数不同（原 " + std::to_string(a.size()) + "，编码后 " + std::to_string(b.size()) + "）";
+        return false;
+    }
+    for (const auto& kv : a)
+    {
+        const auto it = b.find(kv.first);
+        if (it == b.end()) { why = "编码后缺少值 " + kv.first; return false; }
+        if (it->second != kv.second) { why = "值字节不同：" + kv.first; return false; }
+    }
+    return true;
+}
+
+bool EnumSubKeys(HKEY parent, std::vector<std::wstring>& names, std::wstring& err)
+{
+    DWORD count = 0, maxName = 0;
+    if (RegQueryInfoKeyW(parent, nullptr, nullptr, nullptr, &count, &maxName, nullptr,
+                         nullptr, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS)
+    {
+        err = L"RegQueryInfoKey 失败";
+        return false;
+    }
+    std::wstring name(maxName + 2, L'\0');
+    names.clear();
+    names.reserve(count);
+    for (DWORD i = 0; i < count; ++i)
+    {
+        DWORD len = static_cast<DWORD>(name.size());
+        const LSTATUS rc = RegEnumKeyExW(parent, i, &name[0], &len, nullptr, nullptr, nullptr, nullptr);
+        if (rc != ERROR_SUCCESS)
+        {
+            err = L"RegEnumKeyEx 失败（错误码 " + std::to_wstring(rc) + L"）";
+            return false;
+        }
+        names.emplace_back(name.c_str(), len);
+    }
+    return true;
+}
+
+struct CbsScanCounters
+{
+    size_t keys = 0, decoded = 0, decodeFailed = 0, mismatch = 0, nameViolations = 0;
+    size_t cf4 = 0, cf5 = 0, cf12 = 0, cfOther = 0;
+    size_t marks = 0, files = 0, emptyFiles = 0, payloads = 0, catalogs = 0;
+};
+
+} // namespace
+#endif
+
+static int CmdCbsScan(const std::wstring& hiveSpec, int limit)
+{
+#ifdef _WIN32
+    HKEY rootKey = nullptr;
+    std::wstring sub, err;
+    if (!ParseHivePath(hiveSpec, rootKey, sub, err)) { Err(ToUtf8(err)); return 2; }
+
+    HKEY store = nullptr;
+    const LSTATUS openRc = RegOpenKeyExW(rootKey, sub.c_str(), 0, KEY_READ, &store);
+    if (openRc != ERROR_SUCCESS) { Err("打不开台账根（reg load 了吗？）"); return 2; }
+
+    int failures = 0;
+
+    // 1) 根值
+    {
+        std::vector<CbsRegValue> raw;
+        if (!ReadAllValues(store, raw, err)) { Err(ToUtf8(err)); RegCloseKey(store); return 2; }
+        const std::vector<CbsValue> values = ToCbsValues(raw);
+        CbsStoreHeader header;
+        std::string decodeErr;
+        if (!CbsDecodeStoreHeader(values, header, decodeErr))
+        {
+            Err("根值解码失败：" + decodeErr);
+            ++failures;
+        }
+        else
+        {
+            std::string why;
+            if (!SameValueSet(values, CbsEncodeStoreHeader(header), why))
+            {
+                Err("根值再编码不一致：" + why);
+                ++failures;
+            }
+            else
+            {
+                OutLn("root: format=" + ToUtf8(header.formatVersion) +
+                      " arch=" + std::to_string(header.architecture) +
+                      " exec=" + std::to_string(header.executionState) +
+                      " values=" + std::to_string(values.size()));
+            }
+        }
+    }
+
+    // 2) 组件
+    CbsScanCounters comp;
+    {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(store, L"DerivedData\\Components", 0, KEY_READ, &key) != ERROR_SUCCESS)
+        {
+            Err("缺少 DerivedData\\Components");
+            ++failures;
+        }
+        else
+        {
+            std::vector<std::wstring> names;
+            if (!EnumSubKeys(key, names, err)) { Err(ToUtf8(err)); ++failures; }
+            for (const std::wstring& name : names)
+            {
+                if (limit > 0 && static_cast<int>(comp.keys) >= limit) break;
+                ++comp.keys;
+                HKEY item = nullptr;
+                if (RegOpenKeyExW(key, name.c_str(), 0, KEY_READ, &item) != ERROR_SUCCESS)
+                {
+                    ++comp.decodeFailed;
+                    if (failures < 10) Err("打不开组件键 " + ToUtf8(name));
+                    continue;
+                }
+                std::vector<CbsRegValue> raw;
+                if (!ReadAllValues(item, raw, err)) { ++comp.decodeFailed; RegCloseKey(item); continue; }
+                const std::vector<CbsValue> values = ToCbsValues(raw);
+                CbsComponentRecord record;
+                std::string decodeErr;
+                if (!CbsDecodeComponentRecord(name, values, record, decodeErr))
+                {
+                    ++comp.decodeFailed;
+                    if (failures < 10) Err("组件解码失败 " + ToUtf8(name) + "：" + decodeErr);
+                    RegCloseKey(item);
+                    continue;
+                }
+                ++comp.decoded;
+                comp.marks += record.deploymentMarks.size();
+                comp.files += record.files.size();
+                for (const CbsFile& f : record.files) if (f.fileName.empty()) ++comp.emptyFiles;
+                if (record.hasConfigFlags)
+                {
+                    if (record.configFlags == 4) ++comp.cf4;
+                    else if (record.configFlags == 5) ++comp.cf5;
+                    else if (record.configFlags == 12) ++comp.cf12;
+                    else ++comp.cfOther;
+                }
+                if (!CbsIsComponentName(name)) ++comp.nameViolations;
+                std::string why;
+                if (!SameValueSet(values, CbsEncodeComponentRecord(record), why))
+                {
+                    ++comp.mismatch;
+                    if (failures < 10) Err("组件再编码不一致 " + ToUtf8(name) + "：" + why);
+                }
+                RegCloseKey(item);
+            }
+            RegCloseKey(key);
+        }
+    }
+
+    // 3) 部署
+    CbsScanCounters dep;
+    {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(store, L"CanonicalData\\Deployments", 0, KEY_READ, &key) != ERROR_SUCCESS)
+        {
+            Err("缺少 CanonicalData\\Deployments");
+            ++failures;
+        }
+        else
+        {
+            std::vector<std::wstring> names;
+            if (!EnumSubKeys(key, names, err)) { Err(ToUtf8(err)); ++failures; }
+            for (const std::wstring& name : names)
+            {
+                if (limit > 0 && static_cast<int>(dep.keys) >= limit) break;
+                ++dep.keys;
+                HKEY item = nullptr;
+                if (RegOpenKeyExW(key, name.c_str(), 0, KEY_READ, &item) != ERROR_SUCCESS)
+                {
+                    ++dep.decodeFailed;
+                    continue;
+                }
+                std::vector<CbsRegValue> raw;
+                if (!ReadAllValues(item, raw, err)) { ++dep.decodeFailed; RegCloseKey(item); continue; }
+                const std::vector<CbsValue> values = ToCbsValues(raw);
+                CbsDeploymentRecord record;
+                std::string decodeErr;
+                if (!CbsDecodeDeploymentRecord(name, values, record, decodeErr))
+                {
+                    ++dep.decodeFailed;
+                    if (failures < 10) Err("部署解码失败 " + ToUtf8(name) + "：" + decodeErr);
+                    RegCloseKey(item);
+                    continue;
+                }
+                ++dep.decoded;
+                dep.payloads += record.payloads.size();
+                std::string why;
+                if (!SameValueSet(values, CbsEncodeDeploymentRecord(record), why))
+                {
+                    ++dep.mismatch;
+                    if (failures < 10) Err("部署再编码不一致 " + ToUtf8(name) + "：" + why);
+                }
+                RegCloseKey(item);
+            }
+            RegCloseKey(key);
+        }
+    }
+
+    // 4) 目录（Catalog：键名是指纹，值是 c!<部署> 且恒为空）
+    CbsScanCounters cat;
+    {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(store, L"CanonicalData\\Catalogs", 0, KEY_READ, &key) == ERROR_SUCCESS)
+        {
+            std::vector<std::wstring> names;
+            if (!EnumSubKeys(key, names, err)) { Err(ToUtf8(err)); ++failures; }
+            for (const std::wstring& name : names)
+            {
+                if (limit > 0 && static_cast<int>(cat.keys) >= limit) break;
+                ++cat.keys;
+                HKEY item = nullptr;
+                if (RegOpenKeyExW(key, name.c_str(), 0, KEY_READ, &item) != ERROR_SUCCESS) continue;
+                std::vector<CbsRegValue> raw;
+                if (ReadAllValues(item, raw, err)) { cat.decoded += raw.size(); }
+                RegCloseKey(item);
+            }
+            RegCloseKey(key);
+        }
+    }
+
+    OutLn("components: keys=" + std::to_string(comp.keys) +
+          " decoded=" + std::to_string(comp.decoded) +
+          " decodeFailed=" + std::to_string(comp.decodeFailed) +
+          " mismatch=" + std::to_string(comp.mismatch) +
+          " nameViolations=" + std::to_string(comp.nameViolations));
+    OutLn("  marks=" + std::to_string(comp.marks) + " files=" + std::to_string(comp.files) +
+          " emptyFiles=" + std::to_string(comp.emptyFiles));
+    OutLn("  CF: 4=" + std::to_string(comp.cf4) + " 5=" + std::to_string(comp.cf5) +
+          " 12=" + std::to_string(comp.cf12) + " other=" + std::to_string(comp.cfOther));
+    OutLn("deployments: keys=" + std::to_string(dep.keys) +
+          " decoded=" + std::to_string(dep.decoded) +
+          " decodeFailed=" + std::to_string(dep.decodeFailed) +
+          " mismatch=" + std::to_string(dep.mismatch) +
+          " payloads=" + std::to_string(dep.payloads));
+    OutLn("catalogs: keys=" + std::to_string(cat.keys) +
+          " marks=" + std::to_string(cat.decoded));
+
+    failures += static_cast<int>(comp.decodeFailed + comp.mismatch + dep.decodeFailed + dep.mismatch);
+    RegCloseKey(store);
+    OutLn(failures == 0 ? "result: OK（全量解码→再编码逐字节一致）"
+                        : "result: FAILED（失败 " + std::to_string(failures) + "）");
+    return failures == 0 ? 0 : 1;
+#else
+    (void)hiveSpec; (void)limit;
+    return 2;
+#endif
+}
+
 static void Usage()
 {
     OutLn("OCID servicing console");
@@ -1128,6 +1494,7 @@ static void Usage()
     OutLn("  ocid_manifest verify-names <dir> [maxFiles]   (check component names against real file names)");
     OutLn("  ocid_manifest expand <windowsDir> <text...>   expand $(runtime.*); --paths to also show base paths");
     OutLn("  ocid_manifest macros                          list known $(runtime.*) macro names");
+    OutLn("  ocid_manifest cbs-scan HKLM\\OCIDCOMP [--limit N]   decode+re-encode every store record");
     OutLn("");
     OutLn("Data goes to stdout, diagnostics to stderr.");
 }
@@ -1229,6 +1596,15 @@ int main(int argc, char** argv)
             text += FromUtf8OrAnsi(argv[i]);
         }
         return CmdExpand(FromUtf8OrAnsi(argv[2]), text, paths);
+    }
+
+    if (cmd == L"cbs-scan" && argc >= 3) {
+        int mx = 0;
+        for (int i = 3; i < argc; ++i) {
+            const std::string a = argv[i];
+            if (a == "--limit" && i + 1 < argc) { mx = atoi(argv[++i]); }
+        }
+        return CmdCbsScan(FromUtf8OrAnsi(argv[2]), mx);
     }
 
     if (cmd == L"macros")

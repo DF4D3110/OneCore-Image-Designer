@@ -45,7 +45,25 @@ bool StartsWith(const std::string& text, const char* prefix) {
     return text.size() >= n && std::equal(prefix, prefix + n, text.begin());
 }
 
+std::string LowerAscii(std::string text) {
+    for (char& c : text) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return text;
+}
+
 }  // namespace
+
+std::string CbsFileValueName(const std::wstring& fileName) {
+    // 真机实测：值名是文件名的小写，值数据才是原始大小写。
+    return "f!" + LowerAscii(ToUtf8(fileName));
+}
+
+std::string CbsMarkValueName(const std::string& deploymentName) {
+    return "c!" + deploymentName;
+}
 
 std::vector<std::uint8_t> CbsEncodeAsciiText(const std::string& text) {
     return std::vector<std::uint8_t>(text.begin(), text.end());
@@ -255,14 +273,18 @@ bool CbsDecodeComponentRecord(const std::wstring& name,
                 error = os.str();
                 return false;
             }
-            out.deploymentMarks.push_back(value.name.substr(2));
+            CbsMark mark;
+            mark.valueName = value.name;
+            mark.deploymentName = value.name.substr(2);
+            out.deploymentMarks.push_back(std::move(mark));
         } else if (StartsWith(value.name, "f!")) {
-            std::wstring file;
-            if (!ReadUtf16(value.data, file, error)) {
+            CbsFile file;
+            file.valueName = value.name;
+            if (!ReadUtf16(value.data, file.fileName, error)) {
                 error = "f! 值 " + value.name + ": " + error;
                 return false;
             }
-            out.files.push_back(file);
+            out.files.push_back(std::move(file));
         } else {
             out.extraValues.push_back(value);
         }
@@ -287,13 +309,17 @@ std::vector<CbsValue> CbsEncodeComponentRecord(const CbsComponentRecord& record)
     if (!record.identity.empty()) {
         values.push_back(CbsValue{"identity", CbsEncodeAsciiText(record.identity)});
     }
-    for (const std::string& mark : record.deploymentMarks) {
-        values.push_back(CbsValue{"c!" + mark, {}});
+    for (const CbsMark& mark : record.deploymentMarks) {
+        values.push_back(
+            CbsValue{mark.valueName.empty() ? CbsMarkValueName(mark.deploymentName)
+                                            : mark.valueName,
+                     {}});
     }
-    for (const std::wstring& file : record.files) {
-        // 值名 `f!<文件名>`：真机上都是 ASCII 文件名（实测 19,006 个 f!）。
-        // 非 ASCII 文件名在真机上没见到样本，这里按 UTF-8 编码，避免宽字符被截断成 '?'。
-        values.push_back(CbsValue{"f!" + ToUtf8(file), CbsEncodeUtf16Text(file)});
+    for (const CbsFile& file : record.files) {
+        // 值名用记录里的原名（= 文件名小写）；记录若是新建的、没带名字，按规则造。
+        values.push_back(
+            CbsValue{file.valueName.empty() ? CbsFileValueName(file.fileName) : file.valueName,
+                     CbsEncodeUtf16Text(file.fileName)});
     }
     if (record.hasConfigFlags) {
         values.push_back(CbsValue{"CF", CbsEncodeDword(record.configFlags)});
@@ -329,7 +355,11 @@ bool CbsDecodeDeploymentRecord(const std::wstring& name,
                 error = "载荷 " + value.name + ": " + error;
                 return false;
             }
-            out.payloads.emplace_back(value.name.substr(0, 2), identity);
+            CbsPayload payload;
+            payload.valueName = value.name;
+            payload.prefix = value.name.substr(0, 2);
+            payload.identity = std::move(identity);
+            out.payloads.push_back(std::move(payload));
         } else {
             out.extraValues.push_back(value);
         }
@@ -351,8 +381,11 @@ std::vector<CbsValue> CbsEncodeDeploymentRecord(const CbsDeploymentRecord& recor
         values.push_back(
             CbsValue{"CatalogThumbprint", CbsEncodeAsciiText(record.catalogThumbprint)});
     }
-    for (const auto& payload : record.payloads) {
-        values.push_back(CbsValue{payload.first, CbsEncodeLengthPrefixedAscii(payload.second)});
+    for (const CbsPayload& payload : record.payloads) {
+        // 值名带派生后缀（如 `p!CBS_...~31bf3856ad3_c1a886620aabcbe2`），规则未解出 ⇒ 原样保留。
+        values.push_back(
+            CbsValue{payload.valueName.empty() ? payload.prefix : payload.valueName,
+                     CbsEncodeLengthPrefixedAscii(payload.identity)});
     }
     values.insert(values.end(), record.extraValues.begin(), record.extraValues.end());
     return values;
