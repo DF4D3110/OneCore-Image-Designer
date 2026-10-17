@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1507,6 +1508,97 @@ static void Usage()
 // 条必须 0 不一致，这是"与微软 COMPONENTS 逐字节一致"验收里伪键那一道闸。
 //
 // 用法：ocid_manifest cbs-keys <csv> [--names component|deployment]
+int CmdCbsFamilyCheck(const std::wstring& componentsPath, const std::wstring& familiesPath)
+{
+    // 用组件身份算出"家庭键"，核对它是否真的出现在真机 VersionedIndex 的家庭键集合里。
+    // components 是 `"key","identity"` 两列 CSV；families 是每行一个家庭键。
+    std::wstring rawFamilies, readErr;
+    if (!ReadFileUtf8(familiesPath, rawFamilies, readErr)) { Err(ToUtf8(readErr)); return 1; }
+    std::set<std::string> families;
+    {
+        const std::string text = ToUtf8(rawFamilies);
+        std::size_t pos = 0;
+        while (pos < text.size())
+        {
+            std::size_t end = text.find('\n', pos);
+            if (end == std::string::npos) end = text.size();
+            std::string line = text.substr(pos, end - pos);
+            pos = end + 1;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) families.insert(line);
+        }
+    }
+
+    std::wstring rawComponents;
+    if (!ReadFileUtf8(componentsPath, rawComponents, readErr)) { Err(ToUtf8(readErr)); return 1; }
+    const std::string text = ToUtf8(rawComponents);
+    long long rows = 0, matched = 0, unknown = 0, unparsable = 0;
+    std::set<std::string> produced;
+    std::size_t pos = 0;
+    while (pos < text.size())
+    {
+        std::size_t lineEnd = text.find('\n', pos);
+        if (lineEnd == std::string::npos) lineEnd = text.size();
+        std::string line = text.substr(pos, lineEnd - pos);
+        pos = lineEnd + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+
+        std::vector<std::string> fields;
+        std::string field;
+        bool inQuotes = false;
+        for (std::size_t i = 0; i < line.size(); ++i)
+        {
+            const char c = line[i];
+            if (inQuotes)
+            {
+                if (c == '"')
+                {
+                    if (i + 1 < line.size() && line[i + 1] == '"') { field.push_back('"'); ++i; }
+                    else { inQuotes = false; }
+                }
+                else { field.push_back(c); }
+            }
+            else if (c == '"') { inQuotes = true; }
+            else if (c == ',') { fields.push_back(field); field.clear(); }
+            else { field.push_back(c); }
+        }
+        fields.push_back(field);
+        if (fields.size() != 2) continue;
+        if (fields[0] == "key" && fields[1] == "identity") continue;
+        ++rows;
+        CbsIdentity identity;
+        std::string parseErr;
+        if (!CbsParseIdentity(fields[1], identity, parseErr))
+        {
+            ++unparsable;
+            if (unparsable <= 10) Err("身份解析失败 " + fields[0] + "：" + parseErr);
+            continue;
+        }
+        const std::string family = CbsFamilyKeyName(identity);
+        produced.insert(family);
+        if (families.count(family) != 0) { ++matched; }
+        else
+        {
+            ++unknown;
+            if (unknown <= 10) Err("家庭键不存在：" + family + "（来自 " + fields[0] + "）");
+        }
+    }
+    long long neverProduced = 0;
+    for (const std::string& family : families)
+    {
+        if (produced.count(family) == 0)
+        {
+            ++neverProduced;
+            if (neverProduced <= 10) OutLn("未被组件覆盖：" + family);
+        }
+    }
+    OutLn("rows=" + std::to_string(rows) + " matched=" + std::to_string(matched) +
+          " unknown=" + std::to_string(unknown) + " unparsable=" + std::to_string(unparsable) +
+          " families=" + std::to_string(families.size()) + " neverProduced=" + std::to_string(neverProduced));
+    return (unknown == 0 && unparsable == 0 && neverProduced == 0) ? 0 : 1;
+}
+
 int CmdCbsKeyCheck(const std::wstring& path, const std::wstring& namesMode)
 {
     std::wstring raw;
@@ -1707,6 +1799,10 @@ int main(int argc, char** argv)
             }
         }
         return CmdCbsKeyCheck(FromUtf8OrAnsi(argv[2]), namesMode);
+    }
+
+    if (cmd == L"cbs-families" && argc >= 4) {
+        return CmdCbsFamilyCheck(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]));
     }
 
     if (cmd == L"macros")

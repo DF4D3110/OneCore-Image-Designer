@@ -135,6 +135,12 @@ std::uint64_t CbsPseudoKeySuffix(const CbsIdentity& identity);
 //   culture 为 neutral 或缺省时写 `none`。真机 13,325 条键 100% 可复原。
 std::string CbsComponentKeyName(const CbsIdentity& identity);
 
+// 组件家庭的键名（DerivedData\VersionedIndex\<build>\ComponentFamilies 下）：
+//   `<架构>_<名字>_<token>_<culture>_<16 个 hex 的伪键>` —— 与组件键同构但**没有
+//   version 段**，且尾部伪键是"删掉 version 属性后"的身份折叠。真机 13,159 条
+//   家庭键（8061 x86）100% 可复原。
+std::string CbsFamilyKeyName(const CbsIdentity& identity);
+
 // 部署的键名（CanonicalData\Deployments 下）：
 //   `<名字>_<token>_<版本>_<16 个 hex 的伪键>`，没有架构/culture 段；名字同样先小写、
 //   只保留 `[a-z0-9._-]`，超过 24 字符时保留前 11 + `..` + 后 11（真机 2,283 条键

@@ -137,7 +137,9 @@ std::string CbsMarkValueName(const std::string& deploymentName) {
     return "c!" + deploymentName;
 }
 
-std::uint64_t CbsPseudoKeySuffix(const CbsIdentity& identity) {
+namespace {
+
+std::uint64_t FoldIdentity(const CbsIdentity& identity, bool includeVersion) {
     // wcp 的折叠常量（与 RtlHashEncodedLBlob 合成时的第三常量相同）。
     constexpr std::uint64_t kFactor = 0x1FFFFFFF7ull;
     std::uint64_t acc = 0;
@@ -158,9 +160,14 @@ std::uint64_t CbsPseudoKeySuffix(const CbsIdentity& identity) {
             if (LowerAscii(attribute.first) != LowerAscii(label)) {
                 continue;
             }
+            const std::string lowerLabel = LowerAscii(label);
             // 真机：Culture=neutral 等于"没有 culture 属性"，不参与折叠。
-            if (LowerAscii(label) == "culture" &&
+            if (lowerLabel == "culture" &&
                 LowerAscii(attribute.second) == "neutral") {
+                continue;
+            }
+            // 家庭键（VersionedIndex 的 ComponentFamilies）是"去掉 version"的折叠。
+            if (!includeVersion && lowerLabel == "version") {
                 continue;
             }
             fold(label, attribute.second);
@@ -168,6 +175,12 @@ std::uint64_t CbsPseudoKeySuffix(const CbsIdentity& identity) {
         }
     }
     return acc;
+}
+
+}  // namespace
+
+std::uint64_t CbsPseudoKeySuffix(const CbsIdentity& identity) {
+    return FoldIdentity(identity, true);
 }
 
 std::string CbsComponentKeyName(const CbsIdentity& identity) {
@@ -197,6 +210,35 @@ std::string CbsComponentKeyName(const CbsIdentity& identity) {
            CbsSanitizeSegment(token != nullptr ? *token : std::string()) + "_" +
            CbsSanitizeSegment(version != nullptr ? *version : std::string()) + "_" +
            cultureText + "_" + Hex16(CbsPseudoKeySuffix(identity));
+}
+
+std::string CbsFamilyKeyName(const CbsIdentity& identity) {
+    // VersionedIndex 的 ComponentFamilies：与组件键同构，只去掉 version 段，
+    // 且尾部 16hex 是"不含 version 的身份折叠"。真机 13,159 条家庭键（8061 x86）
+    // 全量核对过：`msil_accessibility_..._none_a3102863224179f3`、
+    // `x86_1394.inf_..._none_9bdd65ddf9bf9f28`、
+    // `x86_microsoft-windows-b..ls-minwin.resources_..._en-us_0d38f3aa40724581`。
+    const std::string* arch = nullptr;
+    const std::string* token = nullptr;
+    const std::string* culture = nullptr;
+    for (const auto& attribute : identity.attributes) {
+        const std::string label = LowerAscii(attribute.first);
+        if (label == "processorarchitecture") {
+            arch = &attribute.second;
+        } else if (label == "publickeytoken") {
+            token = &attribute.second;
+        } else if (label == "culture") {
+            culture = &attribute.second;
+        }
+    }
+    std::string cultureText = "none";
+    if (culture != nullptr && LowerAscii(*culture) != "neutral") {
+        cultureText = CbsElidedName(CbsSanitizeSegment(*culture), 8);
+    }
+    return CbsSanitizeSegment(arch != nullptr ? *arch : std::string()) + "_" +
+           CbsElidedName(CbsSanitizeSegment(identity.name), 40) + "_" +
+           CbsSanitizeSegment(token != nullptr ? *token : std::string()) + "_" +
+           cultureText + "_" + Hex16(FoldIdentity(identity, false));
 }
 
 std::string CbsDeploymentKeyName(const CbsIdentity& identity) {

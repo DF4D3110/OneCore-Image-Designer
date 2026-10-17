@@ -507,6 +507,53 @@ static void KeyNames()
     }
 }
 
+static void FamilyKeyNames()
+{
+    // DerivedData\VersionedIndex\<build>\ComponentFamilies 的键名：与组件键同构，
+    // 去掉 version 段，尾部 16hex 是"不含 version 的身份折叠"（真机 13,159 条全命中）。
+    printf("\n-- 家庭键名 --\n");
+    struct Golden
+    {
+        const char* identity;
+        const char* key;
+        const char* what;
+    };
+    const Golden goldens[] = {
+        {"Accessibility, Culture=neutral, Version=4.0.8061.0, "
+         "PublicKeyToken=b03f5f7f11d50a3a, ProcessorArchitecture=msil",
+         "msil_accessibility_b03f5f7f11d50a3a_none_a3102863224179f3",
+         "家庭键：msil + neutral"},
+        {"1394.inf, Culture=neutral, Type=driverUpdate, Version=6.2.8061.0, "
+         "PublicKeyToken=31bf3856ad364e35, ProcessorArchitecture=x86, "
+         "versionScope=NonSxS",
+         "x86_1394.inf_31bf3856ad364e35_none_9bdd65ddf9bf9f28",
+         "家庭键：含 Type=driverUpdate"},
+        {"Microsoft-Windows-Basic-Misc-Tools-MinWin.Resources, Culture=en-US, "
+         "Version=6.2.8061.0, PublicKeyToken=31bf3856ad364e35, "
+         "ProcessorArchitecture=x86, versionScope=NonSxS",
+         "x86_microsoft-windows-b..ls-minwin.resources_31bf3856ad364e35_en-us_"
+         "0d38f3aa40724581",
+         "家庭键：culture 段保留 en-us"},
+        {"Microsoft-Windows-Basic-Misc-Tools-MinWin.Resources, Culture=qps-ploc, "
+         "Version=6.2.8061.0, PublicKeyToken=31bf3856ad364e35, "
+         "ProcessorArchitecture=x86, versionScope=NonSxS",
+         "x86_microsoft-windows-b..ls-minwin.resources_31bf3856ad364e35_qps-ploc_"
+         "81719fbfaabf47ba",
+         "家庭键：qps-ploc"},
+    };
+    for (const Golden& golden : goldens)
+    {
+        CbsIdentity identity;
+        std::string error;
+        if (!CbsParseIdentity(golden.identity, identity, error))
+        {
+            Check(false, golden.what);
+            continue;
+        }
+        CheckAscii(CbsFamilyKeyName(identity), golden.key, golden.what);
+    }
+}
+
 int main()
 {
     SetupConsoleUtf8();
@@ -519,6 +566,7 @@ int main()
     ComponentNames();
     PseudoKeySuffix();
     KeyNames();
+    FamilyKeyNames();
 
     printf("\n== 结果 ==\n  通过 %d / 失败 %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
