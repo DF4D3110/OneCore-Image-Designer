@@ -25,7 +25,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Ocid key SDDL is applied and verified by read-back", () => { OcidSddlApplyAndReadback(); return Task.CompletedTask; }),
     ("Ocid key SDDL survives an offline hive load/unload cycle", () => { OcidSddlPersistsInOfflineHive(); return Task.CompletedTask; }),
     ("Ocid CSI copies payload to the store, hardlinks destinations and applies file ACL", () => { OcidCsiFilePlacement(); return Task.CompletedTask; }),
-    ("Ocid protected directory write takes ownership then restores the lock", () => { OcidTrustedInstallerAccess(); return Task.CompletedTask; })
+    ("Ocid protected directory write takes ownership then restores the lock", () => { OcidTrustedInstallerAccess(); return Task.CompletedTask; }),
+    ("Ocid driver package store id, oemN.inf names and DriverDatabase property names", () => { OcidDriverPackage(); return Task.CompletedTask; })
 };
 
 var failures = new List<string>();
@@ -994,6 +995,96 @@ static void OcidRegistryOpShape()
     True(!d!.Encoded, "④encoded=false 没传出来");
     True(d.HasMacro, "④hasMacro 没传出来");
     Equal("boom", d.EncodeError);
+}
+
+static void OcidDriverPackage()
+{
+    True(OcidServicingNative.Available, "OcidServicing.dll 未找到（先跑 Source\\Native\\build-servicing.ps1）");
+
+    string root = NewTempDirectory();
+    try
+    {
+        // ① StoreId：测试里把公式**独立**再实现一遍（h = h*39 + byte，哈希按小端写 16 位十六进制）
+        string inf = Path.Combine(root, "ax88772.inf");
+        var bytes = new byte[16];
+        for (int i = 0; i < bytes.Length; i++) bytes[i] = (byte)(0xF0 + i);
+        File.WriteAllBytes(inf, bytes);
+
+        ulong h = 0;
+        foreach (byte b in bytes) h = h * 39 + b;
+        var le = new byte[8];
+        for (int i = 0; i < 8; i++) le[i] = (byte)(h >> (8 * i));
+        string expect = "ax88772.inf_arm_" + Convert.ToHexString(le).ToLowerInvariant();
+
+        True(OcidServicingNative.TryDmiStoreId(inf, 5, out var storeId, out var err), "StoreId 算不出来：" + err);
+        Equal(expect, storeId);
+
+        // 哈希只看文件字节：内容不变、换个架构串只是前缀换掉
+        True(OcidServicingNative.TryDmiStoreId(inf, 0, out var storeIdX86, out _), "x86 StoreId 算不出来");
+        Equal("ax88772.inf_x86_" + Convert.ToHexString(le).ToLowerInvariant(), storeIdX86);
+
+        // 内容变一个字节，哈希必须变（防止"算了个常量"这种假通过）
+        File.WriteAllBytes(inf, bytes.Concat(new byte[] { 0x01 }).ToArray());
+        True(OcidServicingNative.TryDmiStoreId(inf, 5, out var storeId2, out _), "改内容后 StoreId 算不出来");
+        True(storeId2 != storeId, "INF 内容变了 StoreId 却不变");
+
+        // ② 架构串只认 8061 认的那四个，别的必须回 null（不许瞎编一个）
+        Equal("x86", OcidServicingNative.DmiArchString(0));
+        Equal("arm", OcidServicingNative.DmiArchString(5));
+        Equal("ia64", OcidServicingNative.DmiArchString(6));
+        Equal("amd64", OcidServicingNative.DmiArchString(9));
+        True(OcidServicingNative.DmiArchString(7) == null, "未知架构必须回 null");
+
+        // ③ DriverDatabase 的值名 = "%04x" 的属性 id
+        Equal("0003", OcidServicingNative.DmiDbValueName(3));
+        Equal("1a2b", OcidServicingNative.DmiDbValueName(0x1A2B));
+        Equal("ffff", OcidServicingNative.DmiDbValueName(0xFFFF));
+
+        // ④ oemN.inf 名的分配：位图里第一个 0 位（每字节高位在前），满了才长一个字节
+        True(OcidServicingNative.TryDmiAcquireOemInfName(Array.Empty<byte>(), out var bm1, out var n1, out var i1, out var grew1, out var e1), e1);
+        Equal("oem0.inf", n1);
+        Equal(0u, i1);
+        True(grew1, "空位图必须先长出一个字节");
+        Equal(1, bm1.Length);
+        Equal((byte)0x80, bm1[0]);   // 0 号位被占
+
+        True(OcidServicingNative.TryDmiAcquireOemInfName(bm1, out var bm2, out var n2, out _, out var grew2, out var e2), e2);
+        Equal("oem1.inf", n2);
+        True(!grew2, "还有空位就不该长位图");
+        Equal((byte)0xC0, bm2[0]);
+
+        // 释放 0 号位后它必须被重新分配到（不然早晚把 oem 号用光）
+        True(OcidServicingNative.TryDmiReleaseOemInfName(bm2, "oem0.inf", out var e3), e3);
+        Equal((byte)0x40, bm2[0]);
+        True(OcidServicingNative.TryDmiAcquireOemInfName(bm2, out _, out var n4, out _, out _, out var e4), e4);
+        Equal("oem0.inf", n4);
+
+        // ⑤ 保留原 INF 名的标志位
+        True(OcidServicingNative.DmiKeepsOriginalInfName(0x200), "收件箱包应保留原 INF 名");
+        True(OcidServicingNative.DmiKeepsOriginalInfName(0x100), "OS 引导包应保留原 INF 名");
+        True(!OcidServicingNative.DmiKeepsOriginalInfName(0), "默认导入要改名成 oemN.inf");
+        True(!OcidServicingNative.DmiKeepsOriginalInfName(0x400), "别的标志不该误判");
+    }
+    finally { Directory.Delete(root, true); }
+
+    // ⑥ 真机对照：8061 镜像里唯一那个驱动包（有镜像才算，没镜像就跳过）
+    const string RealInf = @"P:\Windows\INF\ax88772.inf";
+    const string RealStore = @"P:\Windows\System32\DriverStore\FileRepository";
+    if (File.Exists(RealInf) && Directory.Exists(RealStore))
+    {
+        var dirs = Directory.GetDirectories(RealStore);
+        True(dirs.Length >= 1, "真机 DriverStore 至少该有一个包目录");
+
+        True(OcidServicingNative.TryDmiStoreId(RealInf, 5, out var realId, out var realErr), "真机 StoreId 算不出来：" + realErr);
+        foreach (var d in dirs)
+            True(Path.GetFileName(d) == realId, $"目录名对不上：{Path.GetFileName(d)} ≠ {realId}");
+
+        // 目录里那份 INF 必须与 Windows\INF 里那份逐字节相同（同一个文件的两条路径）
+        string stored = Path.Combine(dirs[0], Path.GetFileName(RealInf));
+        True(File.Exists(stored), "包目录里应该有同名 INF：" + stored);
+        True(File.ReadAllBytes(stored).SequenceEqual(File.ReadAllBytes(RealInf)),
+             "包目录里的 INF 与 Windows\\INF 里的不是同一份内容");
+    }
 }
 
 static byte[] Bytes(string s)

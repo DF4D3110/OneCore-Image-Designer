@@ -24,6 +24,7 @@
 //    异常情况，见下面各自的返回码。
 
 #include "ocid/CmiInstaller.h"
+#include "ocid/DriverPackage.h"
 #include "ocid/MacroExpander.h"
 #include "ocid/RegistryValue.h"
 #include "ocid/SecurityDescriptor.h"
@@ -530,6 +531,166 @@ extern "C" {
     {
         if (!path) return 0;
         return PathExists(W(path)) ? 1 : 0;
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // DMI（离线导入驱动包）—— 见 include/ocid/DriverPackage.h 的证据链。
+    //
+    // 离线只做 import 那一半：把包装进 FileRepository\<StoreId> 并写
+    // HKLM\SYSTEM\DriverDatabase。把包绑到设备（active package / device ids / .pnf）
+    // 需要设备或已启动的系统，不在这一层。
+    // ────────────────────────────────────────────────────────────────────────
+
+    /// 驱动包目录名（FileRepository 下的那层）：
+    ///   StoreId = lower("<INF 文件名>_<架构串>_<16 位小写十六进制>")
+    /// 哈希按 INF 的**文件字节**算（`h = h*39 + byte`，输出为小端 8 字节的十六进制）。
+    /// 必须与写进镜像的那份 INF 逐字节一致，否则目录名与数据库记录会对不上。
+    int __cdecl OcidDmiStoreId(const wchar_t* infPath, unsigned int arch,
+                               wchar_t* outBuf, unsigned int outCap, unsigned int* outLen,
+                               wchar_t* errBuf, unsigned int errCap)
+    {
+        if (outLen) *outLen = 0;
+        if (!infPath) return OCID_ERR_ARGUMENT;
+        try
+        {
+            std::wstring storeId, err;
+            if (!BuildStoreIdFromFile(W(infPath), arch, storeId, err))
+            {
+                SetErr(errBuf, errCap, err);
+                return OCID_ERR_BAD_VALUE;
+            }
+            return CopyOutStr(storeId, outBuf, outCap, outLen);
+        }
+        catch (...)
+        {
+            SetErr(errBuf, errCap, L"计算驱动包 StoreId 时发生未预期异常");
+            return OCID_ERR_INTERNAL;
+        }
+    }
+
+    /// 架构值 → StoreId 里用的字符串。8061 只有 4 种拼写：0=x86 / 5=arm / 6=ia64 / 9=amd64；
+    /// 其他值回 NULL（不猜 arm64 之类本版本不存在的名字）。
+    const wchar_t* __cdecl OcidDmiArchString(unsigned int arch)
+    {
+        return ProcessorArchitectureString(arch);
+    }
+
+    /// 属性 id → DriverDatabase 里的值名（8061 是 "%04x" 的属性 id，**不是** Win10 的友好名）。
+    int __cdecl OcidDmiDbValueName(unsigned int propertyId,
+                                   wchar_t* outBuf, unsigned int outCap, unsigned int* outLen,
+                                   wchar_t* errBuf, unsigned int errCap)
+    {
+        if (outLen) *outLen = 0;
+        try
+        {
+            return CopyOutStr(DriverDatabaseValueName(propertyId), outBuf, outCap, outLen);
+        }
+        catch (...)
+        {
+            SetErr(errBuf, errCap, L"拼装 DriverDatabase 值名时发生未预期异常");
+            return OCID_ERR_INTERNAL;
+        }
+    }
+
+    /// oemN.inf 名分配：在"已占用位图"里找**第一个 0 位**（每字节从高位到低位扫）。
+    /// 位图按值进出：`bitmap` 是输入的原位图，返回时被就地改成新位图（满则追加一个 0x80 字节）。
+    /// 位图不存在（`*bitmapLen == 0`）时从 oem0.inf 开始。
+    int __cdecl OcidDmiAcquireOemInfName(unsigned char* bitmap, unsigned int bitmapCap,
+                                         unsigned int* bitmapLen,
+                                         wchar_t* nameBuf, unsigned int nameCap,
+                                         unsigned int* outIndex, int* outGrew,
+                                         wchar_t* errBuf, unsigned int errCap)
+    {
+        if (outGrew) *outGrew = 0;
+        if (outIndex) *outIndex = 0;
+        if (!bitmapLen) return OCID_ERR_ARGUMENT;
+        if (*bitmapLen > 0 && !bitmap) return OCID_ERR_ARGUMENT;
+
+        try
+        {
+            std::vector<std::uint8_t> map;
+            if (*bitmapLen > 0)
+            {
+                map.assign(bitmap, bitmap + *bitmapLen);
+            }
+
+            OemInfAllocation alloc;
+            std::wstring err;
+            if (!AcquireOemInfName(map, alloc, err))
+            {
+                // 位图满：把需要的长度告诉调用方（一个字节），别让它猜。
+                *bitmapLen = static_cast<unsigned int>(map.size() + 1);
+                SetErr(errBuf, errCap, err);
+                return OCID_ERR_BAD_VALUE;
+            }
+
+            const unsigned int needed = static_cast<unsigned int>(map.size());
+            if (needed > bitmapCap)
+            {
+                *bitmapLen = needed;
+                SetErr(errBuf, errCap, L"oemN.inf 位图缓冲不足");
+                return OCID_ERR_BUFFER;
+            }
+            for (unsigned int i = 0; i < needed; ++i)
+            {
+                bitmap[i] = map[i];
+            }
+            *bitmapLen = needed;
+
+            if (outIndex) *outIndex = alloc.index;
+            if (outGrew) *outGrew = alloc.grew ? 1 : 0;
+
+            const int rc = CopyOutStr(alloc.name, nameBuf, nameCap, nullptr);
+            if (rc != OCID_OK) return rc;
+            return OCID_OK;
+        }
+        catch (...)
+        {
+            SetErr(errBuf, errCap, L"分配 oemN.inf 名字时发生未预期异常");
+            return OCID_ERR_INTERNAL;
+        }
+    }
+
+    /// 释放一个 oemN.inf 名（清位）。位图**就地**修改。
+    int __cdecl OcidDmiReleaseOemInfName(unsigned char* bitmap, unsigned int bitmapLen,
+                                         const wchar_t* infName,
+                                         wchar_t* errBuf, unsigned int errCap)
+    {
+        if (!infName) return OCID_ERR_ARGUMENT;
+        if (bitmapLen > 0 && !bitmap) return OCID_ERR_ARGUMENT;
+        try
+        {
+            std::vector<std::uint8_t> map;
+            if (bitmapLen > 0)
+            {
+                map.assign(bitmap, bitmap + bitmapLen);
+            }
+
+            std::wstring err;
+            if (!ReleaseOemInfName(map, W(infName), err))
+            {
+                SetErr(errBuf, errCap, err);
+                return OCID_ERR_BAD_VALUE;
+            }
+
+            for (std::size_t i = 0; i < map.size(); ++i)
+            {
+                bitmap[i] = map[i];
+            }
+            return OCID_OK;
+        }
+        catch (...)
+        {
+            SetErr(errBuf, errCap, L"释放 oemN.inf 名字时发生未预期异常");
+            return OCID_ERR_INTERNAL;
+        }
+    }
+
+    /// 这个导入标志组合是否让包保留原 INF 文件名（收件箱 0x200 或 OS/引导 INF 0x100）：
+    /// 是 ⇒ 不占 oemN.inf 位图。
+    int __cdecl OcidDmiKeepsOriginalInfName(unsigned int importFlags)
+    {
+        return ImportKeepsOriginalInfName(importFlags) ? 1 : 0;
     }
 
 } // extern "C"

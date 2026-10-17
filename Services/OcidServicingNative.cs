@@ -241,6 +241,44 @@ namespace OneCore_Image_Designer.Services
             [Out] char[]? daclSids, uint daclSidsCap, out uint daclSidsLen, out int daclSidsAvailable,
             [Out] char[]? errBuf, uint errCap);
 
+        // ── DMI：离线导入驱动包（见原生 include/ocid/DriverPackage.h 的证据链） ──
+
+        /// <summary>驱动包目录名：lower("&lt;INF 名&gt;_&lt;架构&gt;_&lt;16 位十六进制&gt;")，哈希按 INF 文件字节算。</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int OcidDmiStoreId(
+            string infPath, uint arch,
+            [Out] char[]? outBuf, uint outCap, out uint outLen,
+            [Out] char[]? errBuf, uint errCap);
+
+        /// <summary>架构值 → StoreId 里的字符串；本版本只认 0/5/6/9，其他回 IntPtr.Zero。</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern IntPtr OcidDmiArchString(uint arch);
+
+        /// <summary>属性 id → DriverDatabase 的值名（8061 是 "%04x" 的属性 id）。</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int OcidDmiDbValueName(
+            uint propertyId,
+            [Out] char[]? outBuf, uint outCap, out uint outLen,
+            [Out] char[]? errBuf, uint errCap);
+
+        /// <summary>oemN.inf 名分配：位图里的第一个 0 位（每字节从高位到低位），位图按值进出。</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int OcidDmiAcquireOemInfName(
+            [In, Out] byte[]? bitmap, uint bitmapCap, ref uint bitmapLen,
+            [Out] char[]? nameBuf, uint nameCap,
+            out uint outIndex, out int outGrew,
+            [Out] char[]? errBuf, uint errCap);
+
+        /// <summary>释放 oemN.inf 名（清位），位图就地修改。</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int OcidDmiReleaseOemInfName(
+            [In, Out] byte[]? bitmap, uint bitmapLen, string infName,
+            [Out] char[]? errBuf, uint errCap);
+
+        /// <summary>该导入标志组合是否让包保留原 INF 文件名（0x200 收件箱 / 0x100 OS 引导）。</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int OcidDmiKeepsOriginalInfName(uint importFlags);
+
         private const int ErrCap = 1024;
         private const int NoteCap = 1024;
         private const int LeftoverCap = 2048;
@@ -769,5 +807,112 @@ namespace OneCore_Image_Designer.Services
             };
             return e.Length > 0 ? $"{what}：{e}" : what;
         }
+
+        // ────────────────────────────────────────────────────────────────────
+        // DMI（离线导入驱动包）—— 原生实现见 include/ocid/DriverPackage.h。
+        // 这里只做搬运：判断规则一条都不在 C# 侧重写。
+        // ────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// 驱动包目录名 <c>FileRepository\&lt;StoreId&gt;</c> 的那一层：
+        /// <c>lower("&lt;INF 文件名&gt;_&lt;架构串&gt;_&lt;16 位小写十六进制&gt;")</c>。
+        /// 哈希按 INF 的**文件字节**算 —— 必须对"将要写进镜像的那一份"调用。
+        /// </summary>
+        public static bool TryDmiStoreId(string infPath, uint arch, out string storeId, out string error)
+        {
+            storeId = string.Empty;
+            var err = new char[ErrCap];
+            int cap = 512;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                var buf = new char[cap];
+                int rc = OcidDmiStoreId(infPath ?? string.Empty, arch, buf, (uint)buf.Length,
+                                        out uint len, err, (uint)err.Length);
+                if (rc == (int)Rc.Buffer) { cap = (int)len + 1; continue; }
+                if (rc != 0) { error = RcText(rc, err); return false; }
+                storeId = CStr(buf);
+                error = string.Empty;
+                return true;
+            }
+            error = "StoreId 长度反复不足";
+            return false;
+        }
+
+        /// <summary>架构值 → StoreId 里用的字符串；本版本只认 0=x86 / 5=arm / 6=ia64 / 9=amd64。</summary>
+        public static string? DmiArchString(uint arch)
+        {
+            var p = OcidDmiArchString(arch);
+            return p == IntPtr.Zero ? null : Marshal.PtrToStringUni(p);
+        }
+
+        /// <summary>属性 id → DriverDatabase 里的值名（8061 是 "%04x" 的属性 id）。</summary>
+        public static string DmiDbValueName(uint propertyId)
+        {
+            var err = new char[ErrCap];
+            int cap = 16;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                var buf = new char[cap];
+                int rc = OcidDmiDbValueName(propertyId, buf, (uint)buf.Length, out uint len, err, (uint)err.Length);
+                if (rc == (int)Rc.Buffer) { cap = (int)len + 1; continue; }
+                if (rc != 0) throw new InvalidOperationException(RcText(rc, err));
+                return CStr(buf);
+            }
+            throw new InvalidOperationException("DriverDatabase 值名长度反复不足");
+        }
+
+        /// <summary>
+        /// 分配一个 <c>oemN.inf</c> 名：位图里**第一个 0 位**（每字节从高位到低位扫），
+        /// 位图满则追加一个 0x80 字节。返回的位图必须写回 DriverDatabase 的 "0004"。
+        /// </summary>
+        public static bool TryDmiAcquireOemInfName(byte[]? bitmap, out byte[] newBitmap, out string name,
+                                                   out uint index, out bool grew, out string error)
+        {
+            newBitmap = bitmap ?? Array.Empty<byte>();
+            name = string.Empty;
+            index = 0;
+            grew = false;
+
+            var err = new char[ErrCap];
+            var nameBuf = new char[300];
+            uint len = (uint)newBitmap.Length;
+            int cap = Math.Max(newBitmap.Length + 1, 16);
+
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                var buf = new byte[cap];
+                Array.Copy(newBitmap, buf, newBitmap.Length);
+                uint n = len;
+                int rc = OcidDmiAcquireOemInfName(buf, (uint)buf.Length, ref n,
+                                                  nameBuf, (uint)nameBuf.Length,
+                                                  out index, out int g, err, (uint)err.Length);
+                if (rc == (int)Rc.Buffer) { cap = (int)n + 1; continue; }
+                if (rc != 0) { error = RcText(rc, err); return false; }
+
+                newBitmap = new byte[n];
+                Array.Copy(buf, newBitmap, (int)n);
+                name = CStr(nameBuf);
+                grew = g != 0;
+                error = string.Empty;
+                return true;
+            }
+            error = "oemN.inf 位图容量反复不足";
+            return false;
+        }
+
+        /// <summary>释放一个 oemN.inf 名（清位）。位图**就地**修改。</summary>
+        public static bool TryDmiReleaseOemInfName(byte[] bitmap, string infName, out string error)
+        {
+            var err = new char[ErrCap];
+            int rc = OcidDmiReleaseOemInfName(bitmap, (uint)bitmap.Length, infName ?? string.Empty,
+                                              err, (uint)err.Length);
+            if (rc != 0) { error = RcText(rc, err); return false; }
+            error = string.Empty;
+            return true;
+        }
+
+        /// <summary>这个导入标志组合是否让包保留原 INF 文件名（0x200 收件箱 / 0x100 OS 引导）。</summary>
+        public static bool DmiKeepsOriginalInfName(uint importFlags) =>
+            OcidDmiKeepsOriginalInfName(importFlags) != 0;
     }
 }

@@ -25,3 +25,9 @@ EXPORTS
     OcidApplyPathSddl
     OcidReadPathSddl
     OcidPathExists
+    OcidDmiStoreId
+    OcidDmiArchString
+    OcidDmiDbValueName
+    OcidDmiAcquireOemInfName
+    OcidDmiReleaseOemInfName
+    OcidDmiKeepsOriginalInfName
