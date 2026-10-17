@@ -63,7 +63,9 @@ static bool SameShape(const SddlInfo& a, const SddlInfo& b)
         && a.daclAceCount == b.daclAceCount
         && a.saclAceCount == b.saclAceCount
         && a.ownerSid == b.ownerSid
-        && a.groupSid == b.groupSid;
+        && a.groupSid == b.groupSid
+        && a.daclSids == b.daclSids
+        && a.daclSidsAvailable == b.daclSidsAvailable;
 }
 
 // ── 语料原文 ────────────────────────────────────────────────────────────────
@@ -166,6 +168,34 @@ int main()
                  "owner SID = TrustedInstaller 那一族的 S-1-5-80");
         CheckStr(i.groupSid, L"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
                  "group SID 同 owner");
+    }
+    {
+        // 回读校验比的是**规范 SID 集合**：别名要落成 S-1-5-…，顺序与 ACE 一致。
+        SddlInfo i; std::wstring err;
+        Check(DescribeSddl(SD_WRP_KEY, i, err),                     "为了 SID 列表再解析一次");
+        Check(i.daclSidsAvailable,                                  "SID 列表可信");
+        CheckInt((int)i.daclSids.size(), 5,                         "5 条 ACE ⇒ 5 个 SID");
+        CheckStr(i.daclSids[0], L"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+                 "第 1 条就是全 SID，原样");
+        CheckStr(i.daclSids[1], L"S-1-5-18",                        "SY 落成 S-1-5-18");
+        CheckStr(i.daclSids[2], L"S-1-5-32-544",                    "BA 落成 S-1-5-32-544");
+        CheckStr(i.daclSids[3], L"S-1-5-32-545",                    "BU 落成 S-1-5-32-545");
+        CheckStr(i.daclSids[4], L"S-1-15-2-1",                      "S-1-15-2-1 原样");
+    }
+    {
+        // 同一策略的两种写法（别名 / 全 SID）必须得到同一个集合，否则回读会假失败。
+        SddlInfo a, b; std::wstring err;
+        Check(DescribeSddl(L"D:P(A;;FA;;;BA)(A;;FA;;;SY)", a, err),                  "别名写法可解析");
+        Check(DescribeSddl(L"D:P(A;;FA;;;S-1-5-32-544)(A;;FA;;;S-1-5-18)", b, err),  "全 SID 写法可解析");
+        Check(a.daclSids == b.daclSids,                                              "两种写法 SID 列表逐条相同");
+    }
+    {
+        // NULL DACL 也要说清：0 条 ACE、集合可信（空集）。
+        SddlInfo i; std::wstring err;
+        Check(DescribeSddl(L"D:NO_ACCESS_CONTROL", i, err),         "NULL DACL 可解析");
+        Check(i.daclNoAccessControl,                                "记下了 NO_ACCESS_CONTROL");
+        Check(i.daclSidsAvailable,                                  "SID 列表可信");
+        CheckInt((int)i.daclSids.size(), 0,                         "NULL DACL 没有 SID");
     }
     {
         SddlInfo i; std::wstring err;

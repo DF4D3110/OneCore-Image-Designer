@@ -43,6 +43,51 @@ namespace ocid {
             return c == L'O' || c == L'G' || c == L'D' || c == L'S';
         }
 
+        /// 把 DACL 逐条 ACE 的 SID 规范化成 `S-1-5-…` 文本（顺序与 ACE 一致）。
+        ///
+        /// 这是**给回读校验用的**：别名（`BA`）与 SID（`S-1-5-32-544`）在文本上不同、
+        /// 语义相同，只有规范化之后才能安全地做集合比对。
+        /// best-effort：还原/枚举失败、或遇到不认识的 ACE 类型 ⇒ `daclSidsAvailable=false`，
+        /// 调用方退回弱比对（**不报错**：这不是落盘失败）。
+        void FillCanonicalDaclSids(const std::wstring& sddl, SddlInfo& info)
+        {
+            info.daclSids.clear();
+            info.daclSidsAvailable = false;
+
+            std::vector<unsigned char> bytes;
+            std::wstring err;
+            if (!SddlToSelfRelative(sddl, bytes, err)) return;
+
+            PSECURITY_DESCRIPTOR sd = reinterpret_cast<PSECURITY_DESCRIPTOR>(bytes.data());
+            BOOL present = FALSE, defaulted = FALSE;
+            PACL acl = nullptr;
+            if (!GetSecurityDescriptorDacl(sd, &present, &acl, &defaulted)) return;
+            if (!present || !acl) { info.daclSidsAvailable = true; return; }   // 空 DACL：0 条
+
+            ACL_SIZE_INFORMATION si{};
+            if (!GetAclInformation(acl, &si, sizeof(si), AclSizeInformation)) return;
+
+            std::vector<std::wstring> sids;
+            sids.reserve(si.AceCount);
+            for (DWORD k = 0; k < si.AceCount; ++k)
+            {
+                LPVOID ace = nullptr;
+                if (!GetAce(acl, k, &ace) || !ace) return;
+                const auto* hdr = static_cast<const ACE_HEADER*>(ace);
+                // 只认基础 ACE：对象 ACE 的 SID 偏移与基础 ACE 不同，硬解会读出垃圾。
+                if (hdr->AceType != ACCESS_ALLOWED_ACE_TYPE && hdr->AceType != ACCESS_DENIED_ACE_TYPE)
+                    return;
+                const auto* allowed = static_cast<const ACCESS_ALLOWED_ACE*>(ace);
+                PSID sid = const_cast<PSID>(reinterpret_cast<const void*>(&allowed->SidStart));
+                LPWSTR text = nullptr;
+                if (!ConvertSidToStringSidW(sid, &text) || !text) return;
+                sids.emplace_back(text);
+                LocalFree(text);
+            }
+            info.daclSids = std::move(sids);
+            info.daclSidsAvailable = true;
+        }
+
         /// 解析 ACL 段的**主体**（`:` 之后的全部，例如 `P(A;;FA;;;BA)(A;;GR;;;WD)`）。
         ///
         /// 语法：先是一串标志字母，然后是若干个 `(...)` ACE。
@@ -197,6 +242,10 @@ namespace ocid {
             err = L"SDDL 里一个段都没有";
             return false;
         }
+
+        // 顺手把 DACL 的 SID 规范化（回读校验要靠它，见 SddlInfo::daclSids）
+        FillCanonicalDaclSids(sddl, info);
+
         return true;
     }
 

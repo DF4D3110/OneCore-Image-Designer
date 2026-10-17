@@ -72,6 +72,22 @@ namespace ocid {
         std::wstring ownerSid;          // O: 后面的 SID 文本（若有）
         std::wstring groupSid;          // G: 后面的 SID 文本（若有）
 
+        /// DACL 里每条 ACE 的 **规范 SID 文本**（`S-1-5-…`，由
+        /// `ConvertSidToStringSidW` 从二进制 ACE 里取），顺序与 ACE 一致。
+        ///
+        /// 【为什么需要】回读校验不能比 ACE 条数：Windows **应用** DACL 时会把
+        /// "继承专用"（`IO`）ACE 拆成"对本对象生效"+"仅继承"两条 —— 实测把
+        /// 8 条 ACE 的 `D:P(A;CI;GA;;;TI)…(A;CIOI;GRGX;;;BU)…` 落到目录上，
+        /// 回读是 **11 条**（SID 集合不变、顺序变成规范序）。所以能比的稳定事实是
+        /// **SID 集合**与"不少于"的条数。
+        ///
+        /// 别名会在规范化时被消掉（`BA` → `S-1-5-32-544`），这正是要的效果：
+        /// 文本里写 `BA`、回读写 `S-1-5-32-544` 属于同一件事。
+        std::vector<std::wstring> daclSids;
+        /// `daclSids` 是否**可信**（二进制还原成功且 ACE 类型都认得）。
+        /// 为 false 时调用方只能退回"条数不少于"的弱比对。
+        bool daclSidsAvailable = false;
+
         int AceCount() const { return daclAceCount + saclAceCount; }
     };
 

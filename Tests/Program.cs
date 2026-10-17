@@ -24,7 +24,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Ocid registryKeys wire format (key-only keys and key SDDL)", () => { OcidRegistryOpShape(); return Task.CompletedTask; }),
     ("Ocid key SDDL is applied and verified by read-back", () => { OcidSddlApplyAndReadback(); return Task.CompletedTask; }),
     ("Ocid key SDDL survives an offline hive load/unload cycle", () => { OcidSddlPersistsInOfflineHive(); return Task.CompletedTask; }),
-    ("Ocid CSI copies payload to the store, hardlinks destinations and applies file ACL", () => { OcidCsiFilePlacement(); return Task.CompletedTask; })
+    ("Ocid CSI copies payload to the store, hardlinks destinations and applies file ACL", () => { OcidCsiFilePlacement(); return Task.CompletedTask; }),
+    ("Ocid protected directory write takes ownership then restores the lock", () => { OcidTrustedInstallerAccess(); return Task.CompletedTask; })
 };
 
 var failures = new List<string>();
@@ -709,6 +710,160 @@ static void OcidCsiFilePlacement()
     finally
     {
         try { Directory.Delete(root, recursive: true); } catch { /* 临时树删不掉不影响结论 */ }
+    }
+}
+
+/// <summary>
+/// TrustedInstaller 那条权限链的自证（真机上独一无二的那条路）：
+/// 受保护目录（owner=TI、DACL 只给 TI）**直接写会被拒**；
+/// <c>TryWriteInto</c>/<c>ForWrite</c> 取一次所有权、把活干完、再**原样还原**快照；
+/// <c>ApplyDeclaredSddl</c> 落的 SDDL 就是目标状态，所以取完所有权**不还原**，但清单没声明
+/// 属主时要把属主还回原主。CSI 能不能重装/落位已有组件全靠这条链，必须在回归里锁住。
+/// </summary>
+static void OcidTrustedInstallerAccess()
+{
+    True(OcidServicingNative.Available, "OcidServicing.dll 未找到（先跑 Source\\Native\\build-servicing.ps1）");
+    if (!TrustedInstallerAccess.IsAdministrator())
+        throw new InvalidOperationException("该用例需要管理员身份（SeTakeOwnershipPrivilege 只在管理员令牌里）");
+
+    // 这条链的每一步都要特权：改属主到 TI、写、再还原
+    PrivilegeHelper.EnableServicingPrivileges(msg => Console.WriteLine("  " + msg));
+
+    string root = NewTempDirectory();
+    string locked = Path.Combine(root, "Locked");
+    Directory.CreateDirectory(locked);
+
+    string ti = TrustedInstallerAccess.TrustedInstallerSid;
+    string hardened = "O:" + ti + "D:PAI(A;OICI;FA;;;" + ti + ")";
+    try
+    {
+        // 造出"WinSxS 那样"的受保护目录：owner=TI，DACL 只给 TI 全权
+        Equal(OcidServicingNative.SddlApplyOutcome.Applied,
+              OcidServicingNative.ApplyPathSddl(locked, hardened, out string herr));
+
+        // 前提自证：这个状态**确实**写不进去（否则下面的用例全是假通过）
+        bool denied;
+        try
+        {
+            File.WriteAllText(Path.Combine(locked, "baseline.txt"), "x");
+            denied = false;
+        }
+        catch (Exception ex) when (TrustedInstallerAccess.IsAccessDenied(ex)) { denied = true; }
+        True(denied, "TI-only 的目录竟然能直接写 —— 这个用例失去意义（有别的权限漏进来了？）");
+
+        // ① TryWriteInto：窗口期内写完**立刻能读**（CSI 建落点前拷正本走的就是这一步）
+        string inside = "";
+        bool ok = TrustedInstallerAccess.TryWriteInto(
+            locked,
+            () =>
+            {
+                File.WriteAllText(Path.Combine(locked, "written.txt"), "ocid");
+                inside = File.ReadAllText(Path.Combine(locked, "written.txt"));
+            },
+            out bool took, out string werr, msg => Console.WriteLine("  " + msg));
+        True(ok, "TryWriteInto 失败：" + werr);
+        True(took, "走了取所有权那条路就必须记账（OwnershipTaken）");
+        Equal("ocid", inside);
+
+        // ★ 还原动作会**把窗口期内新建的子对象重新继承一遍** —— 这是对**容器**设置 DACL 的
+        //   固有语义（实测：`icacls /inheritance:r /grant:r` 与 SetNamedSecurityInfo 结果一致），
+        //   快照里的 `AI` 剥不剥都一样（曾为此写过 StripAutoInherit，实测无效、已删）。
+        //   子对象原有的**继承** ACE 被换成父目录的策略，**显式** ACE 原样保留。
+        //   于是窗口不是"一次写动作"而是"一段连续工作"：窗口期内要接着用的东西必须在窗口里
+        //   用完（见下面 ④ 的 ForWrite —— CSI"复制正本 + 立刻建落点"就是靠它）。
+        string child = Path.Combine(locked, "written.txt");
+        True(OcidServicingNative.TryReadPathSddl(child, OcidServicingNative.SecInfo.DefaultRead,
+                                                 out string childSddl, out string cerr),
+             "回读子文件 ACL 失败：" + cerr);
+        Console.WriteLine("  (实测) 窗口关闭后子文件的 ACL：" + childSddl);
+
+        True(OcidServicingNative.TryReadPathSddl(locked, OcidServicingNative.SecInfo.Dacl,
+                                                 out string back, out string berr),
+             "还原后回读 DACL 失败：" + berr);
+        True(OcidServicingNative.TryDescribeSddl(back, out var rb, out _), "回读的 DACL 解读失败：" + back);
+        Equal(true, rb.DaclProtected);
+        Equal(1, rb.DaclAceCount);                    // 还原 ⇒ 又只剩 TI 一条
+        True(OcidServicingNative.TryReadPathSddl(locked, OcidServicingNative.SecInfo.Owner,
+                                                 out string ownerSddl, out string oerr),
+             "还原后回读 owner 失败：" + oerr);
+        True(ownerSddl.Contains("S-1-5-80-956008885"),
+             "还原后属主应回到 TrustedInstaller，实际：" + ownerSddl);
+
+        // ② ApplyDeclaredSddl：落的**就是**清单声明的状态 ⇒ 取所有权后不还原
+        string declared = "D:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)";
+        Equal(OcidServicingNative.SddlApplyOutcome.Applied,
+              TrustedInstallerAccess.ApplyDeclaredSddl(locked, declared, out bool took2, out string derr,
+                                                       msg => Console.WriteLine("  " + msg)));
+        // 声明 ACL 能不能**直接**落地取决于当前令牌的特权：本机实测 SeRestorePrivilege
+        // 启用时，对"BA 连读都没有"的目录也能直接写 DACL，于是压根不会走取所有权那条路
+        // （那条路留给特权不生效的环境/对象）。所以这里只记录、不锁死；要钉住的是
+        // "声明真的落上了"和"属主没被我们顺手改掉"。
+        Console.WriteLine("  (实测) 落声明 ACL 是否走了取所有权：" + (took2 ? "是" : "否（直接可写）"));
+        // 声明里没写属主 ⇒ 取所有权只是**手段**：落入声明 DACL 后，属主必须还回原主（TI），
+        // 否则镜像里每个被服务的对象属主都会变成当前管理员。
+        True(OcidServicingNative.TryReadPathSddl(locked, OcidServicingNative.SecInfo.Owner,
+                                                 out string ownerAfter, out string oerr2),
+             "回读属主失败：" + oerr2);
+        True(ownerAfter.Contains("S-1-5-80-956008885"),
+             "声明未写属主时属主应还回 TrustedInstaller，实际：" + ownerAfter);
+        // 声明 DACL 给了 BA 全权，之后正常写/读都该通（尽管属主是 TI）
+        File.WriteAllText(Path.Combine(locked, "after.txt"), "ok");
+        True(OcidServicingNative.TryReadPathSddl(locked, OcidServicingNative.SecInfo.Dacl,
+                                                 out string d2, out _), "回读失败");
+        True(OcidServicingNative.TryDescribeSddl(d2, out var d2f, out _), "回读的 DACL 解读失败：" + d2);
+        Equal(2, d2f.DaclAceCount);
+
+        // ③ 快照往返：拍下 → 改成别的 → 还原回原样
+        True(TrustedInstallerAccess.TrySnapshot(locked, out var shot, out string serr), "拍快照失败：" + serr);
+        Equal(OcidServicingNative.SddlApplyOutcome.Applied,
+              OcidServicingNative.ApplyPathSddl(locked, hardened, out _));
+        True(TrustedInstallerAccess.TryRestore(locked, shot!, out string rerr, null), "还原失败：" + rerr);
+        True(OcidServicingNative.TryReadPathSddl(locked, OcidServicingNative.SecInfo.Dacl,
+                                                 out string restored, out _), "还原后回读失败");
+        True(OcidServicingNative.TryDescribeSddl(restored, out var rst, out _), "还原后的 DACL 解读失败");
+        Equal(2, rst.DaclAceCount);
+
+        // ④ ForWrite：窗口期内"写进去 + 拿刚写的文件当源"必须都成功 —— 这就是 CSI 的
+        //    "复制正本 → 立刻建落点"。实测窗口一关，源会被父目录的还原重算成 TI-only，
+        //    读它就是 Access denied（产品里表现为 CreateHardLinkW 拒绝访问）。
+        Equal(OcidServicingNative.SddlApplyOutcome.Applied,
+              OcidServicingNative.ApplyPathSddl(locked, hardened, out _));   // 重新锁死
+        string store = Path.Combine(locked, "store.bin");
+        string copied = Path.Combine(locked, "copied.bin");
+        bool did = TrustedInstallerAccess.ForWrite(
+            locked,
+            () =>
+            {
+                File.WriteAllText(store, "payload");
+                File.Copy(store, copied);       // ← 窗口若已关：源不可读 ⇒ 拒绝访问
+            },
+            out bool took4, out string ferr, msg => Console.WriteLine("  " + msg));
+        True(did, "ForWrite 失败：" + ferr);
+        True(took4, "受保护目录上必须走取所有权那条路");
+
+        // 反向自证：窗口关掉之后同一条源文件就该"用不了"了（目标放在目录外，排除"目标目录
+        // 不可写"这个混在一起的变量）。只记录实测现象、不锁死断言 —— 它取决于系统是否在
+        // 还原父目录 DACL 时重算子对象的继承。
+        bool sourceDenied;
+        try { File.Copy(store, Path.Combine(root, "copied2.bin")); sourceDenied = false; }
+        catch (Exception ex) when (TrustedInstallerAccess.IsAccessDenied(ex)) { sourceDenied = true; }
+        Console.WriteLine("  (实测) 窗口关闭后再拿同一个源复制：" +
+                          (sourceDenied ? "拒绝访问（正是 ④ 存在的理由）" : "仍然成功"));
+
+        // ⑤ 别把什么都当权限不足：普通 IO 错误不许触发"取所有权"这条重路
+        True(TrustedInstallerAccess.IsAccessDenied(new UnauthorizedAccessException()), "权限异常必须识别");
+        True(!TrustedInstallerAccess.IsAccessDenied(new IOException("磁盘满了")), "IO 错误不能被当成权限问题");
+
+        // ⑥ 诊断路径不许抛（TI 令牌在现代 Windows 上是 PPL，拿不到是**预期**结果）
+        True(TrustedInstallerAccess.Diagnose().Length > 0, "诊断文本不能为空");
+        TrustedInstallerAccess.RevertImpersonation();
+    }
+    finally
+    {
+        // 收尾：先解开锁，否则临时树删不掉 —— 这正是产品里"重装被锁死的组件"的同一情形
+        try { OcidServicingNative.ApplyPathSddl(locked, TrustedInstallerAccess.TemporaryWriteSddl, out _); }
+        catch { /* 收尾失败不影响结论 */ }
+        try { Directory.Delete(root, recursive: true); } catch { }
     }
 }
 

@@ -91,6 +91,11 @@ namespace OneCore_Image_Designer.Services
         public int WriteableCopies;
         /// <summary>落点被架构红移（System32 ⇒ SysWOW64）的条数。</summary>
         public int Redirected;
+        /// <summary>
+        /// 目标被 TrustedInstaller 锁死、于是"取所有权 → 写入 → 还原安全描述符"的次数
+        /// （见 <see cref="TrustedInstallerAccess"/>）。正常重装已有组件时会出现。
+        /// </summary>
+        public int OwnershipTaken;
         public int MissingPayload;
         public int Dirs;
         /// <summary>因未展开宏 / 无落点 / 载荷缺失而没执行。</summary>
@@ -107,7 +112,7 @@ namespace OneCore_Image_Designer.Services
         public string Summary()
             => $"计划 {Planned} 条；正本复制 {StoreCopied}（含目录策略 {StoreDirSecured}）、落点链接 {DestLinked}、已存在 {AlreadyPresent}" +
                $"、复制 {Copied}、writeable 副本 {WriteableCopies}、架构红移 {Redirected}" +
-               $"、缺载荷 {MissingPayload}、跳过 {Skipped}、目录 {Dirs}；" +
+               $"、缺载荷 {MissingPayload}、跳过 {Skipped}、目录 {Dirs}、受保护取权 {OwnershipTaken}；" +
                $"ACL 写入 {AclApplied}、跳过 {AclSkipped}、失败 {AclFailed}、回读不一致 {AclMismatched}；错误 {Failed}";
     }
 
@@ -423,62 +428,59 @@ namespace OneCore_Image_Designer.Services
             //    （basesrv.dll / cdfs.sys / kdcom.dll 都是），即 CBS 把载荷**拷**进组件存储。
             //    链过去的话，`packages\` 一旦被清理或改写，镜像正本跟着坏 —— 而 packages 是
             //    构建产物，随时可能被重新展开覆盖。
-            if (!File.Exists(op.StorePath))
-            {
-                if (!File.Exists(op.PayloadPath))
-                {
-                    r.MissingPayload++;
-                    r.Notes.Add($"[缺载荷] {op.Component}: {op.PayloadPath} 不存在（包没展开？）");
-                    return;
-                }
-                try
-                {
-                    // 正本的父目录（WinSxS\<组件目录>）通常不存在 —— 硬链接不会替你建目录，
-                    // 少了这一步只会得到 Win32 3（找不到路径）。
-                    string storeParent = System.IO.Path.GetDirectoryName(op.StorePath) ?? "";
-                    if (storeParent.Length > 0 && !Directory.Exists(storeParent))
-                    {
-                        Directory.CreateDirectory(storeParent);
-                        // ★ 关键顺序（实测踩出来的）：新建目录从 WinSxS 继承到的 DACL 是
-                        //   `(A;ID;0x1200a9;;;BA)` —— 只有读+执行，**没有**建文件的权。
-                        //   实测：即使启用了 SeRestorePrivilege（它在 WinSxS 下能建目录），
-                        //   往这个继承了"只读"策略的新目录里 `File.Copy` 依旧 Access denied。
-                        //   所以先给它一条**显式**的、可写且能被子对象继承的 DACL，拷完文件
-                        //   再在收尾时换成 WinSxS 的真策略（见下面的 SecureNewStoreDir）。
-                        var tmp = ApplyAndVerifyPathSddl(
-                            storeParent, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)");
-                        if (tmp.Outcome != OcidServicingNative.SddlApplyOutcome.Applied)
-                            r.Notes.Add($"[注意] 新正本目录 {storeParent} 没能拿到可写 DACL：{tmp.Error}");
-                        newStoreDirs.Add(storeParent);
-                    }
+            string storeParent = System.IO.Path.GetDirectoryName(op.StorePath) ?? "";
+            string destParent = System.IO.Path.GetDirectoryName(op.DestinationPath) ?? "";
+            bool needStore = !File.Exists(op.StorePath);
+            bool needPlace = !File.Exists(op.DestinationPath);
 
-                    File.Copy(op.PayloadPath, op.StorePath, overwrite: false);
-                    r.StoreCopied++;
-                }
-                catch (Exception ex)
-                {
-                    r.Failed++;
-                    r.Notes.Add($"[失败] 建正本 {op.StorePath}: {ex.Message}");
-                    return;
-                }
+            if (needStore && !File.Exists(op.PayloadPath))
+            {
+                r.MissingPayload++;
+                r.Notes.Add($"[缺载荷] {op.Component}: {op.PayloadPath} 不存在（包没展开？）");
+                return;
             }
 
-            // ② 落点：正本 → 目标位置
-            //    默认硬链接（同一个文件）；`writeableType` 声明的文件**必须拷贝** ——
-            //    实测：win.ini / hosts 这类"运行时可写的系统数据"在真实镜像里是独立副本
-            //    （hardlink list 只有 1 条），链到 WinSxS 会让任何一次写入都污染正本，
-            //    而正本是所有组件的共享底本。
-            if (File.Exists(op.DestinationPath))
+            if (needStore && storeParent.Length > 0 && !Directory.Exists(storeParent))
+            {
+                Directory.CreateDirectory(storeParent);
+                // ★ 关键顺序（实测踩出来的）：新建目录从 WinSxS 继承到的 DACL 是
+                //   `(A;ID;0x1200a9;;;BA)` —— 只有读+执行，**没有**建文件的权。
+                //   实测：即使启用了 SeRestorePrivilege（它在 WinSxS 下能建目录），
+                //   往这个继承了"只读"策略的新目录里 `File.Copy` 依旧 Access denied。
+                //   所以先给它一条**显式**的、可写且能被子对象继承的 DACL，拷完文件
+                //   再在收尾时换成 WinSxS 的真策略（见下面的 SecureNewStoreDir）。
+                var tmp = ApplyAndVerifyPathSddl(storeParent,
+                                                TrustedInstallerAccess.TemporaryWriteSddl);
+                if (tmp.Outcome != OcidServicingNative.SddlApplyOutcome.Applied)
+                    r.Notes.Add($"[注意] 新正本目录 {storeParent} 没能拿到可写 DACL：{tmp.Error}");
+                newStoreDirs.Add(storeParent);
+            }
+
+            if (!needStore && !needPlace)
             {
                 r.AlreadyPresent++;
             }
             else
             {
-                try
-                {
-                    string parent = System.IO.Path.GetDirectoryName(op.DestinationPath) ?? "";
-                    if (parent.Length > 0) Directory.CreateDirectory(parent);
+                bool storeTook = false, placeTook = false;
+                string storeErr = "", placeErr = "";
+                string step = "落位";
 
+                void CopyStore()
+                {
+                    step = "建正本";
+                    File.Copy(op.PayloadPath, op.StorePath, overwrite: false);
+                    r.StoreCopied++;
+                }
+
+                // ② 落点：正本 → 目标位置
+                //    默认硬链接（同一个文件）；`writeableType` 声明的文件**必须拷贝** ——
+                //    实测：win.ini / hosts 这类"运行时可写的系统数据"在真实镜像里是独立副本
+                //    （hardlink list 只有 1 条），链到 WinSxS 会让任何一次写入都污染正本，
+                //    而正本是所有组件的共享底本。
+                void PlaceDest()
+                {
+                    step = "建落点";
                     if (op.Writeable)
                     {
                         File.Copy(op.StorePath, op.DestinationPath, overwrite: false);
@@ -493,10 +495,57 @@ namespace OneCore_Image_Designer.Services
                         if (note.Length > 0) r.Notes.Add($"[落点] {op.DestinationPath}: {note}");
                     }
                 }
+
+                void DoPlaceNow()
+                {
+                    if (destParent.Length > 0) Directory.CreateDirectory(destParent);
+                    PlaceDest();
+                }
+
+                // 落点目录（System32 / SysWOW64\Dism / drivers…）可能另归一块受保护地盘：
+                // 在正本窗口里**再套一层**落点窗口（内层先还原、外层后还原）。
+                void PlaceWithWindow()
+                {
+                    if (destParent.Length == 0) { DoPlaceNow(); return; }
+                    if (!TrustedInstallerAccess.ForWrite(destParent, DoPlaceNow,
+                                                         out placeTook, out placeErr, log))
+                        throw new IOException("落点目录受保护，取所有权后仍写不进：" + placeErr);
+                }
+
+                // ★ 复制正本与建落点必须待在**同一个窗口**里做完（实测）：
+                //   对受保护目录还原本来的安全描述符时，系统会把目录里子对象的**继承** ACE
+                //   重算一遍；窗口期刚写好的正本会被重算成只剩 TI 能访问，之后再拿它当源
+                //   建硬链接，`CreateHardLinkW` 会以"拒绝访问"失败。正本窗口因此包住
+                //   "复制正本 + 建落点"两件事（详见 TrustedInstallerAccess.ForWrite）。
+                void DoWork()
+                {
+                    if (needStore) CopyStore();
+                    if (needPlace) PlaceWithWindow();
+                }
+
+                try
+                {
+                    if (storeParent.Length > 0)
+                    {
+                        // 正本目录**已存在**时它可能早就被套上了 WinSxS 策略（owner=TI、
+                        // BA 只剩读+执行），这时直接写会被拒。统一入口：先直接试；只有权限
+                        // 不足才取所有权、写完**还原**。
+                        if (!TrustedInstallerAccess.ForWrite(storeParent, DoWork,
+                                                             out storeTook, out storeErr, log))
+                            throw new IOException("正本目录受保护，取所有权后仍写不进：" + storeErr);
+                    }
+                    else
+                    {
+                        DoWork();
+                    }
+
+                    if (storeTook) r.OwnershipTaken++;
+                    if (placeTook) r.OwnershipTaken++;
+                }
                 catch (Exception ex)
                 {
                     r.Failed++;
-                    r.Notes.Add($"[失败] 建落点 {op.DestinationPath}: {ex.Message}");
+                    r.Notes.Add($"[失败] {step} {op.StorePath} → {op.DestinationPath}: {ex.Message}");
                     return;
                 }
             }
@@ -504,7 +553,7 @@ namespace OneCore_Image_Designer.Services
             // ③ 安全描述符落到**落点**上（清单声明的就是这个位置的 ACL）
             if (applyAcl && op.Sddl.Length > 0)
             {
-                var acl = ApplyAndVerifyPathSddl(op.DestinationPath, op.Sddl);
+                var acl = ApplyAclWithAccess(op.DestinationPath, op.Sddl, r, log);
                 Count(r, acl, op.DestinationPath, log);
             }
         }
@@ -533,7 +582,7 @@ namespace OneCore_Image_Designer.Services
 
             if (applyAcl && op.Sddl.Length > 0)
             {
-                var acl = ApplyAndVerifyPathSddl(op.Path, op.Sddl);
+                var acl = ApplyAclWithAccess(op.Path, op.Sddl, r, log);
                 Count(r, acl, op.Path, log);
             }
         }
@@ -595,7 +644,8 @@ namespace OneCore_Image_Designer.Services
                     if (acl.Verified == false)
                     {
                         r.AclMismatched++;
-                        log?.Invoke($"[CSI]   ✗ ACL 回读**不一致**：{path} — 回读 {acl.Got}");
+                        log?.Invoke($"[CSI]   ✗ ACL 回读**不一致**：{path} — 回读 {acl.Got}" +
+                                    (acl.Error.Length > 0 ? $"／原因：{acl.Error}" : ""));
                     }
                     else if (acl.Verified == null && acl.Error.Length > 0)
                     {
@@ -608,6 +658,29 @@ namespace OneCore_Image_Designer.Services
                     r.Notes.Add($"[ACL] {path}: {acl.Error}");
                     break;
             }
+        }
+
+        /// <summary>
+        /// 落 ACL 的**统一入口**：先直接落；只有**权限不足**才取所有权再落。
+        ///
+        /// 【为什么需要】清单声明的 SDDL 要落到**已存在**的受保护对象上时（重装已有组件、
+        /// 落点归 TrustedInstaller），BA 没有 WRITE_DAC，直接写会被拒。这种情况取一次所有权
+        /// （owner ⇒ BA）就能落 —— 而落进去的**就是清单声明的目标状态**，所以**不还原**
+        /// （与 <see cref="TrustedInstallerAccess.TryWriteInto"/> 的"写完还原"不同）。
+        /// </summary>
+        private static PathAclResult ApplyAclWithAccess(string path, string sddl, CsiPlaceResult r,
+                                                        Action<string>? log)
+        {
+            var acl = ApplyAndVerifyPathSddl(path, sddl);
+            if (acl.Outcome != OcidServicingNative.SddlApplyOutcome.Failed) return acl;
+
+            var again = TrustedInstallerAccess.ApplyDeclaredSddl(path, sddl, out bool took, out string err, log);
+            if (again == OcidServicingNative.SddlApplyOutcome.Applied)
+            {
+                if (took) r.OwnershipTaken++;
+                return ApplyAndVerifyPathSddl(path, sddl);
+            }
+            return new PathAclResult { Outcome = again, Error = err.Length > 0 ? err : acl.Error };
         }
 
         /// <summary>
@@ -647,14 +720,61 @@ namespace OneCore_Image_Designer.Services
                 }
                 else
                 {
-                    verified = want.DaclProtected
-                        ? (rb.DaclProtected && rb.DaclAceCount == want.DaclAceCount)
-                        : (rb.DaclAceCount >= want.DaclAceCount);
-                    note = "";
+                    var why = new List<string>();
+                    if (want.DaclProtected != rb.DaclProtected)
+                        why.Add($"保护标志：声明 {(want.DaclProtected ? "带 P" : "无 P")}、" +
+                                $"回读 {(rb.DaclProtected ? "带 P" : "无 P")}");
+                    if (rb.DaclAceCount < want.DaclAceCount)
+                        why.Add($"ACE 条数：声明 {want.DaclAceCount}、回读 {rb.DaclAceCount}（回读更少）");
+                    if (!SidsCompatible(want, rb, out string sidNote) && sidNote.Length > 0)
+                        why.Add(sidNote);
+
+                    verified = why.Count == 0;
+                    note = verified == true ? "" : string.Join("；", why);
                 }
             }
 
             return new PathAclResult { Outcome = outcome, Verified = verified, Got = got, Error = note };
+        }
+
+        /// <summary>
+        /// 回读的 DACL 与写入意图是否**同一个策略**（比 SID 集合，不比条数、不比顺序）。
+        ///
+        /// 【为什么不能比条数】Windows **应用** DACL 时会把"仅继承"（`IO`）ACE 拆成
+        /// "对本对象生效"+"仅继承"两条：实测把 8 条的
+        /// <c>D:P(A;CI;GA;;;TI)(A;;0x1301bf;;;SY)…(A;CIOI;GRGX;;;BU)…</c> 落到目录上，
+        /// 回读是 **11 条**（SID 集合一模一样、顺序变成规范序）。所以条数只要求"不少于"。
+        ///
+        /// **SID 集合**才是稳定事实：声明里有的 SID 回读必须都有；声明是**受保护** DACL 时
+        /// 还必须一个不多 —— `P` 的意义就是挡住父目录的继承 ACE 掺进来。
+        /// 两边都先经 `ConvertSidToStringSidW` 规范化，别名（`BA`）与 SID（`S-1-5-32-544`）
+        /// 因此不会造成假失败。
+        /// </summary>
+        private static bool SidsCompatible(OcidServicingNative.SddlFacts want,
+                                           OcidServicingNative.SddlFacts got,
+                                           out string note)
+        {
+            note = "";
+            if (!want.DaclSidsAvailable || !got.DaclSidsAvailable)
+            {
+                note = "（一侧的 SID 集合未能规范化，只比了条数）";
+                return true;
+            }
+
+            var w = new HashSet<string>(want.DaclSids, StringComparer.OrdinalIgnoreCase);
+            var g = new HashSet<string>(got.DaclSids, StringComparer.OrdinalIgnoreCase);
+            if (!w.IsSubsetOf(g))
+            {
+                note = "声明里的 SID 回读不见了：" + string.Join(",", w.Except(g).OrderBy(x => x, StringComparer.Ordinal));
+                return false;
+            }
+            if (want.DaclProtected && !g.SetEquals(w))
+            {
+                note = "声明是受保护 DACL，回读却多出 SID：" +
+                       string.Join(",", g.Except(w).OrderBy(x => x, StringComparer.Ordinal));
+                return false;
+            }
+            return true;
         }
     }
 }

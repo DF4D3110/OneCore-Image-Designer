@@ -408,13 +408,20 @@ extern "C" {
 
     /// SDDL 的文本级解读（段存在性 / ACE 计数 / 需设置的 SECURITY_INFORMATION 位）。
     /// 供上层在落盘前决策与告警，不碰注册表。
+    ///
+    /// `outDaclSids` 是 DACL 的**规范 SID 列表**（`;` 分隔），供回读校验做集合比对
+    /// —— 比 ACE 条数稳（Windows 应用 DACL 时会拆分"仅继承"ACE，条数会变）。
     int __cdecl OcidDescribeSddl(const wchar_t* sddl,
                                  int* outHasOwner, int* outHasGroup, int* outHasDacl, int* outHasSacl,
                                  int* outDaclProtected, int* outDaclNoAccessControl,
                                  int* outDaclAceCount, int* outSaclAceCount,
                                  unsigned int* outSecurityInformation,
+                                 wchar_t* outDaclSids, unsigned int daclSidsCap,
+                                 unsigned int* outDaclSidsLen, int* outDaclSidsAvailable,
                                  wchar_t* errBuf, unsigned int errCap)
     {
+        if (outDaclSidsLen) *outDaclSidsLen = 0;
+        if (outDaclSidsAvailable) *outDaclSidsAvailable = 0;
         if (!sddl) return OCID_ERR_ARGUMENT;
         try
         {
@@ -434,6 +441,26 @@ extern "C" {
             if (outDaclAceCount) *outDaclAceCount = info.daclAceCount;
             if (outSaclAceCount) *outSaclAceCount = info.saclAceCount;
             if (outSecurityInformation) *outSecurityInformation = SddlSecurityInformation(info);
+            if (outDaclSidsAvailable) *outDaclSidsAvailable = info.daclSidsAvailable ? 1 : 0;
+
+            std::wstring joined;
+            for (std::size_t k = 0; k < info.daclSids.size(); ++k)
+            {
+                if (k) joined += L';';
+                joined += info.daclSids[k];
+            }
+            if (outDaclSids || outDaclSidsLen)
+            {
+                if (!outDaclSids)
+                {
+                    // 只问长度（没给缓冲）：按"缓冲不足"回，与 cap 不够时同一个约定
+                    // —— `*outDaclSidsLen` 已经是所需长度。别回 OCID_ERR_ARGUMENT：
+                    // 那会让"两趟调用"的第一趟看起来像参数错误。
+                    return OCID_ERR_BUFFER;
+                }
+                int rc = CopyOutStr(joined, outDaclSids, daclSidsCap, outDaclSidsLen);
+                if (rc != OCID_OK) return rc;   // 缓冲不足：*outDaclSidsLen 已是所需长度
+            }
             return OCID_OK;
         }
         catch (...)

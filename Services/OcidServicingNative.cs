@@ -238,6 +238,7 @@ namespace OneCore_Image_Designer.Services
             out int daclProtected, out int daclNoAccessControl,
             out int daclAceCount, out int saclAceCount,
             out uint securityInformation,
+            [Out] char[]? daclSids, uint daclSidsCap, out uint daclSidsLen, out int daclSidsAvailable,
             [Out] char[]? errBuf, uint errCap);
 
         private const int ErrCap = 1024;
@@ -475,6 +476,15 @@ namespace OneCore_Image_Designer.Services
             public int SaclAceCount { get; init; }
             /// <summary>这段 SDDL 实际需要设置的 SECURITY_INFORMATION 位。</summary>
             public uint SecurityInformation { get; init; }
+
+            /// <summary>
+            /// DACL 里每条 ACE 的**规范 SID 文本**（`S-1-5-…`），顺序与 ACE 一致。
+            /// 回读校验比的是它而不是 ACE 条数 —— Windows 应用 DACL 时会把"仅继承"ACE
+            /// 拆成两条，条数会变、SID 集合不变。
+            /// </summary>
+            public IReadOnlyList<string> DaclSids { get; init; }
+            /// <summary>DaclSids 是否可信；false 时只能退回"条数不少于"的弱比对。</summary>
+            public bool DaclSidsAvailable { get; init; }
         }
 
         /// <summary>应用 SDDL 的结果。**跳过（(inherit)）是合法结果，不是失败。**</summary>
@@ -493,12 +503,32 @@ namespace OneCore_Image_Designer.Services
             var err = new char[ErrCap];
             try
             {
+                // SID 列表用"先问长度、再取内容"的两趟调用，避免猜一个够不够大的缓冲。
                 int rc = OcidDescribeSddl(sddl ?? "",
                                           out int ho, out int hg, out int hd, out int hs,
                                           out int prot, out int noAc,
                                           out int dAce, out int sAce, out uint info,
+                                          null, 0, out uint sidsLen, out int sidsAvail,
                                           err, ErrCap);
-                if (rc != (int)Rc.Ok) { error = ErrText(err, rc); return false; }
+                if (rc != (int)Rc.Ok && rc != (int)Rc.Buffer) { error = ErrText(err, rc); return false; }
+
+                var sids = new List<string>();
+                bool avail = sidsAvail != 0;
+                if (sidsLen > 0)
+                {
+                    var buf = new char[sidsLen + 1];
+                    rc = OcidDescribeSddl(sddl ?? "",
+                                          out ho, out hg, out hd, out hs,
+                                          out prot, out noAc,
+                                          out dAce, out sAce, out info,
+                                          buf, (uint)buf.Length, out uint got, out sidsAvail,
+                                          err, ErrCap);
+                    if (rc != (int)Rc.Ok) { error = ErrText(err, rc); return false; }
+                    avail = sidsAvail != 0;
+                    string joined = new string(buf, 0, (int)Math.Min(got, (uint)buf.Length - 1));
+                    if (joined.Length > 0)
+                        sids.AddRange(joined.Split(';', StringSplitOptions.RemoveEmptyEntries));
+                }
 
                 facts = new SddlFacts
                 {
@@ -511,6 +541,8 @@ namespace OneCore_Image_Designer.Services
                     DaclAceCount = dAce,
                     SaclAceCount = sAce,
                     SecurityInformation = info,
+                    DaclSids = sids,
+                    DaclSidsAvailable = avail,
                 };
                 return true;
             }
