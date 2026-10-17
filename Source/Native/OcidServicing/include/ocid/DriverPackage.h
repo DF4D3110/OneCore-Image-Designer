@@ -183,4 +183,35 @@ bool ChoosePublishedInfName(unsigned int importFlags,
                             OemInfAllocation& out,
                             std::wstring& err);
 
+// ---------------------------------------------------------------------------
+// Driver store import file set.
+//
+// Ground truth, 8061 package store: a driver component is a manifest whose identity
+// is  type="driverUpdate" versionScope="nonSxS"  and whose files carry NO
+// destinationPath at all - where each file goes is decided by `importPath`:
+//
+//   <file name="acpi.inf" sourceName="acpi.inf" importPath="$(build.nttree)\driver_infs\" />
+//   <file name="acpi.sys" sourceName="acpi.sys" importPath="$(build.nttree)\" />
+//
+//   Inf          -> copied into <StoreId>, then published as
+//                   <Windows>\INF\<original name | oemN.inf>  (ChoosePublishedInfName)
+//   DriverBinary -> copied into <StoreId> only
+//   NotImported  -> not part of the import (no importPath, or another tree)
+//
+// The INF is the file whose import path ends in the `driver_infs` segment, so the
+// distinction is structural and needs no guessing. Measured: 231 of 5664 manifests in
+// a real 8061 package store are driver packages, and none of them carries a payload in
+// the package store itself - the files come from the build tree, which in an offline
+// build means the package payload directory or the nttree that was just placed.
+// ---------------------------------------------------------------------------
+enum class DriverImportFileKind { NotImported = 0, Inf, DriverBinary };
+
+// importPath -> kind. Case-insensitive; a trailing separator is ignored; an empty
+// string is NotImported.
+DriverImportFileKind ClassifyDriverImportFile(const std::wstring& importPath);
+
+// Is this component a driver package at all? Both attributes are compared
+// case-insensitively; a missing attribute means "no".
+bool IsDriverUpdateComponent(const std::wstring& type, const std::wstring& versionScope);
+
 } // namespace ocid

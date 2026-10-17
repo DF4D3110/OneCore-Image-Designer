@@ -307,4 +307,51 @@ bool ChoosePublishedInfName(unsigned int importFlags,
     return AcquireOemInfName(bitmap, out, err);
 }
 
+namespace {
+
+// 只用 ASCII 小写：清单里的宏与路径都是 ASCII，不引 locale。
+std::wstring AsciiLower(const std::wstring& s)
+{
+    std::wstring out;
+    out.reserve(s.size());
+    for (wchar_t c : s)
+        out.push_back(c >= L'A' && c <= L'Z' ? static_cast<wchar_t>(c + 32) : c);
+    return out;
+}
+
+std::wstring WithoutTrailingSlashes(std::wstring s)
+{
+    while (!s.empty() && (s.back() == L'\\' || s.back() == L'/')) s.pop_back();
+    return s;
+}
+
+bool IsSep(wchar_t c) { return c == L'\\' || c == L'/'; }
+
+} // namespace
+
+DriverImportFileKind ClassifyDriverImportFile(const std::wstring& importPath)
+{
+    const std::wstring p = WithoutTrailingSlashes(AsciiLower(importPath));
+    if (p.empty()) return DriverImportFileKind::NotImported;
+
+    // 末段是 `driver_infs` ⇒ 这条声明的是 INF。
+    const size_t sep = p.find_last_of(L"\\/");
+    const std::wstring leaf = (sep == std::wstring::npos) ? p : p.substr(sep + 1);
+    if (leaf == L"driver_infs") return DriverImportFileKind::Inf;
+
+    // 构建树（nttree）里的其他文件都是驱动载荷。
+    static const std::wstring kNtTree = L"$(build.nttree)";
+    if (p == kNtTree) return DriverImportFileKind::DriverBinary;
+    if (p.size() > kNtTree.size() && p.compare(0, kNtTree.size(), kNtTree) == 0 &&
+        IsSep(p[kNtTree.size()]))
+        return DriverImportFileKind::DriverBinary;
+
+    return DriverImportFileKind::NotImported;
+}
+
+bool IsDriverUpdateComponent(const std::wstring& type, const std::wstring& versionScope)
+{
+    return AsciiLower(type) == L"driverupdate" && AsciiLower(versionScope) == L"nonsxs";
+}
+
 } // namespace ocid

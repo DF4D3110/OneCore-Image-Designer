@@ -254,6 +254,36 @@ static void OemInfNames()
     Check(!err.empty(), "位图满时给出原因");
 }
 
+// 驱动包清单里"哪些文件进 store"由 importPath 决定（真机 231 个 arm_*.inf_*.manifest）
+static void ImportFileSet()
+{
+    CheckInt((long long)ClassifyDriverImportFile(L"$(build.nttree)\\driver_infs\\"),
+             (long long)DriverImportFileKind::Inf, "末段 driver_infs ⇒ INF");
+    CheckInt((long long)ClassifyDriverImportFile(L"$(build.nttree)\\driver_infs"),
+             (long long)DriverImportFileKind::Inf, "少了尾分隔符也算 INF");
+    CheckInt((long long)ClassifyDriverImportFile(L"$(BUILD.NTTREE)\\DRIVER_INFS\\"),
+             (long long)DriverImportFileKind::Inf, "宏大小写不敏感");
+    CheckInt((long long)ClassifyDriverImportFile(L"$(build.nttree)\\"),
+             (long long)DriverImportFileKind::DriverBinary, "构建树根 ⇒ 驱动载荷");
+    CheckInt((long long)ClassifyDriverImportFile(L"$(build.nttree)"),
+             (long long)DriverImportFileKind::DriverBinary, "构建树根本身 ⇒ 驱动载荷");
+    CheckInt((long long)ClassifyDriverImportFile(L"$(build.nttree)\\drivers\\"),
+             (long long)DriverImportFileKind::DriverBinary, "构建树子目录 ⇒ 驱动载荷");
+    CheckInt((long long)ClassifyDriverImportFile(L""),
+             (long long)DriverImportFileKind::NotImported, "没有 importPath ⇒ 不导入");
+    CheckInt((long long)ClassifyDriverImportFile(L"$(runtime.system32)\\"),
+             (long long)DriverImportFileKind::NotImported, "别的树 ⇒ 不导入");
+    // `$(build.nttree)x` 不是构建树子路径，不能算载荷
+    CheckInt((long long)ClassifyDriverImportFile(L"$(build.nttree)x\\driver_infs\\"),
+             (long long)DriverImportFileKind::Inf, "只有末段说了算，前缀不匹配也算 INF");
+
+    Check(IsDriverUpdateComponent(L"driverUpdate", L"nonSxS"), "driverUpdate/nonSxS ⇒ 驱动包");
+    Check(IsDriverUpdateComponent(L"DRIVERUPDATE", L"NONSXS"), "identity 大小写不敏感");
+    Check(!IsDriverUpdateComponent(L"", L""), "没有 type ⇒ 不是驱动包");
+    Check(!IsDriverUpdateComponent(L"driverUpdate", L"SxS"), "versionScope=SxS ⇒ 不是驱动包");
+    Check(!IsDriverUpdateComponent(L"win32", L"nonSxS"), "type=win32 ⇒ 不是驱动包");
+}
+
 int main()
 {
     printf("OCID DMI 自检\n");
@@ -263,6 +293,7 @@ int main()
     ImageGroundTruth();
     DatabaseValueNames();
     OemInfNames();
+    ImportFileSet();
 
     printf("\n== 结果 ==\n  通过 %d / 失败 %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
