@@ -15,6 +15,7 @@
 
 #include "ocid/ConsoleUtf8.h"
 #include "ocid/DriverPackage.h"
+#include "ocid/DriverInf.h"
 #include "ocid/FilePlacement.h"
 #include "ocid/MacroExpander.h"
 #include "ocid/Manifest.h"
@@ -863,6 +864,253 @@ static int CmdDmiOps(const std::wstring& dir,
 #endif
 }
 
+// ── dmi-ledger：驱动库记录算成 JSONL（C# 侧用 OfflineRegistryService 落盘） ──
+//
+// 输入是一个**已存在**的 FileRepository 目录。目录名是权威的 StoreId；这里同时按
+// INF 字节重算一遍并比对 —— 算法漂移必须当场暴露，不能让目录名和记录悄悄对不上。
+//
+// 输出（每行一个驱动包）：
+//   storeDir / infName / arch / storeIdComputed / storeIdMatches / ok / error / notes / keys
+//   keys[].path 是 DriverDatabase 下的相对路径；values[] 的 type 取 sz|multi|dword|binary。
+static std::string HexOfBytes(const std::vector<std::uint8_t>& bytes)
+{
+    static const char* digits = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2);
+    for (const std::uint8_t b : bytes) {
+        out.push_back(digits[(b >> 4) & 0xF]);
+        out.push_back(digits[b & 0xF]);
+    }
+    return out;
+}
+
+static std::string LedgerValueJson(const LedgerValue& value)
+{
+    std::string json = "{\"name\":\"" + JsonEscape(value.name) + "\",\"type\":\"";
+    switch (value.type) {
+    case LedgerValueType::String:
+        json += "sz\",\"text\":\"" + JsonEscape(value.text) + "\"";
+        break;
+    case LedgerValueType::MultiString: {
+        json += "multi\",\"strings\":[";
+        bool first = true;
+        size_t start = 0;
+        while (true) {
+            const size_t sep = value.text.find(L'\0', start);
+            const std::wstring item = (sep == std::wstring::npos) ? value.text.substr(start)
+                                                                 : value.text.substr(start, sep - start);
+            if (!first) json += ",";
+            json += "\"" + JsonEscape(item) + "\"";
+            first = false;
+            if (sep == std::wstring::npos) break;
+            start = sep + 1;
+        }
+        json += "]";
+        break;
+    }
+    case LedgerValueType::DWord:
+        json += "dword\",\"dword\":" + std::to_string(value.dword);
+        break;
+    case LedgerValueType::Binary:
+        json += "binary\",\"hex\":\"" + HexOfBytes(value.binary) + "\"";
+        break;
+    }
+    return json + "}";
+}
+
+static const wchar_t* ArchNameFromId(unsigned int id)
+{
+    switch (id) {
+    case 0:  return L"x86";
+    case 5:  return L"arm";
+    case 6:  return L"ia64";
+    case 9:  return L"amd64";
+    case 12: return L"arm64";
+    default: return L"";
+    }
+}
+
+// 一个驱动包目录里应当**恰好**一个 INF。多于一个就不猜（那是清单/展开出了问题）。
+static bool FindSingleInf(const std::wstring& dir, std::wstring& infPath, std::wstring& infName,
+                          size_t& infCount)
+{
+    infCount = 0;
+    WIN32_FIND_DATAW fd;
+    const std::wstring pattern = dir + L"\\*";
+    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        std::wstring name = fd.cFileName;
+        if (name.size() < 4) continue;
+        std::wstring ext = name.substr(name.size() - 4);
+        for (wchar_t& ch : ext) ch = (wchar_t)towlower(ch);
+        if (ext != L".inf") continue;
+        ++infCount;
+        infName = name;
+        infPath = dir + L"\\" + name;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return infCount == 1;
+}
+
+static int CmdDmiLedger(const std::wstring& repoRoot,
+                        const std::wstring& listFile,
+                        const std::wstring& archName,
+                        bool inbox,
+                        int maxFiles)
+{
+#ifdef _WIN32
+    std::vector<std::wstring> dirs;
+    if (!listFile.empty()) {
+        std::wstring text, err;
+        if (!ReadFileUtf8(listFile, text, err)) { Err(ToUtf8(err)); return 2; }
+        size_t start = 0;
+        while (start <= text.size()) {
+            size_t nl = text.find(L'\n', start);
+            std::wstring line = (nl == std::wstring::npos) ? text.substr(start)
+                                                           : text.substr(start, nl - start);
+            while (!line.empty() && (line.back() == L'\r' || line.back() == L' ')) line.pop_back();
+            if (!line.empty()) dirs.push_back(line);
+            if (nl == std::wstring::npos) break;
+            start = nl + 1;
+        }
+    } else {
+        WIN32_FIND_DATAW fd;
+        const std::wstring pattern = repoRoot + L"\\*";
+        HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) { Err("no FileRepository directory found"); return 2; }
+        do {
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) continue;
+            if (fd.cFileName[0] == L'.') continue;
+            if (maxFiles > 0 && (int)dirs.size() >= maxFiles) break;
+            dirs.push_back(repoRoot + L"\\" + fd.cFileName);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    if (dirs.empty()) { Err("no FileRepository directory found"); return 2; }
+
+    unsigned int forcedArch = 0;
+    const bool haveForcedArch = !archName.empty();
+    if (haveForcedArch && !ArchIdFromName(archName, forcedArch)) {
+        Err("unknown --arch: " + ToUtf8(archName));
+        return 2;
+    }
+
+    size_t okCount = 0, failed = 0, noInf = 0, multiInf = 0, mismatch = 0, noArch = 0;
+
+    for (const std::wstring& dir : dirs) {
+        const size_t slash = dir.find_last_of(L"\\/");
+        const std::wstring storeDir = (slash == std::wstring::npos) ? dir : dir.substr(slash + 1);
+
+        std::wstring infPath, infName;
+        size_t infCount = 0;
+        if (!FindSingleInf(dir, infPath, infName, infCount)) {
+            if (infCount == 0) { ++noInf; Err("note: 目录里没有 INF：" + ToUtf8(dir)); }
+            else { ++multiInf; Err("note: 目录里有 " + std::to_string(infCount) + " 个 INF，不猜：" + ToUtf8(dir)); }
+            continue;
+        }
+
+        std::vector<std::uint8_t> infBytes;
+        std::wstring readErr;
+        if (!ReadRawBytes(infPath, infBytes, readErr)) { ++failed; Err(ToUtf8(readErr)); continue; }
+
+        unsigned int archId = 0;
+        if (haveForcedArch) {
+            archId = forcedArch;
+        } else {
+            // 目录名形如 `<INF 名>_<架构>_<16 hex>`；架构取中段。
+            const size_t last = storeDir.find_last_of(L'_');
+            const size_t prev = (last == std::wstring::npos || last == 0)
+                                    ? std::wstring::npos
+                                    : storeDir.find_last_of(L'_', last - 1);
+            if (last == std::wstring::npos || prev == std::wstring::npos) {
+                ++noArch;
+                Err("note: 目录名里看不出架构：" + ToUtf8(storeDir));
+                continue;
+            }
+            const std::wstring mid = storeDir.substr(prev + 1, last - prev - 1);
+            if (!ArchIdFromName(mid, archId)) {
+                ++noArch;
+                Err("note: 架构串不认识（" + ToUtf8(mid) + "）：" + ToUtf8(storeDir));
+                continue;
+            }
+        }
+
+        std::wstring computed, storeErr;
+        if (!BuildStoreId(infPath, infBytes, archId, computed, storeErr)) {
+            ++failed;
+            Err("note: " + ToUtf8(storeErr));
+            continue;
+        }
+        const bool matches = (computed == storeDir);
+        if (!matches) {
+            ++mismatch;
+            Err("note: 目录名与重算不一致：" + ToUtf8(storeDir) + " != " + ToUtf8(computed));
+        }
+
+        InfDocument inf;
+        std::wstring parseErr;
+        if (!ParseInf(infBytes, inf, parseErr)) {
+            ++failed;
+            Err("note: INF 解析失败（" + ToUtf8(parseErr) + "）：" + ToUtf8(infPath));
+            continue;
+        }
+
+        DriverLedgerRequest request;
+        request.inf = &inf;
+        request.storeId = storeDir;
+        request.infFileName = infName;
+        request.architecture = archId;
+        if (inbox) {
+            request.importFlags = kImportFlagInbox | kImportFlagUseOriginalInfName;
+            request.signerName = L"Microsoft Windows";
+            request.signerScore = 0x0D000003u;
+        }
+        const DriverLedgerPlan plan = BuildDriverLedgerPlan(request);
+        for (const auto& note : plan.notes) Err("note: " + ToUtf8(storeDir) + ": " + ToUtf8(note));
+
+        std::string line = "{\"storeDir\":\"" + JsonEscape(storeDir)
+                         + "\",\"infName\":\"" + JsonEscape(infName)
+                         + "\",\"arch\":\"" + JsonEscape(ArchNameFromId(archId))
+                         + "\",\"storeIdComputed\":\"" + JsonEscape(computed)
+                         + "\",\"storeIdMatches\":" + (matches ? "true" : "false")
+                         + ",\"ok\":" + (plan.ok ? "true" : "false")
+                         + ",\"error\":\"" + JsonEscape(plan.error) + "\",\"notes\":[";
+        for (size_t i = 0; i < plan.notes.size(); ++i) {
+            if (i > 0) line += ",";
+            line += "\"" + JsonEscape(plan.notes[i]) + "\"";
+        }
+        line += "],\"keys\":[";
+        for (size_t i = 0; i < plan.keys.size(); ++i) {
+            if (i > 0) line += ",";
+            line += "{\"path\":\"" + JsonEscape(plan.keys[i].relativePath) + "\",\"values\":[";
+            for (size_t j = 0; j < plan.keys[i].values.size(); ++j) {
+                if (j > 0) line += ",";
+                line += LedgerValueJson(plan.keys[i].values[j]);
+            }
+            line += "]}";
+        }
+        line += "]}";
+        OutLn(line);
+        if (plan.ok) ++okCount; else ++failed;
+    }
+
+    Err("storeDirs=" + std::to_string(dirs.size())
+      + " ledgerOk=" + std::to_string(okCount)
+      + " failed=" + std::to_string(failed)
+      + " noInf=" + std::to_string(noInf)
+      + " multiInf=" + std::to_string(multiInf)
+      + " storeIdMismatch=" + std::to_string(mismatch)
+      + " archUnknown=" + std::to_string(noArch));
+    // 目录名对不上、没有 INF、多个 INF 都不算成功。
+    return (failed == 0 && noInf == 0 && multiInf == 0 && mismatch == 0 && noArch == 0) ? 0 : 1;
+#else
+    (void)repoRoot; (void)listFile; (void)archName; (void)inbox; (void)maxFiles;
+    return 2;
+#endif
+}
+
 static void Usage()
 {
     OutLn("OCID servicing console");
@@ -875,6 +1123,7 @@ static void Usage()
     OutLn("  ocid_manifest place-ops --windows <winDir> --list <pathsFile> [--packages <root>] [--image-arch <arch>]");
     OutLn("  ocid_manifest place-ops --windows <winDir> <dir> [maxFiles]");
     OutLn("  ocid_manifest dmi-ops --list <pathsFile> [--packages <root>]   driver import plan as JSONL");
+    OutLn("  ocid_manifest dmi-ledger <fileRepoDir> [--list <dirsFile>] [--arch x86] [--inbox]   DriverDatabase records as JSONL");
     OutLn("      --image-arch: arm|arm64|amd64|x86|none（默认自动探测 ntoskrnl.exe；none = 不红移）");
     OutLn("  ocid_manifest verify-names <dir> [maxFiles]   (check component names against real file names)");
     OutLn("  ocid_manifest expand <windowsDir> <text...>   expand $(runtime.*); --paths to also show base paths");
@@ -948,6 +1197,21 @@ int main(int argc, char** argv)
         return CmdDmiOps(dir, listFile, pkgRoot, mx);
     }
 
+    if (cmd == L"dmi-ledger") {
+        std::wstring dir, listFile, arch;
+        bool inbox = false;
+        int mx = 0;
+        for (int i = 2; i < argc; ++i) {
+            std::string a = argv[i];
+            if (a == "--list" && i + 1 < argc)      { listFile = FromUtf8OrAnsi(argv[++i]); }
+            else if (a == "--arch" && i + 1 < argc) { arch = FromUtf8OrAnsi(argv[++i]); }
+            else if (a == "--inbox")                { inbox = true; }
+            else if (a.rfind("--", 0) == 0)         { ++i; }
+            else if (dir.empty())                   { dir = FromUtf8OrAnsi(argv[i]); }
+            else                                    { mx = atoi(argv[i]); }
+        }
+        return CmdDmiLedger(dir, listFile, arch, inbox, mx);
+    }
     if (cmd == L"verify-names" && argc >= 3) {
         int mx = (argc >= 4) ? atoi(argv[3]) : 0;
         return CmdVerifyNames(FromUtf8OrAnsi(argv[2]), mx);

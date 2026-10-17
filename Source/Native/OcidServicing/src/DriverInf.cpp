@@ -1,4 +1,4 @@
-// OCID DriverInf - implementation. See include/ocid/DriverInf.h for the evidence.
+﻿// OCID DriverInf - implementation. See include/ocid/DriverInf.h for the evidence.
 // Keep this file pure ASCII.
 
 #include "ocid/DriverInf.h"
@@ -36,6 +36,23 @@ std::wstring ToLowerCopy(const std::wstring& text) {
 
 bool IEquals(const std::wstring& left, const std::wstring& right) {
     return _wcsicmp(left.c_str(), right.c_str()) == 0;
+}
+// Real INFs put trailing comments after a value on the same line, e.g.
+//   ClassGuid={14b62f50-3f15-11dd-ae16-0800200c9a66}    ; If class above is new, ...
+// setupapi tolerates that, so we must too. A ';' inside double quotes is data, not a comment.
+std::wstring StripTrailingComment(const std::wstring& text) {
+    bool inQuotes = false;
+    for (size_t i = 0; i < text.size(); ++i) {
+        const wchar_t ch = text[i];
+        if (ch == L'"') {
+            inQuotes = !inQuotes;
+            continue;
+        }
+        if (ch == L';' && !inQuotes) {
+            return TrimCopy(text.substr(0, i));
+        }
+    }
+    return TrimCopy(text);
 }
 
 int HexDigitValue(wchar_t ch) {
@@ -206,6 +223,59 @@ std::wstring InfDocument::GetValue(const std::wstring& section, const std::wstri
 bool InfDocument::HasSection(const std::wstring& name) const {
     return FindSection(name) != nullptr;
 }
+bool InfDocument::TryGetString(const std::wstring& token, std::wstring& out) const {
+    const InfSection* strings = FindSection(L"Strings");
+    if (strings == nullptr) {
+        return false;
+    }
+    for (const InfEntry& entry : strings->entries) {
+        if (!entry.hasValue || !IEquals(entry.key, token)) {
+            continue;
+        }
+        std::wstring value = entry.value;
+        if (value.size() >= 2 && value.front() == L'"' && value.back() == L'"') {
+            value = value.substr(1, value.size() - 2);
+        }
+        out = value;
+        return true;
+    }
+    return false;
+}
+
+std::wstring InfDocument::Unquote(const std::wstring& text) {
+    if (text.size() >= 2 && text.front() == L'"' && text.back() == L'"') {
+        return text.substr(1, text.size() - 2);
+    }
+    return text;
+}
+
+std::wstring InfDocument::ResolveTokens(const std::wstring& text) const {
+    std::wstring out;
+    out.reserve(text.size());
+    size_t i = 0;
+    while (i < text.size()) {
+        const size_t open = text.find(L'%', i);
+        if (open == std::wstring::npos) {
+            out.append(text, i, std::wstring::npos);
+            break;
+        }
+        const size_t close = text.find(L'%', open + 1);
+        if (close == std::wstring::npos) {
+            out.append(text, i, std::wstring::npos);
+            break;
+        }
+        out.append(text, i, open - i);
+        const std::wstring token = text.substr(open + 1, close - open - 1);
+        std::wstring value;
+        if (!token.empty() && TryGetString(token, value)) {
+            out.append(value);
+        } else {
+            out.append(text, open, close - open + 1);   // keep %unknown% literal
+        }
+        i = close + 1;
+    }
+    return out;
+}
 
 // ---------------------------------------------------------------------------
 // Parsing
@@ -246,11 +316,11 @@ bool ParseInfText(const std::wstring& text, InfDocument& out, std::wstring& err)
         InfEntry entry;
         const size_t equals = line.find(L'=');
         if (equals == std::wstring::npos) {
-            entry.key = line;
+            entry.key = StripTrailingComment(line);
             entry.hasValue = false;
         } else {
             entry.key = TrimCopy(line.substr(0, equals));
-            entry.value = TrimCopy(line.substr(equals + 1));
+            entry.value = StripTrailingComment(line.substr(equals + 1));
             entry.hasValue = true;
         }
         if (!entry.key.empty()) {
@@ -361,12 +431,15 @@ bool ParseDriverVer(const std::wstring& spec, InfVersionInfo& out, std::wstring&
             current.push_back(ch);
         }
         fields.push_back(current);
-        if (fields.empty() || fields.size() > 4) {
-            err = L"DriverVer version has " + std::to_wstring(fields.size()) + L" fields: " + versionPart;
+        // Five fields exist in the wild (iirsp.inf: 5.4.19.0.1). The store only has room
+        // for four, so the extra ones are dropped - the same thing setupapi does.
+        if (fields.empty()) {
+            err = L"DriverVer version is empty: " + versionPart;
             return false;
         }
         unsigned int numbers[4] = {0, 0, 0, 0};
-        for (size_t i = 0; i < fields.size(); ++i) {
+        const size_t fieldCount = (fields.size() < 4) ? fields.size() : 4;
+        for (size_t i = 0; i < fieldCount; ++i) {
             if (!ParseUnsignedField(TrimCopy(fields[i]), numbers[i])) {
                 err = L"DriverVer version field is not a number: " + versionPart;
                 return false;
@@ -430,7 +503,8 @@ bool ReadInfVersion(const InfDocument& inf, InfVersionInfo& out) {
         out.error = L"INF document is not parsed";
         return false;
     }
-    out.provider = inf.GetValue(L"Version", L"Provider");
+    out.providerRaw = inf.GetValue(L"Version", L"Provider");
+    out.provider = InfDocument::Unquote(inf.ResolveTokens(out.providerRaw));
     out.className = inf.GetValue(L"Version", L"Class");
     const std::wstring classGuid = inf.GetValue(L"Version", L"ClassGuid");
     if (!classGuid.empty()) {

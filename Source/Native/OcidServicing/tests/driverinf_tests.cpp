@@ -1,4 +1,4 @@
-// OCID - DMI 台账（INF 解析 + DriverDatabase 记录）自检
+﻿// OCID - DMI 台账（INF 解析 + DriverDatabase 记录）自检
 //
 // 这个文件钉的是"算错就会静默写坏驱动库"的三件事：
 //   1. INF 的文本形态：UTF-16LE BOM、`;` 注释、`[节]`、同键重复、行尾 `\` 续行
@@ -161,6 +161,34 @@ static void ParseSynthetic()
     Check(ParseInfText(L"junk before any section\r\n[S]\r\nA=1\r\n", loose, err), "节前杂行不导致失败");
     CheckStr(loose.GetValue(L"S", L"A"), L"1", "杂行之后的正节能读");
 
+    // 真机里就有的两种写法：值后面带注释、引号里的分号是数据
+    InfDocument commented;
+    Check(ParseInfText(L"[Version]\r\n"
+                       L"ClassGuid={14b62f50-3f15-11dd-ae16-0800200c9a66}    ; If class above is new\r\n"
+                       L"A=\"x;y\"\r\n"
+                       L"B=plain; tail\r\n",
+                       commented, err),
+          "带行尾注释的 INF 解析成功");
+    CheckStr(commented.GetValue(L"Version", L"ClassGuid"), L"{14b62f50-3f15-11dd-ae16-0800200c9a66}",
+             "值后面的 ; 注释被剥掉");
+    CheckStr(commented.GetValue(L"Version", L"A"), L"\"x;y\"", "引号里的分号保留");
+    CheckStr(commented.GetValue(L"Version", L"B"), L"plain", "未加引号的分号之后是注释");
+
+    // [Strings] 解析
+    InfDocument strings;
+    Check(ParseInfText(L"[Version]\r\nProvider=%MSFT%\r\n[Strings]\r\nMSFT=\"Microsoft\"\r\nLSI=\"LSI Corp\"\r\n", strings, err),
+          "带 [Strings] 的 INF 解析成功");
+    CheckStr(strings.ResolveTokens(L"%MSFT%"), L"Microsoft", "%MSFT% 解析成 Microsoft（引号剥掉）");
+    CheckStr(strings.ResolveTokens(L"%LSI% / %NOPE%"), L"LSI Corp / %NOPE%", "未定义的 token 保持原样");
+    CheckStr(strings.ResolveTokens(L"no tokens"), L"no tokens", "没有 token 的文本原样返回");
+
+    // 真机 brmfport.inf 的写法：Provider="%MSFT%"（引号包住 token）⇒ 库里存不带引号的 Microsoft
+    InfDocument quoted;
+    Check(ParseInfText(L"[Version]\r\nProvider=\"%MSFT%\"\r\n[Strings]\r\nMSFT=\"Microsoft\"\r\n", quoted, err),
+          "Provider 被引号包住的 INF 解析成功");
+    CheckStr(InfDocument::Unquote(quoted.ResolveTokens(quoted.GetValue(L"Version", L"Provider"))), L"Microsoft",
+             "Provider=\"%MSFT%\" 解析后要去掉外层引号（实测 brmfport.inf）");
+
     // 坏输入
     InfDocument bad;
     Check(!ParseInfText(L"[Unterminated\r\nA=1\r\n", bad, err), "未闭合的节头 ⇒ 失败");
@@ -226,7 +254,11 @@ static void DriverVerEncoding()
     Check(!ParseDriverVer(L"", version, err), "空 DriverVer ⇒ 失败");
     Check(!ParseDriverVer(L"2006-13-01,1.0", version, err), "13 月 ⇒ 失败");
     Check(!ParseDriverVer(L"06/21/2006,6.x", version, err), "非数字版本 ⇒ 失败");
-    Check(!ParseDriverVer(L"06/21/2006,1.2.3.4.5", version, err), "五段版本 ⇒ 失败");
+    Check(ParseDriverVer(L"06/21/2006,5.4.19.0.1", version, err), "五段版本也接受（真机 iirsp.inf 就是这样）");
+    CheckInt(version.major, 5, "五段版本取前四段：major = 5");
+    CheckInt(version.minor, 4, "minor = 4");
+    CheckInt(version.build, 19, "build = 19");
+    CheckInt(version.revision, 0, "revision = 0");
 
     std::uint64_t time = 0;
     Check(ParseInfDateFileTime(L"06/21/2006", time, err), "日期转 FILETIME 成功");
@@ -263,7 +295,8 @@ static void ImageVersionGroundTruth()
     Check(ParseInfFile(path, inf, err), "真机 1394.inf 能解析");
     InfVersionInfo version;
     Check(ReadInfVersion(inf, version), "版本节读取成功");
-    CheckStr(version.provider, L"%MSFT%", "000c：Provider 是未解析的 %MSFT%");
+    CheckStr(version.provider, L"Microsoft", "000c：Provider 用 [Strings] 解析成 Microsoft（实测）");
+    CheckStr(version.providerRaw, L"%MSFT%", "解析前原文保留（排障用）");
     CheckStr(HexOf(version.classGuid), L"c11fdd6b0f81d011bec708002be2092f",
              "000d：与 hive 里的 16 字节一致");
     CheckStr(HexOf(DriverDatePropertyData(version.driverDate)), L"00808ca3c594c601",
@@ -336,7 +369,7 @@ static void LedgerPlan()
         CheckInt((*values)[3].dword, 0, "000a = 架构（x86 = 0）");
         CheckInt((*values)[4].dword, 0, "000b = 区域 0");
         CheckStr((*values)[5].name, L"000c", "000c = Provider");
-        CheckStr((*values)[5].text, L"%MSFT%", "000c 不解析 %token%");
+        CheckStr((*values)[5].text, L"%MSFT%", "000c：token 没定义时保持 %token% 原样（不静默丢）");
         CheckStr((*values)[6].name, L"000d", "000d = ClassGuid");
         CheckStr(HexOf((*values)[6].binary), L"c11fdd6b0f81d011bec708002be2092f", "000d 的字节");
         CheckStr((*values)[7].name, L"000e", "000e = 日期");

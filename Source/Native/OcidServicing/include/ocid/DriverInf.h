@@ -1,4 +1,4 @@
-// OCID DriverInf - read a driver INF and turn it into DriverDatabase records.
+﻿// OCID DriverInf - read a driver INF and turn it into DriverDatabase records.
 //
 // This is the second half of DMI import. DriverPackage.h decides *where* a package
 // goes (StoreId) and *which files* it carries; this file decides *what the driver
@@ -74,6 +74,14 @@ struct InfDocument {
     std::wstring GetValue(const std::wstring& section, const std::wstring& key) const;
     // True when the section exists.
     bool HasSection(const std::wstring& name) const;
+
+    // Resolve %token% against [Strings] (surrounding quotes stripped). A token that is
+    // not defined stays literal - silently dropping it would store a wrong provider.
+    std::wstring ResolveTokens(const std::wstring& text) const;
+    bool TryGetString(const std::wstring& token, std::wstring& out) const;
+
+    // Strip one layer of surrounding double quotes (INF string values are often quoted).
+    static std::wstring Unquote(const std::wstring& text);
 };
 
 // Decode INF bytes (UTF-16LE/BE with BOM, otherwise the ANSI code page) and parse.
@@ -93,7 +101,10 @@ struct InfVersionInfo {
     bool ok = false;
     std::wstring error;
 
-    std::wstring provider;        // raw, %tokens% unresolved (that is what the DB keeps)
+    // The store keeps the RESOLVED provider: measured 158/158 on the 8061 x86 image,
+    // %MSFT% is stored as "Microsoft". The raw text is kept for diagnostics only.
+    std::wstring provider;
+    std::wstring providerRaw;
     std::wstring className;       // Class=
     std::vector<std::uint8_t> classGuid;   // 16 bytes, registry order; empty if absent
 
