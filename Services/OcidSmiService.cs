@@ -503,7 +503,8 @@ namespace OneCore_Image_Designer.Services
                         acl.Mismatched++;
                         log?.Invoke($"[SMI]   ✗ ACL 回读**不一致**：{fullPath}\n" +
                                     $"[SMI]       写入 {Truncate(r.Want, 90)}\n" +
-                                    $"[SMI]       回读 {Truncate(r.Got, 90)}");
+                                    $"[SMI]       回读 {Truncate(r.Got, 90)}\n" +
+                                    (r.Error.Length > 0 ? $"[SMI]       原因：{r.Error}" : ""));
                     }
                     break;
 
@@ -599,10 +600,20 @@ namespace OneCore_Image_Designer.Services
                 }
                 else
                 {
-                    verified = want.DaclProtected
-                        ? (rb.DaclProtected && rb.DaclAceCount == want.DaclAceCount)
-                        : (rb.DaclAceCount >= want.DaclAceCount);
-                    note = "";
+                    // 比 **SID 集合**（不是逐字符、也不是只比条数）：
+                    // 回读的写法会变（`BA` → `S-1-5-32-544`），条数也会变（系统会把"仅继承"
+                    // ACE 拆成两条），只有集合是稳定事实。详见 SidsCompatible 的注释。
+                    var why = new List<string>();
+                    if (want.DaclProtected != rb.DaclProtected)
+                        why.Add($"保护标志：声明 {(want.DaclProtected ? "带 P" : "无 P")}、" +
+                                $"回读 {(rb.DaclProtected ? "带 P" : "无 P")}");
+                    if (rb.DaclAceCount < want.DaclAceCount)
+                        why.Add($"ACE 条数：声明 {want.DaclAceCount}、回读 {rb.DaclAceCount}（回读更少）");
+                    if (!OcidServicingNative.SidsCompatible(want, rb, out string sidNote) && sidNote.Length > 0)
+                        why.Add(sidNote);
+
+                    verified = why.Count == 0;
+                    note = verified == true ? "" : string.Join("；", why);
                 }
             }
 

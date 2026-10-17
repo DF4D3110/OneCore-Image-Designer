@@ -726,7 +726,7 @@ namespace OneCore_Image_Designer.Services
                                 $"回读 {(rb.DaclProtected ? "带 P" : "无 P")}");
                     if (rb.DaclAceCount < want.DaclAceCount)
                         why.Add($"ACE 条数：声明 {want.DaclAceCount}、回读 {rb.DaclAceCount}（回读更少）");
-                    if (!SidsCompatible(want, rb, out string sidNote) && sidNote.Length > 0)
+                    if (!OcidServicingNative.SidsCompatible(want, rb, out string sidNote) && sidNote.Length > 0)
                         why.Add(sidNote);
 
                     verified = why.Count == 0;
@@ -735,46 +735,6 @@ namespace OneCore_Image_Designer.Services
             }
 
             return new PathAclResult { Outcome = outcome, Verified = verified, Got = got, Error = note };
-        }
-
-        /// <summary>
-        /// 回读的 DACL 与写入意图是否**同一个策略**（比 SID 集合，不比条数、不比顺序）。
-        ///
-        /// 【为什么不能比条数】Windows **应用** DACL 时会把"仅继承"（`IO`）ACE 拆成
-        /// "对本对象生效"+"仅继承"两条：实测把 8 条的
-        /// <c>D:P(A;CI;GA;;;TI)(A;;0x1301bf;;;SY)…(A;CIOI;GRGX;;;BU)…</c> 落到目录上，
-        /// 回读是 **11 条**（SID 集合一模一样、顺序变成规范序）。所以条数只要求"不少于"。
-        ///
-        /// **SID 集合**才是稳定事实：声明里有的 SID 回读必须都有；声明是**受保护** DACL 时
-        /// 还必须一个不多 —— `P` 的意义就是挡住父目录的继承 ACE 掺进来。
-        /// 两边都先经 `ConvertSidToStringSidW` 规范化，别名（`BA`）与 SID（`S-1-5-32-544`）
-        /// 因此不会造成假失败。
-        /// </summary>
-        private static bool SidsCompatible(OcidServicingNative.SddlFacts want,
-                                           OcidServicingNative.SddlFacts got,
-                                           out string note)
-        {
-            note = "";
-            if (!want.DaclSidsAvailable || !got.DaclSidsAvailable)
-            {
-                note = "（一侧的 SID 集合未能规范化，只比了条数）";
-                return true;
-            }
-
-            var w = new HashSet<string>(want.DaclSids, StringComparer.OrdinalIgnoreCase);
-            var g = new HashSet<string>(got.DaclSids, StringComparer.OrdinalIgnoreCase);
-            if (!w.IsSubsetOf(g))
-            {
-                note = "声明里的 SID 回读不见了：" + string.Join(",", w.Except(g).OrderBy(x => x, StringComparer.Ordinal));
-                return false;
-            }
-            if (want.DaclProtected && !g.SetEquals(w))
-            {
-                note = "声明是受保护 DACL，回读却多出 SID：" +
-                       string.Join(",", g.Except(w).OrderBy(x => x, StringComparer.Ordinal));
-                return false;
-            }
-            return true;
         }
     }
 }
