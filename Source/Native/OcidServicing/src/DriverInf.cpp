@@ -1,4 +1,4 @@
-﻿// OCID DriverInf - implementation. See include/ocid/DriverInf.h for the evidence.
+// OCID DriverInf - implementation. See include/ocid/DriverInf.h for the evidence.
 // Keep this file pure ASCII.
 
 #include "ocid/DriverInf.h"
@@ -7,8 +7,10 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cwctype>
 #include <fstream>
+#include <map>
 #include <string.h>
 
 namespace ocid {
@@ -555,6 +557,235 @@ std::vector<std::uint8_t> DriverDatePropertyData(std::uint64_t filetime) {
 // ---------------------------------------------------------------------------
 // Ledger plan
 
+// ---------------------------------------------------------------------------
+// [Manufacturer] -> models -> device descriptors.
+
+namespace {
+
+std::wstring ArchitectureTag(unsigned int architecture) {
+    switch (architecture) {
+        case 0: return L"NTx86";
+        case 5: return L"NTarm";
+        case 6: return L"NTia64";
+        case 9: return L"NTamd64";
+        case 12: return L"NTarm64";
+        default: return std::wstring();
+    }
+}
+
+std::vector<std::wstring> SplitOnCommas(const std::wstring& text) {
+    std::vector<std::wstring> parts;
+    size_t start = 0;
+    for (;;) {
+        const size_t comma = text.find(L',', start);
+        parts.push_back(TrimCopy(comma == std::wstring::npos ? text.substr(start)
+                                                             : text.substr(start, comma - start)));
+        if (comma == std::wstring::npos) break;
+        start = comma + 1;
+    }
+    return parts;
+}
+
+// "NTamd64" and "NTamd64.6.0" both target amd64; "NTx86" does not. "NT" and "NT.5.2" carry
+// no architecture at all and apply to every architecture (measured: wdmvsc.inf declares
+// "%StdMfg%=Standard,NT.5.2,NTamd64.5.2.0x0000001,..." and the x86 store takes Standard.NT.5.2).
+bool IsArchDecoration(const std::wstring& decoration, const std::wstring& tag) {
+    const std::wstring text = TrimCopy(decoration);
+    if (_wcsicmp(text.c_str(), L"NT") == 0) return true;
+    if (text.size() > 3 && _wcsnicmp(text.c_str(), L"NT.", 3) == 0) return true;
+    if (text.size() < tag.size()) return false;
+    if (_wcsicmp(text.substr(0, tag.size()).c_str(), tag.c_str()) != 0) return false;
+    if (text.size() == tag.size()) return true;
+    return text[tag.size()] == L'.';
+}
+
+// The version a decoration asks for: "NTx86" -> 0.0, "NTx86.6.2" -> 6.2, "NT.5.2" -> 5.2.
+// Anything after the minor number ("...5.2.0x0000001") is a flavour selector, not a version.
+void DecorationVersion(const std::wstring& decoration, unsigned int& major, unsigned int& minor) {
+    major = 0;
+    minor = 0;
+    const std::wstring text = TrimCopy(decoration);
+    const size_t dot = text.find(L'.');
+    if (dot == std::wstring::npos) return;
+    size_t index = dot + 1;
+    while (index < text.size() && iswdigit(text[index])) {
+        major = major * 10 + static_cast<unsigned int>(text[index] - L'0');
+        ++index;
+    }
+    if (index < text.size() && text[index] == L'.') {
+        ++index;
+        while (index < text.size() && iswdigit(text[index])) {
+            minor = minor * 10 + static_cast<unsigned int>(text[index] - L'0');
+            ++index;
+        }
+    }
+}
+
+bool EndsWithNoCase(const std::wstring& text, const std::wstring& suffix) {
+    if (text.size() < suffix.size()) return false;
+    return _wcsicmp(text.c_str() + text.size() - suffix.size(), suffix.c_str()) == 0;
+}
+
+} // namespace
+
+std::wstring DecorateInstallSection(const std::wstring& section) {
+    const std::wstring text = TrimCopy(section);
+    if (text.empty()) return text;
+    if (EndsWithNoCase(text, L".NT")) return text;
+    static const wchar_t* const kTags[] = {L".NTarm64", L".NTamd64", L".NTia64", L".NTarm", L".NTx86"};
+    for (const wchar_t* tag : kTags) {
+        const std::wstring suffix(tag);
+        if (EndsWithNoCase(text, suffix)) {
+            return text.substr(0, text.size() - suffix.size()) + L".NT";
+        }
+    }
+    return text + L".NT";
+}
+
+std::wstring InstallSectionService(const InfDocument& inf, const std::wstring& decoratedSection) {
+    const std::wstring addService = inf.GetValue(decoratedSection, L"AddService");
+    if (addService.empty()) return std::wstring();
+    const size_t comma = addService.find(L',');
+    return InfDocument::Unquote(TrimCopy(comma == std::wstring::npos ? addService
+                                                                    : addService.substr(0, comma)));
+}
+
+bool ReadInfDeviceModels(const InfDocument& inf,
+                         unsigned int architecture,
+                         std::vector<InfDeviceModel>& out,
+                         std::wstring& err,
+                         unsigned int osMajor,
+                         unsigned int osMinor) {
+    out.clear();
+    err.clear();
+    if (!inf.ok) {
+        err = L"INF document is not parsed";
+        return false;
+    }
+    const std::wstring tag = ArchitectureTag(architecture);
+    if (tag.empty()) {
+        err = L"unknown processor architecture for models decoration";
+        return false;
+    }
+    // Duplicate section names are not legal INF, but they occur in the box: keyboard.inf has
+    // two "[NEC_KBD.NTx86]" sections (the second one claims HID_NEC_Keyboard_Inst for three
+    // ids) and the store keeps the models of BOTH. Every matching section is walked.
+    std::vector<const InfSection*> manufacturerSections;
+    for (const InfSection& section : inf.sections) {
+        if (IEquals(section.name, L"Manufacturer")) manufacturerSections.push_back(&section);
+    }
+    if (manufacturerSections.empty()) return true;   // an INF that claims no device at all
+
+    for (const InfSection* manufacturer : manufacturerSections) {
+        for (const InfEntry& entry : manufacturer->entries) {
+        if (!entry.hasValue) continue;
+        const std::vector<std::wstring> decorations = SplitOnCommas(entry.value);
+        if (decorations.empty() || decorations[0].empty()) continue;
+        const std::wstring base = decorations[0];
+
+        std::wstring chosen;
+        unsigned int chosenMajor = 0;
+        unsigned int chosenMinor = 0;
+        bool haveChosen = false;
+        for (size_t i = 1; i < decorations.size(); ++i) {
+            if (!IsArchDecoration(decorations[i], tag)) continue;
+            unsigned int major = 0;
+            unsigned int minor = 0;
+            DecorationVersion(decorations[i], major, minor);
+            // A decoration newer than the running OS is not used at all: the store is
+            // built by the OS it belongs to, so "NTx86.6.2" beats "NTx86.5.1" on 6.2
+            // (measured: wvmbus.inf -> VMBus_Device_WIN8_Child).
+            if (major > osMajor || (major == osMajor && minor > osMinor)) continue;
+            const std::wstring candidate = base + L"." + decorations[i];
+            if (!inf.HasSection(candidate)) continue;
+            // Ties go to the LATER decoration: wfcvsc.inf lists "NTx86.6.0.0x0000001"
+            // (fcvscDriveInstall_NULL) before "...0x0000002/3" (fcvscDriveInstall) and the
+            // store holds fcvscDriveInstall (measured on the 8061 x86 image).
+            if (!haveChosen || major > chosenMajor ||
+                (major == chosenMajor && minor >= chosenMinor)) {
+                chosen = candidate;
+                chosenMajor = major;
+                chosenMinor = minor;
+                haveChosen = true;
+            }
+        }
+        if (chosen.empty() && inf.HasSection(base)) chosen = base;
+        if (chosen.empty()) continue;
+
+        std::vector<const InfSection*> modelSections;
+        for (const InfSection& section : inf.sections) {
+            if (IEquals(section.name, chosen)) modelSections.push_back(&section);
+        }
+        for (const InfSection* models : modelSections) {
+        for (const InfEntry& model : models->entries) {
+            if (!model.hasValue) continue;
+            const std::vector<std::wstring> fields = SplitOnCommas(model.value);
+            if (fields.empty() || fields[0].empty()) continue;
+            const std::wstring plain = TrimCopy(fields[0]);
+            std::wstring install;
+            if (inf.HasSection(plain)) {
+                install = plain;
+            } else {
+                const std::wstring decorated = DecorateInstallSection(plain);
+                if (inf.HasSection(decorated)) {
+                    install = decorated;
+                } else if (!plain.empty() && inf.HasSection(plain + L"." + tag)) {
+                    install = plain + L"." + tag;
+                } else {
+                    // Neither name exists (machine.inf claims "AGPALi_Install" without a
+                    // section); the database still stores the models line's own spelling.
+                    install = plain;
+                }
+            }
+            bool anyId = false;
+            for (size_t i = 1; i < fields.size(); ++i) {
+                if (!fields[i].empty()) { anyId = true; break; }
+            }
+            if (!anyId) {
+                // A models line without a hardware id still creates its configuration and is
+                // listed in DriverInfFiles 0004: battery.inf writes
+                // "%Battery.DeviceDesc% = Battery_Inst ; not installable - needed to deploy
+                // battc.sys" and the store holds "Battery_Inst|NO_DRV"; keyboard.inf writes
+                // "%RESTORE_STANDARD_101.DeviceDesc% = RESTORE_STANDARD_101_Inst,," and the
+                // store holds "RESTORE_STANDARD_101_Inst" among the configurations.
+                InfDeviceModel item;
+                item.manufacturerToken = entry.key;
+                item.descriptionToken = model.key;
+                item.installSection = install;
+                item.rank = 0;
+                out.push_back(item);
+                continue;
+            }
+            for (size_t i = 1; i < fields.size(); ++i) {
+                if (fields[i].empty()) continue;
+                InfDeviceModel item;
+                item.manufacturerToken = entry.key;
+                item.descriptionToken = model.key;
+                // The store keeps the section name the INF itself can resolve, preferring the
+                // undecorated name: machine.inf declares both "[AGPALi_Install]" and
+                // "[AGPALi_Install.NT]" and the database holds "AGPALi_Install" (measured).
+                // When only a decorated name exists it is used as-is: 1394.inf has only
+                // "[Generic.Install.NT]" -> "Generic.Install.NT"; hal/acpipagr have only
+                // "[PagrInstall]" -> "PagrInstall"; bfad.inf has only the .NTx86 form.
+                item.installSection = install;
+                item.hardwareId = fields[i];
+                item.rank = static_cast<int>(i);
+                const size_t slash = item.hardwareId.find(L'\\');
+                if (slash != std::wstring::npos && slash > 0) {
+                    item.bus = item.hardwareId.substr(0, slash);
+                }
+                out.push_back(item);
+            }
+        }
+        }
+    }
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Ledger plan
+
 DriverLedgerPlan BuildDriverLedgerPlan(const DriverLedgerRequest& request) {
     DriverLedgerPlan plan;
     if (request.inf == nullptr || !request.inf->ok) {
@@ -623,9 +854,175 @@ DriverLedgerPlan BuildDriverLedgerPlan(const DriverLedgerRequest& request) {
     storeIds.text = request.storeId;   // items joined with '\0'; no terminator
     infKey.values.push_back(storeIds);
     infKey.values.push_back(MakeStringValue(L"0003", request.storeId));
-    infKey.notes.push_back(
-        L"0004 (configuration sections) omitted: needs the models/decoration pass, which is not written yet");
+    const size_t infKeyIndex = plan.keys.size();
     plan.keys.push_back(infKey);
+
+    // ---- models pass: DeviceIds, Descriptors, Configurations --------------------
+    std::vector<InfDeviceModel> models;
+    std::wstring modelsError;
+    if (!ReadInfDeviceModels(*request.inf, request.architecture, models, modelsError,
+                             request.osMajor, request.osMinor)) {
+        plan.error = modelsError;
+        return plan;
+    }
+    if (models.empty()) {
+        plan.notes.push_back(
+            L"no device models: [Manufacturer] claims no hardware id for this architecture");
+    }
+
+    // A hardware id may carry [Strings] tokens ("PCI\%VENDOR_ID%&%DEVICE_ID_CT_FC%" in bfad.inf);
+    // the database stores the expanded text. When a token is undefined the whole claim is
+    // skipped (the section still becomes a configuration).
+    const auto expandHardwareId = [&request](const std::wstring& raw, std::wstring& out) -> bool {
+        out.clear();
+        const std::wstring text = InfDocument::Unquote(TrimCopy(raw));
+        size_t pos = 0;
+        while (pos < text.size()) {
+            const size_t open = text.find(L'%', pos);
+            if (open == std::wstring::npos) {
+                out += text.substr(pos);
+                return true;
+            }
+            out += text.substr(pos, open - pos);
+            const size_t close = text.find(L'%', open + 1);
+            if (close == std::wstring::npos) {
+                out += text.substr(open);
+                return true;
+            }
+            const std::wstring name = text.substr(open + 1, close - open - 1);
+            std::wstring resolved;
+            if (!request.inf->TryGetString(name, resolved)) return false;
+            out += resolved;
+            pos = close + 1;
+        }
+        return true;
+    };
+
+    // The store keeps the RESOLVED provider (see ReadInfVersion) but the descriptor tokens
+    // stay as tokens: quotes are stripped, then the token is lower-cased when [Strings]
+    // defines its name ("%HP%" -> "%hp%", "%Generic.Mfg%" -> "%generic.mfg%") and kept
+    // verbatim when it does not ("%LSI%" stays "%LSI%"). Measured over 4076 descriptors on
+    // the 8061 x86 image (hpoa1nd.inf defines HP="Hewlett-Packard" and stores "%hp%").
+    const auto storedToken = [&request](const std::wstring& token) -> std::wstring {
+        const std::wstring text = InfDocument::Unquote(TrimCopy(token));
+        // Only a "%token%" is a token; plain text keeps its spelling. wmbclass_wmc_union.inf
+        // names a manufacturer "CompanyName" (no '%') and the store holds "CompanyName" as
+        // written, even though [Strings] also happens to define a name called CompanyName.
+        if (text.size() < 2 || text.front() != L'%' || text.back() != L'%') return text;
+        const std::wstring probe = text.substr(1, text.size() - 2);
+        std::wstring resolved;
+        if (request.inf->TryGetString(probe, resolved)) return ToLowerCopy(text);
+        return text;
+    };
+
+    // DeviceIds keeps one line per claiming INF; the rank is the claim ordinal for that
+    // hardware id. hal.inf claims ACPIAPIC twice ("ACPIPIC_HAL, ACPIPIC, ACPIAPIC" then
+    // "ACPIAPIC_HAL, ACPIAPIC") and the database holds "hal.inf\2", while the descriptor
+    // keeps the LAST claim's fields (Configuration "ACPIAPIC_HAL").
+    std::map<std::wstring, size_t> deviceSlots;
+    std::map<std::wstring, size_t> descriptorSlots;
+    std::vector<std::wstring> sectionNames;
+    int skippedHardwareIds = 0;
+
+    for (const InfDeviceModel& model : models) {
+        if (std::find(sectionNames.begin(), sectionNames.end(), model.installSection) ==
+            sectionNames.end()) {
+            sectionNames.push_back(model.installSection);
+        }
+
+        // A models line with no hardware id contributes only its configuration (battery.inf).
+        if (model.hardwareId.empty()) continue;
+        std::wstring hardwareId;
+        if (!expandHardwareId(model.hardwareId, hardwareId) || hardwareId.empty()) {
+            ++skippedHardwareIds;
+            continue;
+        }
+        std::wstring bus;
+        std::wstring idPart = hardwareId;
+        const size_t slash = hardwareId.find(L'\\');
+        if (slash != std::wstring::npos && slash > 0) {
+            bus = hardwareId.substr(0, slash);
+            idPart = hardwareId.substr(slash + 1);
+        }
+        const std::wstring devicePath =
+            bus.empty() ? (L"DeviceIds\\" + idPart) : (L"DeviceIds\\" + bus + L"\\" + idPart);
+        const std::wstring owner =
+            request.infFileName + L"\\" + std::to_wstring(model.rank < 1 ? 1 : model.rank);
+
+        // The rank is the id's position in the models line ("HIDBTH_Inst,,<id>" stores rank 2,
+        // "ACPIPIC_HAL, ACPIPIC, ACPIAPIC" stores rank 2 for ACPIAPIC) and the first claim
+        // wins; the descriptor below is the opposite - the last claim overwrites it.
+        if (deviceSlots.find(devicePath) == deviceSlots.end()) {
+            LedgerKey deviceKey;
+            deviceKey.relativePath = devicePath;
+            LedgerValue owners;
+            owners.name = L"0003";
+            owners.type = LedgerValueType::MultiString;
+            owners.text = owner;
+            deviceKey.values.push_back(owners);
+            deviceSlots[devicePath] = plan.keys.size();
+            plan.keys.push_back(deviceKey);
+        }
+
+        const std::wstring descriptorPath = L"DriverPackages\\" + request.storeId + L"\\Descriptors\\" +
+                                            (bus.empty() ? idPart : (bus + L"\\" + idPart));
+        auto descriptorIt = descriptorSlots.find(descriptorPath);
+        if (descriptorIt == descriptorSlots.end()) {
+            LedgerKey descriptorKey;
+            descriptorKey.relativePath = descriptorPath;
+            descriptorKey.values.push_back(MakeStringValue(L"Configuration", model.installSection));
+            descriptorKey.values.push_back(MakeStringValue(L"Manufacturer", storedToken(model.manufacturerToken)));
+            descriptorKey.values.push_back(MakeStringValue(L"Description", storedToken(model.descriptionToken)));
+            descriptorSlots[descriptorPath] = plan.keys.size();
+            plan.keys.push_back(descriptorKey);
+        } else {
+            LedgerKey& existing = plan.keys[descriptorIt->second];
+            existing.values[0].text = model.installSection;
+            existing.values[1].text = storedToken(model.manufacturerToken);
+            existing.values[2].text = storedToken(model.descriptionToken);
+        }
+    }
+    if (skippedHardwareIds != 0) {
+        plan.notes.push_back(std::to_wstring(skippedHardwareIds) +
+                             L" hardware id(s) skipped: a [Strings] token did not resolve");
+    }
+
+    for (const std::wstring& section : sectionNames) {
+        LedgerKey configurationKey;
+        configurationKey.relativePath = L"DriverPackages\\" + request.storeId + L"\\Configurations\\" + section;
+        const std::wstring service = InstallSectionService(*request.inf, section);
+        if (service.empty()) {
+            configurationKey.notes.push_back(L"Service omitted: the install section has no AddService");
+        } else {
+            configurationKey.values.push_back(MakeStringValue(L"Service", service));
+        }
+        configurationKey.values.push_back(MakeDwordValue(L"ConfigFlags", 0u));
+        plan.keys.push_back(configurationKey);
+    }
+
+    if (sectionNames.empty()) {
+        plan.keys[infKeyIndex].notes.push_back(L"0004 (configuration sections) omitted: no models apply here");
+    } else {
+        LedgerValue sections;
+        sections.name = L"0004";
+        sections.type = LedgerValueType::MultiString;
+        for (size_t i = 0; i < sectionNames.size(); ++i) {
+            if (i != 0) sections.text.push_back(L'\0');
+            sections.text += sectionNames[i];
+        }
+        plan.keys[infKeyIndex].values.push_back(sections);
+    }
+
+    // The database root carries the store architecture and the oemN.inf allocation bitmap.
+    // The caller passes the bitmap in because allocation is a sequence, not a per-package
+    // fact; the value is reproduced byte for byte (Q: holds a single 0x80 for oem0.inf).
+    if (request.rootOemBitmap != nullptr) {
+        LedgerKey root;
+        root.relativePath = std::wstring();
+        root.values.push_back(MakeDwordValue(L"0003", request.architecture));
+        root.values.push_back(MakeBinaryValue(L"0004", *request.rootOemBitmap));
+        plan.keys.insert(plan.keys.begin(), root);
+    }
 
     plan.ok = true;
     return plan;

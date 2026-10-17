@@ -1,4 +1,4 @@
-﻿// OCID - DMI 台账（INF 解析 + DriverDatabase 记录）自检
+// OCID - DMI 台账（INF 解析 + DriverDatabase 记录）自检
 //
 // 这个文件钉的是"算错就会静默写坏驱动库"的三件事：
 //   1. INF 的文本形态：UTF-16LE BOM、`;` 注释、`[节]`、同键重复、行尾 `\` 续行
@@ -321,13 +321,74 @@ static void ImageVersionGroundTruth()
     request.signerScore = 0x0D000003u;
     const DriverLedgerPlan plan = BuildDriverLedgerPlan(request);
     Check(plan.ok, "台账计划生成成功");
-    CheckInt(static_cast<long long>(plan.keys.size()), 2, "两个键：包记录 + INFFile 记录");
-    if (plan.keys.size() == 2)
+    // 2 fixed keys (package, DriverInfFiles) + 16 DeviceIds + 16 Descriptors + 1 Configuration
+    // section for 1394.inf's [GenericModels.NTx86] block (counted on the real 8061 INF).
+    CheckInt(static_cast<long long>(plan.keys.size()), 35, "35 个键：2 固定 + 16 DeviceIds + 16 Descriptors + 1 Configuration");
+    const auto findKey = [&plan](const std::wstring& path) -> const LedgerKey* {
+        for (const LedgerKey& key : plan.keys)
+        {
+            if (key.relativePath == path) return &key;
+        }
+        return nullptr;
+    };
+    if (!plan.keys.empty())
     {
         CheckStr(plan.keys[0].relativePath, L"DriverPackages\\1394.inf_x86_85b894cb1410e75c",
                  "包记录键名");
         CheckStr(plan.keys[1].relativePath, L"DriverInfFiles\\1394.inf",
                  "INFFile 记录用**原始** INF 名，不是 oemN.inf");
+    }
+
+    // DeviceIds：真机上 0003 = "<INF 名>\1"
+    const LedgerKey* device = findKey(L"DeviceIds\\PCI\\CC_0C0010");
+    Check(device != nullptr, "DeviceIds\\PCI\\CC_0C0010 存在（1394 的真机硬件 ID）");
+    if (device != nullptr && !device->values.empty())
+    {
+        CheckStr(device->values[0].name, L"0003", "DeviceIds 值名 0003");
+        Check(device->values[0].type == LedgerValueType::MultiString, "DeviceIds 0003 是 REG_MULTI_SZ");
+        CheckStr(device->values[0].text, L"1394.inf\\1", "DeviceIds 0003 = 1394.inf\\1（实测 rank 1）");
+    }
+
+    // Descriptors：Configuration 用 .NT 装饰后的节名，两个 token 小写
+    const LedgerKey* descriptor = findKey(L"DriverPackages\\1394.inf_x86_85b894cb1410e75c\\Descriptors\\PCI\\VEN_100B&CC_0C0010");
+    Check(descriptor != nullptr, "Descriptors\\PCI\\VEN_100B&CC_0C0010 存在");
+    if (descriptor != nullptr && descriptor->values.size() == 3)
+    {
+        CheckStr(descriptor->values[0].name, L"Configuration", "Descriptors 有 Configuration");
+        CheckStr(descriptor->values[0].text, L"Generic.Install.NT", "Configuration = Generic.Install.NT（实测）");
+        CheckStr(descriptor->values[1].name, L"Manufacturer", "Descriptors 有 Manufacturer");
+        CheckStr(descriptor->values[1].text, L"%natsemi.mfg%", "Manufacturer 是 mfg token 的小写形式（实测）");
+        CheckStr(descriptor->values[2].name, L"Description", "Descriptors 有 Description");
+        CheckStr(descriptor->values[2].text, L"%pci\\ven_100b&cc_0c0010.devicedesc%",
+                 "Description 是 desc token 的小写形式（实测）");
+    }
+
+    // Configurations：Service 来自 AddService
+    const LedgerKey* configuration =
+        findKey(L"DriverPackages\\1394.inf_x86_85b894cb1410e75c\\Configurations\\Generic.Install.NT");
+    Check(configuration != nullptr, "Configurations\\Generic.Install.NT 存在");
+    if (configuration != nullptr && configuration->values.size() == 2)
+    {
+        CheckStr(configuration->values[0].name, L"Service", "Configurations 有 Service");
+        CheckStr(configuration->values[0].text, L"1394ohci", "Service = 1394ohci（AddService 的第一个字段）");
+        CheckStr(configuration->values[1].name, L"ConfigFlags", "Configurations 有 ConfigFlags");
+        CheckInt(configuration->values[1].dword, 0, "ConfigFlags = 0（实测）");
+    }
+
+    // DriverInfFiles 0004 = 配置节名列表
+    const LedgerKey* infKey = findKey(L"DriverInfFiles\\1394.inf");
+    Check(infKey != nullptr, "DriverInfFiles\\1394.inf 存在");
+    if (infKey != nullptr)
+    {
+        bool has0004 = false;
+        for (const LedgerValue& value : infKey->values)
+        {
+            if (value.name != L"0004") continue;
+            has0004 = true;
+            Check(value.type == LedgerValueType::MultiString, "0004 是 REG_MULTI_SZ");
+            CheckStr(value.text, L"Generic.Install.NT", "0004 = Generic.Install.NT（与真机 hive 一致）");
+        }
+        Check(has0004, "0004 已产出（不再留 note）");
     }
 }
 
@@ -441,16 +502,171 @@ static void LedgerPlan()
     Check(!BuildDriverLedgerPlan(bad).ok, "没有 INF ⇒ 失败");
 }
 
+static const LedgerKey* FindKey(const DriverLedgerPlan& plan, const std::wstring& path)
+{
+    for (const LedgerKey& key : plan.keys)
+    {
+        if (key.relativePath == path) return &key;
+    }
+    return nullptr;
+}
+
+static std::wstring ValueOf(const LedgerKey* key, const std::wstring& name)
+{
+    if (key == nullptr) return std::wstring();
+    for (const LedgerValue& value : key->values)
+    {
+        if (value.name == name) return value.text;
+    }
+    return std::wstring();
+}
+
+static void SectionAndRankRules()
+{
+    printf("\n[7] 节选择、rank、token 与字段装饰规则\n");
+
+    // 实测依据（8061 x86 真机台账，575 个商店目录逐值比对）：
+    // - [Manufacturer] 里第一个可用的装饰名决定 models 节；"NT"/"NT.5.2" 不带架构，任何架构都接受
+    //   （wdmvsc.inf: "%StdMfg%=Standard,NT.5.2,NTamd64..." ⇒ x86 用 Standard.NT.5.2）；
+    // - rank 是硬件 ID 在 models 行里的字段序号（"Inst,,ID" ⇒ 2），第一次声明决定 rank；
+    // - 描述符取最后一次声明（hal.inf 的 ACPIAPIC 第二次声明才带 ACPIAPIC_HAL）；
+    // - 硬件 ID 里的 [Strings] token 会被展开（bfad.inf: PCI\%VENDOR_ID%... ⇒ PCI\VEN_1657...），
+    //   展开不了的那条记录整条不落库；
+    // - models 行的安装节如果根本不存在，数据库仍按 INF 自己的写法记下来（machine.inf 的
+    //   AGPALi_Install 没有对应节，库里就是 "AGPALi_Install"）。
+    InfDocument inf;
+    std::wstring err;
+    Check(ParseInfText(L"[Version]\r\n"
+                       L"Provider=%MSFT%\r\n"
+                       L"[Manufacturer]\r\n"
+                       L"%Mfg%=Standard,NTx86.5.1,NTx86.6.2\r\n"
+                       L"%Mfg2%=Neutral,NT.5.2\r\n"
+                       L"[Standard]\r\n"
+                       L"%Desc%=Old_Install,PCI\\VEN_1000\r\n"
+                       L"[Standard.NTx86.5.1]\r\n"
+                       L"%Desc%=V51_Install,PCI\\VEN_1000,PCI\\VEN_1001\r\n"
+                       L"[Standard.NTx86.6.2]\r\n"
+                       L"%Desc2%=V62_Install,PCI\\VEN_1000\r\n"
+                       L"[Neutral.NT.5.2]\r\n"
+                       L"%Desc3%=Neu_Install,PCI\\VEN_2000\r\n"
+                       L"[V51_Install.NT]\r\n"
+                       L"AddService=Svc,0x00000002,Service_Inst\r\n"
+                       L"[V62_Install.NT]\r\n"
+                       L"[Neu_Install.NT]\r\n"
+                       L"[Old_Install]\r\n"
+                       L"[Strings]\r\n"
+                       L"MSFT=\"Microsoft\"\r\n"
+                       L"Mfg=\"Test\"\r\n"
+                       L"Mfg2=\"Test two\"\r\n"
+                       L"Desc=\"Device\"\r\n"
+                       L"Desc2=\"Device two\"\r\n"
+                       L"Desc3=\"Device three\"\r\n",
+                       inf, err),
+          "座次规则 INF 解析成功");
+
+    DriverLedgerRequest request;
+    request.inf = &inf;
+    request.storeId = L"rules.inf_x86_0123456789abcdef";
+    request.infFileName = L"rules.inf";
+    request.architecture = 0;
+    const DriverLedgerPlan plan = BuildDriverLedgerPlan(request);
+    Check(plan.ok, "座次规则计划生成成功");
+    if (plan.ok)
+    {
+        // 目标 OS 6.2：最高的可用装饰 NTx86.6.2 胜出（真机 wvmbus.inf 就是这样落到 WIN8 组）。
+        const LedgerKey* v62 = FindKey(plan, L"DriverPackages\\" + request.storeId + L"\\Descriptors\\PCI\\VEN_1000");
+        CheckStr(ValueOf(v62, L"Configuration"), L"V62_Install.NT", "最高可用装饰决定 models 节");
+        const LedgerKey* v1000 = FindKey(plan, L"DeviceIds\\PCI\\VEN_1000");
+        CheckStr(ValueOf(v1000, L"0003"), L"rules.inf\\1", "VEN_1000 的 rank = 1（第一行第一个硬件 ID）");
+
+        // 架构中立的 NT.5.2 对 x86 也算可用。
+        const LedgerKey* neutral = FindKey(plan, L"DriverPackages\\" + request.storeId + L"\\Descriptors\\PCI\\VEN_2000");
+        CheckStr(ValueOf(neutral, L"Configuration"), L"Neu_Install.NT", "NT.5.2 对 x86 可用");
+
+        // 定义过的 token 存小写，且只出现在被引用的描述符里。
+        CheckStr(ValueOf(v62, L"Manufacturer"), L"%mfg%", "定义过的 token 存小写");
+        CheckStr(ValueOf(v62, L"Description"), L"%desc2%", "描述 token 也存小写");
+        CheckStr(ValueOf(neutral, L"Description"), L"%desc3%", "中立节同样存 token");
+    }
+
+    // 同一份 INF 在 5.1 上落到 5.1 的 models 节：装饰是按运行 OS 版本挑的。
+    DriverLedgerRequest request51 = request;
+    request51.osMajor = 5;
+    request51.osMinor = 1;
+    request51.storeId = L"rules51.inf_x86_0123456789abcdef";
+    const DriverLedgerPlan plan51 = BuildDriverLedgerPlan(request51);
+    Check(plan51.ok, "5.1 计划生成成功");
+    if (plan51.ok)
+    {
+        const LedgerKey* v51 = FindKey(plan51, L"DriverPackages\\" + request51.storeId + L"\\Descriptors\\PCI\\VEN_1000");
+        CheckStr(ValueOf(v51, L"Configuration"), L"V51_Install.NT", "5.1 上落 NTx86.5.1 组");
+        const LedgerKey* v1001 = FindKey(plan51, L"DeviceIds\\PCI\\VEN_1001");
+        CheckStr(ValueOf(v1001, L"0003"), L"rules.inf\\2", "VEN_1001 的 rank = 2（同一行第二个硬件 ID）");
+        const LedgerKey* service = FindKey(plan51, L"DriverPackages\\" + request51.storeId + L"\\Configurations\\V51_Install.NT");
+        CheckStr(ValueOf(service, L"Service"), L"Svc", "Service 来自 AddService");
+        CheckInt(service == nullptr ? -1 : 0, 0, "配置节存在");
+    }
+
+    // 引号 / 空字段 rank / 未解析 token / 不存在的安装节
+    InfDocument inf2;
+    Check(ParseInfText(L"[Version]\r\n"
+                       L"Provider=X\r\n"
+                       L"[Manufacturer]\r\n"
+                       L"\"%HP%\"=HpModels,NTx86\r\n"
+                       L"[HpModels.NTx86]\r\n"
+                       L"%DevDesc%=Hp_Install,,\"USB\\VID_1%VID%\"\r\n"
+                       L"%DevDesc%=Hp_Install,USB\\VID_2,USB\\VID_3\r\n"
+                       L"%DevDesc%=Hp_Install,PCI\\%UNDEFINED_TOKEN%\r\n"
+                       L"%DevDesc%=Missing_Section,ACPI\\FOO\r\n"
+                       L"[Hp_Install]\r\n"
+                       L"[Strings]\r\n"
+                       L"HP=\"Hewlett-Packard\"\r\n"
+                       L"VID=\"0BDB\"\r\n"
+                       L"DevDesc=\"Speaker\"\r\n",
+                       inf2, err),
+          "引号规则 INF 解析成功");
+
+    DriverLedgerRequest request2;
+    request2.inf = &inf2;
+    request2.storeId = L"hp.inf_x86_0123456789abcdef";
+    request2.infFileName = L"hp.inf";
+    request2.architecture = 0;
+    const DriverLedgerPlan plan2 = BuildDriverLedgerPlan(request2);
+    Check(plan2.ok, "引号规则计划生成成功");
+    if (plan2.ok)
+    {
+        const LedgerKey* hp = FindKey(plan2, L"DriverPackages\\" + request2.storeId + L"\\Descriptors\\USB\\VID_10BDB");
+        CheckStr(ValueOf(hp, L"Manufacturer"), L"%hp%", "带引号的 token 去引号后存小写");
+        const LedgerKey* emptyRank = FindKey(plan2, L"DeviceIds\\USB\\VID_10BDB");
+        CheckStr(ValueOf(emptyRank, L"0003"), L"hp.inf\\2", "空字段也占位（rank = 2）");
+        const LedgerKey* vid2 = FindKey(plan2, L"DeviceIds\\USB\\VID_2");
+        CheckStr(ValueOf(vid2, L"0003"), L"hp.inf\\1", "同行的第一个硬件 ID");
+        const LedgerKey* vid3 = FindKey(plan2, L"DeviceIds\\USB\\VID_3");
+        CheckStr(ValueOf(vid3, L"0003"), L"hp.inf\\2", "同行的第二个硬件 ID");
+        Check(FindKey(plan2, L"DeviceIds\\PCI\\%UNDEFINED_TOKEN%") == nullptr, "未解析 token 的硬件 ID 不落库");
+        bool skippedNote = false;
+        for (const std::wstring& note : plan2.notes)
+        {
+            if (note.find(L"skipped") != std::wstring::npos) skippedNote = true;
+        }
+        Check(skippedNote, "跳过硬件 ID 时留下说明");
+        const LedgerKey* missing = FindKey(plan2, L"DriverPackages\\" + request2.storeId + L"\\Configurations\\Missing_Section");
+        Check(missing != nullptr, "安装节不存在时仍记录 models 行的写法");
+    }
+}
+
 int main()
 {
     printf("OCID DMI 台账自检\n");
 
     ParseSynthetic();
+
     DecodeEncodings();
     DriverVerEncoding();
     GuidEncoding();
     ImageVersionGroundTruth();
     LedgerPlan();
+    SectionAndRankRules();
 
     printf("\n== 结果 ==\n  通过 %d / 失败 %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

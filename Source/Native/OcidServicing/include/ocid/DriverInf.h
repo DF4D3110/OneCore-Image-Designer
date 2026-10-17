@@ -1,4 +1,4 @@
-﻿// OCID DriverInf - read a driver INF and turn it into DriverDatabase records.
+// OCID DriverInf - read a driver INF and turn it into DriverDatabase records.
 //
 // This is the second half of DMI import. DriverPackage.h decides *where* a package
 // goes (StoreId) and *which files* it carries; this file decides *what the driver
@@ -138,6 +138,59 @@ std::vector<std::uint8_t> DriverVersionPropertyData(unsigned int major,
 std::vector<std::uint8_t> DriverDatePropertyData(std::uint64_t filetime);
 
 // ---------------------------------------------------------------------------
+// [Manufacturer] -> models -> device descriptors.
+//
+// One models line is
+//
+//     [Manufacturer]              %generic.mfg%=GenericModels, NTx86
+//     [GenericModels.NTx86]       %PCI\CC_0C0010.DeviceDesc%=Generic.Install, PCI\CC_0C0010
+//
+// and the store records it three times (measured on 1394.inf_x86_85b894cb1410e75c):
+//
+//     DeviceIds\PCI\CC_0C0010                         0003 = "1394.inf\1"
+//     ...\DriverPackages\<StoreId>\Descriptors\PCI\CC_0C0010
+//           Configuration  "Generic.Install.NT"       (install section, .NT decorated)
+//           Manufacturer   "%generic.mfg%"            (token, lower-cased, % kept)
+//           Description    "%pci\cc_0c0010.devicedesc%"
+//     ...\DriverPackages\<StoreId>\Configurations\Generic.Install.NT
+//           Service "1394ohci"  ConfigFlags 0
+//
+// Note the case split: the hardware-id key keeps the INF's own casing, the tokens are
+// stored lower-cased. Root-enumerated ids have no bus ("*ACPI0004" is the key itself).
+struct InfDeviceModel {
+    std::wstring manufacturerToken;   // "%generic.mfg%"
+    std::wstring descriptionToken;    // "%PCI\CC_0C0010.DeviceDesc%"
+    std::wstring installSection;      // ".NT" decorated: "Generic.Install.NT"
+    std::wstring hardwareId;          // as written: "PCI\VEN_100B&CC_0C0010"
+    std::wstring bus;                 // "PCI"; empty for "*ACPI0004"
+    int rank = 1;                     // position of the id in the models line (0-based field index)
+};
+
+// Fills `out` with every models line that applies to `architecture` and to the running
+// OS version (NT<arch> decorations, the highest one that does not exceed osMajor.osMinor
+// wins; undecorated sections are the fall-back). Measured on the 8061 x86 store:
+//   wvmbus.inf  [Manufacturer] %StdMfg% = Standard,NTx86.5.1,NTx86.6.2
+//               -> Standard.NTx86.6.2 (store: VMBus_Device_WIN8_Child)
+//   wvmic.inf   %StdMfg% = Standard,NT.5.2,NTamd64,NT.6,NTamd64.6
+//               -> Standard.NT.6       (store: VmIcHeartbeat_NT6_x86)
+//   wdmvsc.inf  %StdMfg% = Standard,NT.5.2,NTamd64.5.2.0x0000001,...
+//               -> Standard.NT.5.2     (no NT6 decoration at all)
+// Returns false only when the INF cannot be read at all - an INF with no [Manufacturer]
+// yields an empty list.
+bool ReadInfDeviceModels(const InfDocument& inf,
+                         unsigned int architecture,
+                         std::vector<InfDeviceModel>& out,
+                         std::wstring& err,
+                         unsigned int osMajor = 6,
+                         unsigned int osMinor = 2);
+
+// "Generic.Install" -> "Generic.Install.NT"; already decorated names are kept.
+std::wstring DecorateInstallSection(const std::wstring& section);
+
+// The service name of an install section (AddService=<name>,...), empty when absent.
+std::wstring InstallSectionService(const InfDocument& inf, const std::wstring& decoratedSection);
+
+// ---------------------------------------------------------------------------
 // The ledger plan: DriverDatabase keys and values for one imported package.
 //
 // The plan is pure data - it says what to write, never writes it. The host applies it
@@ -171,9 +224,16 @@ struct DriverLedgerRequest {
     std::wstring storeId;               // FileRepository directory name (lower case)
     std::wstring infFileName;           // original INF title, e.g. L"1394.inf"
     unsigned int architecture = 0;      // 0 x86 / 5 arm / 6 ia64 / 9 amd64
+    unsigned int osMajor = 6;           // running OS version, drives the models decoration
+    unsigned int osMinor = 2;
     unsigned int importFlags = 0;       // see DriverPackage.h kImportFlag*
     std::wstring signerName;            // empty = unknown (the value is then omitted)
     unsigned int signerScore = 0;       // 0 = unsigned
+
+    // Optional: when set, the plan starts with the database root's own values
+    // (0003 architecture and 0004, the oemN.inf allocation bitmap). The caller owns the
+    // allocation - this module never mutates it.
+    const std::vector<std::uint8_t>* rootOemBitmap = nullptr;
 };
 
 DriverLedgerPlan BuildDriverLedgerPlan(const DriverLedgerRequest& request);
