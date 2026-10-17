@@ -361,4 +361,54 @@ bool IsDriverUpdateComponent(const std::wstring& type, const std::wstring& versi
     return AsciiLower(type) == L"driverupdate" && AsciiLower(versionScope) == L"nonsxs";
 }
 
+DriverImportPlan BuildDriverImportPlan(const std::vector<DriverImportFileSpec>& files,
+                                       const std::wstring& infPath,
+                                       const std::vector<std::uint8_t>& infBytes,
+                                       unsigned int architecture)
+{
+    DriverImportPlan plan;
+
+    std::vector<std::wstring> infs;
+    for (const auto& f : files)
+    {
+        const std::wstring name = f.name.empty() ? f.sourceName : f.name;
+        switch (ClassifyDriverImportFile(f.importPath))
+        {
+        case DriverImportFileKind::Inf:
+            infs.push_back(name);
+            plan.files.push_back(f);
+            break;
+        case DriverImportFileKind::DriverBinary:
+            plan.files.push_back(f);
+            break;
+        default:
+            ++plan.notImported;
+            plan.notes.push_back(L"没有落在构建树里，不进驱动库：" + name
+                                 + L"（importPath=" + f.importPath + L"）");
+            break;
+        }
+    }
+
+    // 恰好一个 INF。0 个 ⇒ 这个组件本来就不是驱动包（调用方判错）；
+    // 多个 ⇒ 结构上说不清哪个的字节决定目录名：都必须说出来，不许挑一个。
+    if (infs.size() != 1)
+    {
+        plan.error = L"驱动包必须恰好声明一个 INF（真机 231/231 都是 1 条），这里 "
+                     + std::to_wstring(infs.size()) + L" 条";
+        for (const auto& s : infs) plan.error += L" [" + s + L"]";
+        return plan;
+    }
+    plan.infName = infs.front();
+
+    std::wstring storeId, err;
+    if (!BuildStoreId(infPath, infBytes, architecture, storeId, err))
+    {
+        plan.error = L"算不出 StoreId：" + err;
+        return plan;
+    }
+    plan.storeId = storeId;
+    plan.ok      = true;
+    return plan;
+}
+
 } // namespace ocid

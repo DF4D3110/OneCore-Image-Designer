@@ -228,4 +228,40 @@ bool IsInfStagingSegment(const std::wstring& segment);
 // case-insensitively; a missing attribute means "no".
 bool IsDriverUpdateComponent(const std::wstring& type, const std::wstring& versionScope);
 
+// ---------------------------------------------------------------------------
+// The import plan: which files of one driver component go into the store.
+//
+// A driver component declares exactly one INF (measured 231/231 in the real 8061
+// package store), and that INF decides the store directory name. Everything else the
+// component stages in the build tree is payload copied along with it. Files that are
+// not staged in the build tree are *not* part of the import, and they are reported
+// rather than dropped silently - a driver package that suddenly loses its payload would
+// otherwise import as an empty store directory and only fail at device install time.
+// ---------------------------------------------------------------------------
+struct DriverImportFileSpec
+{
+    std::wstring name;         // <file name>（目标文件名；空则用 sourceName）
+    std::wstring sourceName;   // <file sourceName>
+    std::wstring importPath;   // <file importPath>
+};
+
+struct DriverImportPlan
+{
+    bool         ok = false;   // false 时只看 error，不要用其余字段
+    std::wstring error;
+
+    std::wstring storeId;      // FileRepository 的子目录名（小写）
+    std::wstring infName;      // 被导入的那个 INF
+    std::vector<DriverImportFileSpec> files;   // Inf + DriverBinary，保持清单顺序
+    std::vector<std::wstring>          notes;  // 未导入的文件等（解释，不静默丢）
+    int          notImported = 0;
+};
+
+// infPath/infBytes: 那个 INF 的路径（只用于报错）与字节（StoreId 由字节算）。
+// architecture: 装配目标架构（0/5/6/9），必须能算成架构串，否则失败。
+DriverImportPlan BuildDriverImportPlan(const std::vector<DriverImportFileSpec>& files,
+                                       const std::wstring& infPath,
+                                       const std::vector<std::uint8_t>& infBytes,
+                                       unsigned int architecture);
+
 } // namespace ocid

@@ -295,6 +295,51 @@ static void ImportFileSet()
     Check(!IsDriverUpdateComponent(L"win32", L"nonSxS"), "type=win32 ⇒ 不是驱动包");
 }
 
+// 导入计划：真机 arm_acpi.inf 的两个 <file> + 一条不在构建树里的干扰项
+static void ImportPlan()
+{
+    const std::vector<std::uint8_t> inf = {'a', 'c', 'p', 'i'};
+
+    std::vector<DriverImportFileSpec> files;
+    files.push_back({L"acpi.inf", L"acpi.inf", L"$(build.nttree)\\driver_infs\\"});
+    files.push_back({L"acpi.sys", L"acpi.sys", L"$(build.nttree)\\"});
+    files.push_back({L"readme.txt", L"readme.txt", L"$(runtime.system32)\\"});
+
+    const DriverImportPlan p = BuildDriverImportPlan(files, L"acpi.inf", inf, 5);
+    Check(p.ok, "两个构建树文件 + 一个干扰项 ⇒ 计划成立");
+    CheckInt((long long)p.files.size(), 2, "进库的只有 INF 与载荷");
+    CheckInt((long long)p.notImported, 1, "干扰项被计数");
+    Check(p.notes.size() == 1, "干扰项有解释（不静默丢）");
+    Check(p.infName == L"acpi.inf", "认出那个 INF");
+
+    // StoreId 必须与直接算的一致（同一份字节）
+    std::wstring direct, derr;
+    Check(BuildStoreId(L"acpi.inf", inf, 5, direct, derr), "直接算 StoreId 成功");
+    Check(p.storeId == direct, "计划里的 StoreId == 直接算的");
+    Check(p.storeId.find(L"acpi.inf_arm_") == 0, "目录名是 <标题>_<架构>_<16 hex> 的小写形式");
+    Check(p.storeId == [&]{ std::wstring s; for (wchar_t c : p.storeId) s.push_back(c >= L'A' && c <= L'Z' ? (wchar_t)(c+32) : c); return s; }(),
+          "目录名全小写");
+
+    // 0 个 INF / 2 个 INF：都必须失败并说清
+    std::vector<DriverImportFileSpec> none;
+    none.push_back({L"acpi.sys", L"acpi.sys", L"$(build.nttree)\\"});
+    const DriverImportPlan p0 = BuildDriverImportPlan(none, L"acpi.inf", inf, 5);
+    Check(!p0.ok && p0.error.find(L"0 条") != std::wstring::npos, "没有 INF ⇒ 失败并给出条数");
+    Check(p0.files.empty() || !p0.ok, "失败时不给出可用的库目录");
+
+    std::vector<DriverImportFileSpec> two = files;
+    two.push_back({L"acpi2.inf", L"acpi2.inf", L"$(build.nttree)\\printer_infs\\"});
+    const DriverImportPlan p2 = BuildDriverImportPlan(two, L"acpi.inf", inf, 5);
+    Check(!p2.ok, "两个 INF ⇒ 失败（不挑一个）");
+    Check(p2.error.find(L"acpi.inf") != std::wstring::npos && p2.error.find(L"acpi2.inf") != std::wstring::npos,
+          "指出是哪两个 INF");
+
+    // 架构算不出来 ⇒ 不能默默按某个架构算目录名
+    const DriverImportPlan pA = BuildDriverImportPlan(files, L"acpi.inf", inf, 7);
+    Check(!pA.ok, "架构 7 不认识 ⇒ 失败");
+    Check(!pA.error.empty(), "架构不认识时给出原因");
+}
+
 int main()
 {
     printf("OCID DMI 自检\n");
@@ -305,7 +350,9 @@ int main()
     DatabaseValueNames();
     OemInfNames();
     ImportFileSet();
+    ImportPlan();
 
     printf("\n== 结果 ==\n  通过 %d / 失败 %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
+
