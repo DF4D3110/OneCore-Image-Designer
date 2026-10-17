@@ -54,11 +54,56 @@ std::string LowerAscii(std::string text) {
     return text;
 }
 
+std::string Hex16(std::uint64_t value) {
+    static const char kDigits[] = "0123456789abcdef";
+    std::string out(16, '0');
+    for (int i = 15; i >= 0; --i) {
+        out[static_cast<std::size_t>(i)] = kDigits[value & 0xFull];
+        value >>= 4;
+    }
+    return out;
+}
+
 }  // namespace
 
+std::uint64_t CbsHashEncodedText(const std::string& text) {
+    // wcp.dll!RtlHashEncodedLBlob：4 个 32 位累加器轮转接收字符，每步
+    // acc = acc * 65599 + ch（ASCII A-Z 先转小写）；最后按四个常量合成为 64 位。
+    std::uint32_t lanes[4] = {0, 0, 0, 0};
+    std::size_t lane = 0;
+    for (char raw : text) {
+        unsigned ch = static_cast<unsigned char>(raw);
+        if (ch >= 'A' && ch <= 'Z') {
+            ch = ch - 'A' + 'a';
+        }
+        lanes[lane] = lanes[lane] * 65599u + ch;
+        lane = (lane + 1) & 3u;
+    }
+    // 常量与真机一致：L0*0x1E5FFFFFD27 + L1*0xFFFFFFDC00000051 + L2*0x1FFFFFFF7 + L3。
+    std::uint64_t value = static_cast<std::uint64_t>(lanes[0]) * 0x1E5FFFFFD27ull;
+    value += static_cast<std::uint64_t>(lanes[1]) * 0xFFFFFFDC00000051ull;
+    value += static_cast<std::uint64_t>(lanes[2]) * 0x1FFFFFFF7ull;
+    value += static_cast<std::uint64_t>(lanes[3]);
+    return value;
+}
+
+std::string CbsPayloadValueName(const std::string& prefix, const std::string& identity) {
+    std::string description = "CBS_" + LowerAscii(identity);
+    if (description.size() > 64) {
+        description.resize(64);
+    }
+    return prefix + description + "_" + Hex16(CbsHashEncodedText(identity));
+}
+
 std::string CbsFileValueName(const std::wstring& fileName) {
-    // 真机实测：值名是文件名的小写，值数据才是原始大小写。
-    return "f!" + LowerAscii(ToUtf8(fileName));
+    // 真机实测：值名是文件名的小写，值数据才是原始大小写；名字超过 25 字符时改成
+    // `前 25 字符_16 个 hex`（哈希输入是原始大小写的完整文件名）。
+    const std::string utf8 = ToUtf8(fileName);
+    const std::string lower = LowerAscii(utf8);
+    if (lower.size() <= 25) {
+        return "f!" + lower;
+    }
+    return "f!" + lower.substr(0, 25) + "_" + Hex16(CbsHashEncodedText(utf8));
 }
 
 std::string CbsMarkValueName(const std::string& deploymentName) {

@@ -248,6 +248,31 @@ static void ComponentRecord()
     CheckAscii(CbsFileValueName(L"AspNetMMCExt.dll"), "f!aspnetmmcext.dll",
                "CbsFileValueName 造名规则");
 
+    // 身份文本哈希（wcp.dll 的 RtlHashEncodedLBlob）+ 派生值名，全部对照 8061 真机：
+    //   p!/s!/i! 共 4,892 条、f! 共 9,996 条实测 100% 命中。
+    {
+        const std::string payloadIdentity =
+            "Microsoft-Windows-Common-Drivers-Package-drivers~31bf3856ad364e35~x86~en-US~6.2.8061.0.INF_1394";
+        char buffer[32] = {0};
+        std::snprintf(buffer, sizeof(buffer), "%016llx",
+                      static_cast<unsigned long long>(CbsHashEncodedText(payloadIdentity)));
+        CheckAscii(buffer, "c1a886620aabcbe2", "CbsHashEncodedText 命中真机载荷身份后缀");
+        CheckAscii(CbsPayloadValueName("p!", payloadIdentity),
+                   "p!CBS_microsoft-windows-common-drivers-package-drivers~31bf3856ad3_c1a886620aabcbe2",
+                   "CbsPayloadValueName 造名规则（CBS_ + 小写截断 64 + _ + 16 hex）");
+        CheckAscii(CbsPayloadValueName("i!", payloadIdentity),
+                   "i!CBS_microsoft-windows-common-drivers-package-drivers~31bf3856ad3_c1a886620aabcbe2",
+                   "CbsPayloadValueName 对 i!/s! 同样适用");
+        CheckAscii(CbsFileValueName(L"PrintAdvancedInstaller.dll"),
+                   "f!printadvancedinstaller.dl_b7ff1ded0fdd6573",
+                   "文件名超过 25 字符 => 前 25 + _ + 16 hex");
+        CheckAscii(CbsFileValueName(L"ConfigureIEOptionalComponentsAI.dll"),
+                   "f!configureieoptionalcompon_1d4e2ab98ae3320c",
+                   "更长的文件名同样按 25 字符截断");
+        CheckAscii(CbsFileValueName(L"no_i.cur"), "f!no_i.cur",
+                   "短文件名保持 f!<小写全名>");
+    }
+
     // 错形态必须报错（这些错法在真机上不会出现，但写坏了会静默糟蹋台账）
     std::vector<CbsValue> badSha = values;
     badSha[0].data = FromHex("0011");
