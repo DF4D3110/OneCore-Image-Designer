@@ -128,6 +128,19 @@ std::string CbsMarkValueName(const std::string& deploymentName);
 // 属性名取 canonical 拼写（大小写不影响，哈希会先小写）。
 std::uint64_t CbsPseudoKeySuffix(const CbsIdentity& identity);
 
+// 组件的键名（DerivedData\Components 下）：
+//   `<架构>_<名字>_<token>_<版本>_<culture>_<16 个 hex 的伪键>`。每段先小写、只保留
+//   `[a-z0-9._-]`（真机把空格与括号删掉）；名字超过 40 字符时保留前 19 + `..` + 后 19，
+//   culture 超过 8 字符时保留前 3 + `..` + 后 3（`sr-latn-cs` => `sr-..-cs`），
+//   culture 为 neutral 或缺省时写 `none`。真机 13,325 条键 100% 可复原。
+std::string CbsComponentKeyName(const CbsIdentity& identity);
+
+// 部署的键名（CanonicalData\Deployments 下）：
+//   `<名字>_<token>_<版本>_<16 个 hex 的伪键>`，没有架构/culture 段；名字同样先小写、
+//   只保留 `[a-z0-9._-]`，超过 24 字符时保留前 11 + `..` + 后 11（真机 2,283 条键
+//   100% 可复原）。
+std::string CbsDeploymentKeyName(const CbsIdentity& identity);
+
 // 失败时返回 false 并给出可读原因；成功时 extraValues 收下所有不认识的值。
 bool CbsDecodeComponentRecord(const std::wstring& name,
                               const std::vector<CbsValue>& values,

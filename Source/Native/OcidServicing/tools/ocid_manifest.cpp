@@ -1495,7 +1495,7 @@ static void Usage()
     OutLn("  ocid_manifest expand <windowsDir> <text...>   expand $(runtime.*); --paths to also show base paths");
     OutLn("  ocid_manifest macros                          list known $(runtime.*) macro names");
     OutLn("  ocid_manifest cbs-scan HKLM\\OCIDCOMP [--limit N]   decode+re-encode every store record");
-    OutLn("  ocid_manifest cbs-keys <csvFile>              check computed pseudo-key suffix against real keys");
+    OutLn("  ocid_manifest cbs-keys <csvFile> [--names component|deployment]   check pseudo-key suffix / full key name");
     OutLn("");
     OutLn("Data goes to stdout, diagnostics to stderr.");
 }
@@ -1506,8 +1506,8 @@ static void Usage()
 // 就是这种形态）。逐行算 CbsPseudoKeySuffix 并与键尾的 16 个 hex 比对——真机 13,325
 // 条必须 0 不一致，这是"与微软 COMPONENTS 逐字节一致"验收里伪键那一道闸。
 //
-// 用法：ocid_manifest cbs-keys <csv>
-int CmdCbsKeyCheck(const std::wstring& path)
+// 用法：ocid_manifest cbs-keys <csv> [--names component|deployment]
+int CmdCbsKeyCheck(const std::wstring& path, const std::wstring& namesMode)
 {
     std::wstring raw;
     std::wstring readErr;
@@ -1566,20 +1566,24 @@ int CmdCbsKeyCheck(const std::wstring& path)
             if (unparsable <= 10) Err("身份解析失败 " + key + "：" + parseErr);
             continue;
         }
-        char computed[17] = {0};
-        std::snprintf(computed, sizeof(computed), "%016llx",
-                      static_cast<unsigned long long>(CbsPseudoKeySuffix(identity)));
         const std::size_t underscore = key.rfind('_');
         const std::string suffix =
             (underscore == std::string::npos) ? std::string() : key.substr(underscore + 1);
-        if (suffix == computed)
+        std::string want = suffix;
+        if (namesMode == L"component") {
+            want = CbsComponentKeyName(identity);
+        } else if (namesMode == L"deployment") {
+            want = CbsDeploymentKeyName(identity);
+        }
+        const std::string& actual = namesMode.empty() ? suffix : key;
+        if (want == actual)
         {
             ++matched;
         }
         else
         {
             ++bad;
-            if (bad <= 10) Err("键后缀不一致 " + key + "（算出 " + computed + "）");
+            if (bad <= 10) Err("键名不一致：" + key + "（算出 " + want + "）");
         }
     }
     OutLn("rows=" + std::to_string(rows) + " matched=" + std::to_string(matched) +
@@ -1696,7 +1700,13 @@ int main(int argc, char** argv)
     }
 
     if (cmd == L"cbs-keys" && argc >= 3) {
-        return CmdCbsKeyCheck(FromUtf8OrAnsi(argv[2]));
+        std::wstring namesMode;
+        for (int i = 3; i < argc; ++i) {
+            if (std::string(argv[i]) == "--names" && i + 1 < argc) {
+                namesMode = FromUtf8OrAnsi(argv[++i]);
+            }
+        }
+        return CmdCbsKeyCheck(FromUtf8OrAnsi(argv[2]), namesMode);
     }
 
     if (cmd == L"macros")

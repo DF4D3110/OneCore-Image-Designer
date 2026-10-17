@@ -64,6 +64,33 @@ std::string Hex16(std::uint64_t value) {
     return out;
 }
 
+// 真机键名里超长名字的省略形态：保留前 half 个字符 + ".." + 后 (max-2-half) 个字符。
+// 组件名字用 max=40（前 19 + .. + 后 19），culture 用 max=8（前 3 + .. + 后 3），
+// 部署名字用 max=24（前 11 + .. + 后 11）。
+std::string CbsElidedName(const std::string& lowerName, std::size_t max) {
+    if (lowerName.size() <= max) {
+        return lowerName;
+    }
+    const std::size_t half = (max - 2) / 2;
+    return lowerName.substr(0, half) + ".." +
+           lowerName.substr(lowerName.size() - (max - 2 - half));
+}
+
+// 键名段只保留 [a-z0-9._-]：真机里 `Microsoft-Windows-Base Technologies` 写成
+// `microsoft-windows-basetechnologies`，`(core)` 写成 `core`（空格与括号被删掉）。
+std::string CbsSanitizeSegment(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    for (char c : LowerAscii(text)) {
+        const bool keep = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' ||
+                          c == '_' || c == '-';
+        if (keep) {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
 }  // namespace
 
 std::uint64_t CbsHashEncodedText(const std::string& text) {
@@ -141,6 +168,52 @@ std::uint64_t CbsPseudoKeySuffix(const CbsIdentity& identity) {
         }
     }
     return acc;
+}
+
+std::string CbsComponentKeyName(const CbsIdentity& identity) {
+    const std::string* arch = nullptr;
+    const std::string* token = nullptr;
+    const std::string* version = nullptr;
+    const std::string* culture = nullptr;
+    for (const auto& attribute : identity.attributes) {
+        const std::string label = LowerAscii(attribute.first);
+        if (label == "processorarchitecture") {
+            arch = &attribute.second;
+        } else if (label == "publickeytoken") {
+            token = &attribute.second;
+        } else if (label == "version") {
+            version = &attribute.second;
+        } else if (label == "culture") {
+            culture = &attribute.second;
+        }
+    }
+    // culture 段：neutral 与"没有 culture"在真机里都写成 none。
+    std::string cultureText = "none";
+    if (culture != nullptr && LowerAscii(*culture) != "neutral") {
+        cultureText = CbsElidedName(CbsSanitizeSegment(*culture), 8);
+    }
+    return CbsSanitizeSegment(arch != nullptr ? *arch : std::string()) + "_" +
+           CbsElidedName(CbsSanitizeSegment(identity.name), 40) + "_" +
+           CbsSanitizeSegment(token != nullptr ? *token : std::string()) + "_" +
+           CbsSanitizeSegment(version != nullptr ? *version : std::string()) + "_" +
+           cultureText + "_" + Hex16(CbsPseudoKeySuffix(identity));
+}
+
+std::string CbsDeploymentKeyName(const CbsIdentity& identity) {
+    const std::string* token = nullptr;
+    const std::string* version = nullptr;
+    for (const auto& attribute : identity.attributes) {
+        const std::string label = LowerAscii(attribute.first);
+        if (label == "publickeytoken") {
+            token = &attribute.second;
+        } else if (label == "version") {
+            version = &attribute.second;
+        }
+    }
+    return CbsElidedName(CbsSanitizeSegment(identity.name), 24) + "_" +
+           CbsSanitizeSegment(token != nullptr ? *token : std::string()) + "_" +
+           CbsSanitizeSegment(version != nullptr ? *version : std::string()) + "_" +
+           Hex16(CbsPseudoKeySuffix(identity));
 }
 
 std::vector<std::uint8_t> CbsEncodeAsciiText(const std::string& text) {

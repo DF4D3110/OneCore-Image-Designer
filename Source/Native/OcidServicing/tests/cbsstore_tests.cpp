@@ -450,6 +450,63 @@ static void PseudoKeySuffix()
              "Culture=neutral 与缺省 culture 折叠结果相同");
 }
 
+static void KeyNames()
+{
+    // 写侧的最后一公里：身份文本 -> 真机键名（含小写、字符过滤、超长省略）。
+    printf("\n-- 键名生成 --\n");
+    struct Golden
+    {
+        const char* identity;
+        bool deployment;
+        const char* key;
+        const char* what;
+    };
+    const Golden goldens[] = {
+        {"1394.inf, Culture=neutral, Type=driverUpdate, Version=6.2.8061.0, "
+         "PublicKeyToken=31bf3856ad364e35, ProcessorArchitecture=x86, "
+         "versionScope=NonSxS",
+         false, "x86_1394.inf_31bf3856ad364e35_6.2.8061.0_none_8235efbd79774ccd",
+         "组件键：neutral culture 写成 none"},
+        {"microsoft-windows-base technologies-file systems (core), Culture=neutral, "
+         "Version=6.2.8061.0, PublicKeyToken=31bf3856ad364e35, "
+         "ProcessorArchitecture=x86, versionScope=NonSxS",
+         false,
+         "x86_microsoft-windows-b..ies-filesystemscore_31bf3856ad364e35_6.2.8061.0_none_"
+         "333d9236635da6a7",
+         "组件键：删空格/括号 + 名字省略成前 19 + .. + 后 19"},
+        {"microsoft-windows-comctl32-v5.resources, Culture=sr-Latn-CS, "
+         "Version=6.2.8061.0, PublicKeyToken=31bf3856ad364e35, "
+         "ProcessorArchitecture=x86, versionScope=NonSxS",
+         false,
+         "x86_microsoft-windows-comctl32-v5.resources_31bf3856ad364e35_6.2.8061.0_sr-..-cs_"
+         "70a81795c983c3dd",
+         "组件键：culture 省略成前 3 + .. + 后 3"},
+        {"1394.inf-LanguagePack, Culture=qps-ploc, Version=6.2.8061.0, "
+         "PublicKeyToken=31bf3856ad364e35, ProcessorArchitecture=x86, "
+         "versionScope=NonSxS",
+         true, "1394.inf-languagepack_31bf3856ad364e35_6.2.8061.0_3e21a2537caa932d",
+         "部署键：没有架构/culture 段"},
+        {"atiilhag.inf-LanguagePack, Culture=qps-ploc, Version=6.2.8061.0, "
+         "PublicKeyToken=31bf3856ad364e35, ProcessorArchitecture=x86, "
+         "versionScope=NonSxS",
+         true, "atiilhag.in..anguagepack_31bf3856ad364e35_6.2.8061.0_8b70cf47ccb5c24f",
+         "部署键：名字省略成前 11 + .. + 后 11"},
+    };
+    for (const Golden& golden : goldens)
+    {
+        CbsIdentity identity;
+        std::string error;
+        if (!CbsParseIdentity(golden.identity, identity, error))
+        {
+            Check(false, golden.what);
+            continue;
+        }
+        CheckAscii(golden.deployment ? CbsDeploymentKeyName(identity)
+                                     : CbsComponentKeyName(identity),
+                   golden.key, golden.what);
+    }
+}
+
 int main()
 {
     SetupConsoleUtf8();
@@ -461,6 +518,7 @@ int main()
     IdentityRules();
     ComponentNames();
     PseudoKeySuffix();
+    KeyNames();
 
     printf("\n== 结果 ==\n  通过 %d / 失败 %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
