@@ -14,6 +14,7 @@
 // 输出约定：**数据走 stdout，诊断走 stderr** —— 这样 C# 侧可以干净地消费 stdout。
 
 #include "ocid/ConsoleUtf8.h"
+#include "ocid/DriverPackage.h"
 #include "ocid/FilePlacement.h"
 #include "ocid/MacroExpander.h"
 #include "ocid/Manifest.h"
@@ -706,6 +707,162 @@ static int CmdPlaceOps(const std::wstring& dir, const std::wstring& listFile,
 #endif
 }
 
+// ── dmi-ops：驱动包（type="driverUpdate"）的导入计划 ─────────────────────────
+//
+// 与 place-ops 的区别：驱动组件的 <file> 没有 destinationPath，落点由 importPath 决定
+// （见 include/ocid/DriverPackage.h 的真机直方图）。所以这里不落 System32/WinSxS，
+// 而是给出 FileRepository 的目录名与"哪些文件进库"。
+//
+// 载荷：包展开目录 `<pkgRoot>\<组件目录>\<sourceName>`。真机 8061 的包库是**平铺**的
+// （5664 份 manifest + 350 cat/mum，**没有一个 .inf/.sys**），所以这里会如实报
+// payloadMissing —— 离线导入的 INF 源必须另有出处，这是本轮明确留出的问题。
+static bool ArchIdFromName(const std::wstring& name, unsigned int& id)
+{
+    struct { const wchar_t* n; unsigned int v; } kMap[] = {
+        { L"x86", 0 }, { L"arm", 5 }, { L"ia64", 6 }, { L"amd64", 9 }, { L"arm64", 12 },
+    };
+    for (const auto& e : kMap) {
+        if (_wcsicmp(name.c_str(), e.n) == 0) { id = e.v; return true; }
+    }
+    return false;
+}
+
+// INF 是**字节**（StoreId 按字节算），不能用按行/按 UTF-8 处理的读法。
+static bool ReadRawBytes(const std::wstring& path, std::vector<std::uint8_t>& out, std::wstring& error)
+{
+    FILE* f = _wfopen(path.c_str(), L"rb");
+    if (!f) { error = L"打不开：" + path; return false; }
+    std::uint8_t buf[65536];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out.insert(out.end(), buf, buf + n);
+    const bool bad = ferror(f) != 0;
+    fclose(f);
+    if (bad) { error = L"读出错：" + path; return false; }
+    return true;
+}
+
+static int CmdDmiOps(const std::wstring& dir,
+                     const std::wstring& listFile,
+                     const std::wstring& packageRootOverride,
+                     int maxFiles)
+{
+#ifdef _WIN32
+    std::vector<std::wstring> files;
+    if (!listFile.empty()) {
+        std::wstring text, err;
+        if (!ReadFileUtf8(listFile, text, err)) { Err(ToUtf8(err)); return 2; }
+        size_t start = 0;
+        while (start <= text.size()) {
+            size_t nl = text.find(L'\n', start);
+            std::wstring line = (nl == std::wstring::npos) ? text.substr(start)
+                                                           : text.substr(start, nl - start);
+            while (!line.empty() && (line.back() == L'\r' || line.back() == L' ')) line.pop_back();
+            if (!line.empty()) files.push_back(line);
+            if (nl == std::wstring::npos) break;
+            start = nl + 1;
+        }
+    } else {
+        WIN32_FIND_DATAW fd;
+        std::wstring pattern = dir + L"\\*.manifest";
+        HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) { Err("no .manifest found"); return 2; }
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (maxFiles > 0 && (int)files.size() >= maxFiles) break;
+            files.push_back(dir + L"\\" + fd.cFileName);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    if (files.empty()) { Err("no .manifest found"); return 2; }
+
+    size_t okM = 0, driverPkgs = 0, planned = 0, planFailed = 0;
+    size_t payloadMissing = 0, notImported = 0, noArch = 0;
+
+    for (const auto& path : files) {
+        std::wstring text, err;
+        if (!ReadFileUtf8(path, text, err)) continue;
+
+        ComponentManifest m;
+        auto r = ParseComponentManifest(text, m);
+        if (!r.ok) continue;
+        if (!IsDriverUpdateComponent(m.identity.Type(), m.identity.ScopeString())) continue;
+        ++okM;
+        ++driverPkgs;
+
+        const size_t p = path.find_last_of(L"\\/");
+        if (p == std::wstring::npos) continue;
+        const std::wstring fileName = path.substr(p + 1);
+        const std::wstring compDir  = fileName.substr(0, fileName.size() - 9);  // 去掉 ".manifest"
+        std::wstring pkgRoot = path.substr(0, p);
+        if (!packageRootOverride.empty()) pkgRoot = packageRootOverride;
+
+        unsigned int archId = 0;
+        if (!ArchIdFromName(m.identity.Architecture(), archId)) {
+            ++noArch;
+            Err("note: " + ToUtf8(std::wstring(L"架构串不认识，跳过：") + m.identity.Architecture() + L"（" + compDir + L"）"));
+            continue;
+        }
+
+        std::vector<DriverImportFileSpec> specs;
+        specs.reserve(m.files.size());
+        for (const auto& f : m.files) specs.push_back({ f.name, f.sourceName, f.importPath });
+
+        // INF 的载荷（若包展开目录里真有）
+        std::wstring infPath;
+        std::vector<std::uint8_t> infBytes;
+        for (const auto& s : specs) {
+            if (ClassifyDriverImportFile(s.importPath) != DriverImportFileKind::Inf) continue;
+            const std::wstring src = s.sourceName.empty() ? s.name : s.sourceName;
+            infPath = pkgRoot + L"\\" + compDir + L"\\" + src;
+            std::wstring rerr;
+            if (ReadRawBytes(infPath, infBytes, rerr)) {
+                // ok：字节已到手
+            } else {
+                ++payloadMissing;
+                Err("note: 包展开目录里没有 INF 载荷（算不出 StoreId）：" + ToUtf8(infPath));
+            }
+            break;
+        }
+
+        const DriverImportPlan plan = BuildDriverImportPlan(specs, infPath, infBytes, archId);
+        notImported += (size_t)plan.notImported;
+        for (const auto& n : plan.notes) Err("note: " + ToUtf8(n));
+
+        std::string line = "{\"componentDir\":\"" + JsonEscape(compDir)
+                         + "\",\"identity\":\"" + JsonEscape(m.identity.ToString())
+                         + "\",\"arch\":\"" + JsonEscape(m.identity.Architecture())
+                         + "\",\"infName\":\"" + JsonEscape(plan.infName)
+                         + "\",\"storeId\":\"" + JsonEscape(plan.storeId)
+                         + "\",\"ok\":" + (plan.ok ? "true" : "false")
+                         + ",\"error\":\"" + JsonEscape(plan.error)
+                         + "\",\"fileCount\":" + std::to_string(plan.files.size())
+                         + ",\"notImported\":" + std::to_string(plan.notImported);
+        for (size_t i = 0; i < plan.files.size(); ++i) {
+            line += ",\"file" + std::to_string(i) + "\":\""
+                  + JsonEscape(plan.files[i].name.empty() ? plan.files[i].sourceName
+                                                          : plan.files[i].name)
+                  + "\"";
+        }
+        line += "}";
+        OutLn(line);
+        if (plan.ok) ++planned; else ++planFailed;
+    }
+
+    Err("driverManifests=" + std::to_string(driverPkgs)
+      + " planned=" + std::to_string(planned)
+      + " planFailed=" + std::to_string(planFailed)
+      + " payloadMissing=" + std::to_string(payloadMissing)
+      + " notImportedFiles=" + std::to_string(notImported)
+      + " archUnknown=" + std::to_string(noArch)
+      + " manifestsSeen=" + std::to_string(files.size()));
+    // 算不出 StoreId（没有 INF 载荷）不算成功：那是"没做"，不是"做对了"。
+    return (planFailed == 0 && payloadMissing == 0) ? 0 : 1;
+#else
+    (void)dir; (void)listFile; (void)packageRootOverride; (void)maxFiles;
+    return 2;
+#endif
+}
+
 static void Usage()
 {
     OutLn("OCID servicing console");
@@ -717,6 +874,7 @@ static void Usage()
     OutLn("  ocid_manifest export-ops <dir> [maxFiles]    registry ops as JSONL (C# consumer)");
     OutLn("  ocid_manifest place-ops --windows <winDir> --list <pathsFile> [--packages <root>] [--image-arch <arch>]");
     OutLn("  ocid_manifest place-ops --windows <winDir> <dir> [maxFiles]");
+    OutLn("  ocid_manifest dmi-ops --list <pathsFile> [--packages <root>]   driver import plan as JSONL");
     OutLn("      --image-arch: arm|arm64|amd64|x86|none（默认自动探测 ntoskrnl.exe；none = 不红移）");
     OutLn("  ocid_manifest verify-names <dir> [maxFiles]   (check component names against real file names)");
     OutLn("  ocid_manifest expand <windowsDir> <text...>   expand $(runtime.*); --paths to also show base paths");
@@ -776,6 +934,20 @@ int main(int argc, char** argv)
         return CmdPlaceOps(dir, listFile, winDir, pkgRoot, imageArch, mx);
     }
 
+    if (cmd == L"dmi-ops") {
+        std::wstring dir, listFile, pkgRoot;
+        int mx = 0;
+        for (int i = 2; i < argc; ++i) {
+            std::string a = argv[i];
+            if (a == "--list" && i + 1 < argc)          { listFile = FromUtf8OrAnsi(argv[++i]); }
+            else if (a == "--packages" && i + 1 < argc) { pkgRoot = FromUtf8OrAnsi(argv[++i]); }
+            else if (a.rfind("--", 0) == 0)             { ++i; }
+            else if (dir.empty())                       { dir = FromUtf8OrAnsi(argv[i]); }
+            else                                        { mx = atoi(argv[i]); }
+        }
+        return CmdDmiOps(dir, listFile, pkgRoot, mx);
+    }
+
     if (cmd == L"verify-names" && argc >= 3) {
         int mx = (argc >= 4) ? atoi(argv[3]) : 0;
         return CmdVerifyNames(FromUtf8OrAnsi(argv[2]), mx);
@@ -801,3 +973,6 @@ int main(int argc, char** argv)
     Usage();
     return 1;
 }
+
+
+
