@@ -120,6 +120,14 @@ std::string CbsFileValueName(const std::wstring& fileName);
 // 按真机规则造值名：`c!` + 部署名。
 std::string CbsMarkValueName(const std::string& deploymentName);
 
+// 组件/部署键尾部 16 个 hex 的伪键（wcp 对身份的折叠哈希）。真机 13,325 条组件键
+// 100% 命中。折叠顺序与 wcp 的 canonical 属性顺序一致：
+//   name、culture（值为 neutral 时整条跳过）、Type、version、PublicKeyToken、
+//   processorArchitecture、versionScope；只有身份里出现的属性参与折叠：
+//     acc = acc * 0x1FFFFFFF7 + (H(值) + 0x1FFFFFFF7 * H(属性名))
+// 属性名取 canonical 拼写（大小写不影响，哈希会先小写）。
+std::uint64_t CbsPseudoKeySuffix(const CbsIdentity& identity);
+
 // 失败时返回 false 并给出可读原因；成功时 extraValues 收下所有不认识的值。
 bool CbsDecodeComponentRecord(const std::wstring& name,
                               const std::vector<CbsValue>& values,

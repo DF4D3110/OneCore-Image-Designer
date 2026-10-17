@@ -110,6 +110,39 @@ std::string CbsMarkValueName(const std::string& deploymentName) {
     return "c!" + deploymentName;
 }
 
+std::uint64_t CbsPseudoKeySuffix(const CbsIdentity& identity) {
+    // wcp 的折叠常量（与 RtlHashEncodedLBlob 合成时的第三常量相同）。
+    constexpr std::uint64_t kFactor = 0x1FFFFFFF7ull;
+    std::uint64_t acc = 0;
+    auto fold = [&](const std::string& label, const std::string& value) {
+        acc = acc * kFactor +
+              (CbsHashEncodedText(value) + kFactor * CbsHashEncodedText(label));
+    };
+    fold("name", identity.name);
+    // canonical 顺序：culture, typeName, Type, version, publicKeyToken, publicKey,
+    // processorArchitecture, versionScope。真机里 typeName/publicKey 从未出现，但保留
+    // 位置以免以后遇到时顺序出错。
+    static const char* const kOrder[] = {"culture",      "typeName",  "Type",
+                                         "version",      "PublicKeyToken",
+                                         "publicKey",    "processorArchitecture",
+                                         "versionScope"};
+    for (const char* label : kOrder) {
+        for (const auto& attribute : identity.attributes) {
+            if (LowerAscii(attribute.first) != LowerAscii(label)) {
+                continue;
+            }
+            // 真机：Culture=neutral 等于"没有 culture 属性"，不参与折叠。
+            if (LowerAscii(label) == "culture" &&
+                LowerAscii(attribute.second) == "neutral") {
+                continue;
+            }
+            fold(label, attribute.second);
+            break;
+        }
+    }
+    return acc;
+}
+
 std::vector<std::uint8_t> CbsEncodeAsciiText(const std::string& text) {
     return std::vector<std::uint8_t>(text.begin(), text.end());
 }

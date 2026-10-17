@@ -1495,8 +1495,96 @@ static void Usage()
     OutLn("  ocid_manifest expand <windowsDir> <text...>   expand $(runtime.*); --paths to also show base paths");
     OutLn("  ocid_manifest macros                          list known $(runtime.*) macro names");
     OutLn("  ocid_manifest cbs-scan HKLM\\OCIDCOMP [--limit N]   decode+re-encode every store record");
+    OutLn("  ocid_manifest cbs-keys <csvFile>              check computed pseudo-key suffix against real keys");
     OutLn("");
     OutLn("Data goes to stdout, diagnostics to stderr.");
+}
+
+// ── 组件键伪键校验（cbs-keys）────────────────────────────────────────────
+//
+// 输入是从真机导出的两列 CSV：`"组件键","身份文本"`（E:\ocid_verify\components_all.csv
+// 就是这种形态）。逐行算 CbsPseudoKeySuffix 并与键尾的 16 个 hex 比对——真机 13,325
+// 条必须 0 不一致，这是"与微软 COMPONENTS 逐字节一致"验收里伪键那一道闸。
+//
+// 用法：ocid_manifest cbs-keys <csv>
+int CmdCbsKeyCheck(const std::wstring& path)
+{
+    std::wstring raw;
+    std::wstring readErr;
+    if (!ReadFileUtf8(path, raw, readErr))
+    {
+        Err(ToUtf8(readErr));
+        return 1;
+    }
+    const std::string text = ToUtf8(raw);
+    long long rows = 0, matched = 0, bad = 0, unparsable = 0;
+    std::size_t pos = 0;
+    while (pos < text.size())
+    {
+        std::size_t lineEnd = text.find('\n', pos);
+        if (lineEnd == std::string::npos) lineEnd = text.size();
+        std::string line = text.substr(pos, lineEnd - pos);
+        pos = lineEnd + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+
+        // 两列都带引号；字段内的引号用 "" 转义。
+        std::vector<std::string> fields;
+        std::string field;
+        bool inQuotes = false;
+        for (std::size_t i = 0; i < line.size(); ++i)
+        {
+            const char c = line[i];
+            if (inQuotes)
+            {
+                if (c == '"')
+                {
+                    if (i + 1 < line.size() && line[i + 1] == '"') { field.push_back('"'); ++i; }
+                    else { inQuotes = false; }
+                }
+                else { field.push_back(c); }
+            }
+            else if (c == '"') { inQuotes = true; }
+            else if (c == ',') { fields.push_back(field); field.clear(); }
+            else { field.push_back(c); }
+        }
+        fields.push_back(field);
+        if (fields.size() != 2)
+        {
+            ++bad;
+            if (bad <= 10) Err("列数不是 2：" + line);
+            continue;
+        }
+        ++rows;
+        const std::string& key = fields[0];
+        if (key == "key" && fields[1] == "identity") { --rows; continue; }  // 表头
+        CbsIdentity identity;
+        std::string parseErr;
+        if (!CbsParseIdentity(fields[1], identity, parseErr))
+        {
+            ++unparsable;
+            if (unparsable <= 10) Err("身份解析失败 " + key + "：" + parseErr);
+            continue;
+        }
+        char computed[17] = {0};
+        std::snprintf(computed, sizeof(computed), "%016llx",
+                      static_cast<unsigned long long>(CbsPseudoKeySuffix(identity)));
+        const std::size_t underscore = key.rfind('_');
+        const std::string suffix =
+            (underscore == std::string::npos) ? std::string() : key.substr(underscore + 1);
+        if (suffix == computed)
+        {
+            ++matched;
+        }
+        else
+        {
+            ++bad;
+            if (bad <= 10) Err("键后缀不一致 " + key + "（算出 " + computed + "）");
+        }
+    }
+    OutLn("rows=" + std::to_string(rows) + " matched=" + std::to_string(matched) +
+          " bad=" + std::to_string(bad) + " unparsable=" + std::to_string(unparsable));
+    return (bad == 0 && unparsable == 0) ? 0 : 1;
 }
 
 int main(int argc, char** argv)
@@ -1605,6 +1693,10 @@ int main(int argc, char** argv)
             if (a == "--limit" && i + 1 < argc) { mx = atoi(argv[++i]); }
         }
         return CmdCbsScan(FromUtf8OrAnsi(argv[2]), mx);
+    }
+
+    if (cmd == L"cbs-keys" && argc >= 3) {
+        return CmdCbsKeyCheck(FromUtf8OrAnsi(argv[2]));
     }
 
     if (cmd == L"macros")

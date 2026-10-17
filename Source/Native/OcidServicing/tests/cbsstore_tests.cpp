@@ -390,6 +390,66 @@ static void ComponentNames()
           "后缀长度不足 16 时不合法");
 }
 
+static void PseudoKeySuffix()
+{
+    // 组件键尾部 16 个 hex = wcp 对身份的折叠哈希。以下 5 条全部来自真机
+    // DerivedData\Components（键名后缀与这里期望的 16 hex 逐字符相同）。
+    printf("\n-- 组件伪键后缀 --\n");
+    struct Golden
+    {
+        const char* identity;
+        const char* suffix;
+        const char* what;
+    };
+    const Golden goldens[] = {
+        {"Accessibility, Culture=neutral, Version=4.0.8061.0, "
+         "PublicKeyToken=b03f5f7f11d50a3a, ProcessorArchitecture=msil",
+         "77a15b1d27ec8860", "Culture=neutral 跳过 culture 后命中"},
+        {"AddInProcess, Culture=neutral, Version=4.0.8061.0, "
+         "PublicKeyToken=b77a5c561934e089, ProcessorArchitecture=msil",
+         "43abafe8d035e47d", "第二条 neutral 身份命中"},
+        {"AddInProcess32, Culture=neutral, Version=6.2.8061.0, "
+         "PublicKeyToken=b77a5c561934e089, ProcessorArchitecture=x86, "
+         "versionScope=NonSxS",
+         "0816495b60763e9c", "带 versionScope 的身份命中"},
+        {"1394.inf, Culture=neutral, Type=driverUpdate, Version=6.2.8061.0, "
+         "PublicKeyToken=31bf3856ad364e35, ProcessorArchitecture=x86, "
+         "versionScope=NonSxS",
+         "8235efbd79774ccd", "带 Type=driverUpdate 的驱动身份命中"},
+        {"AddInUtil.Resources, Culture=en-us, Version=4.0.8061.0, "
+         "PublicKeyToken=b77a5c561934e089, ProcessorArchitecture=msil",
+         "af4e75efac64cc91", "非 neutral culture 参与折叠后命中"},
+    };
+    for (const Golden& golden : goldens)
+    {
+        CbsIdentity identity;
+        std::string error;
+        if (!CbsParseIdentity(golden.identity, identity, error))
+        {
+            Check(false, golden.what);
+            continue;
+        }
+        const std::uint64_t want = std::stoull(golden.suffix, nullptr, 16);
+        CheckInt(static_cast<long long>(CbsPseudoKeySuffix(identity)),
+                 static_cast<long long>(want), golden.what);
+    }
+
+    // 折叠只认身份里出现的属性：Culture=neutral 与"没有 Culture"必须同值。
+    CbsIdentity withNeutral;
+    CbsIdentity withoutCulture;
+    std::string error;
+    Check(CbsParseIdentity(
+              "X, Culture=neutral, Version=1.0.0.0, PublicKeyToken=31bf3856ad364e35",
+              withNeutral, error),
+          "neutral 身份可解析");
+    Check(CbsParseIdentity("X, Version=1.0.0.0, PublicKeyToken=31bf3856ad364e35",
+                           withoutCulture, error),
+          "无 culture 身份可解析");
+    CheckInt(static_cast<long long>(CbsPseudoKeySuffix(withNeutral)),
+             static_cast<long long>(CbsPseudoKeySuffix(withoutCulture)),
+             "Culture=neutral 与缺省 culture 折叠结果相同");
+}
+
 int main()
 {
     SetupConsoleUtf8();
@@ -400,6 +460,7 @@ int main()
     DeploymentRecord();
     IdentityRules();
     ComponentNames();
+    PseudoKeySuffix();
 
     printf("\n== 结果 ==\n  通过 %d / 失败 %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
