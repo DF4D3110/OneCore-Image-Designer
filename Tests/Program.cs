@@ -29,6 +29,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Ocid protected directory write takes ownership then restores the lock", () => { OcidTrustedInstallerAccess(); return Task.CompletedTask; }),
     ("Ocid driver package store id, oemN.inf names and DriverDatabase property names", () => { OcidDriverPackage(); return Task.CompletedTask; })
     ,("Ocid DriverDatabase ledger writes a hived copy and reads back value-for-value", () => { OcidDriverDatabaseLedger(); return Task.CompletedTask; })
+    ,("Ocid driver store lands package files and publishes the INF", () => { OcidDriverStoreLanding(); return Task.CompletedTask; })
 };
 
 var failures = new List<string>();
@@ -1111,6 +1112,61 @@ static byte[] Bytes(string s)
 //
 // 为什么先清空：不清空的话"写"这一步可能是空转，比对仍然全过 —— 那就什么都没证明。
 // 计划文件由原生工具产生（ocid_manifest dmi-ledger），C# 只负责照单写。
+// 驱动包**文件**落盘：拿真机商店目录当载荷来源，落到临时镜像根里再逐个字节回读。
+// 为什么用真机目录当来源：它同时给了"该有哪些文件"和"内容该是什么"两份金标准。
+static void OcidDriverStoreLanding()
+{
+    const string imageRoot = @"Q:\";
+    string repository = Path.Combine(imageRoot, @"Windows\System32\DriverStore\FileRepository");
+    if (!Directory.Exists(repository)) { Console.WriteLine("  [skip] 没有真机镜像（Q:）"); return; }
+
+    string root = Path.Combine(Path.GetTempPath(), "ocid-dmi-" + Guid.NewGuid().ToString("N"));
+    string image = Path.Combine(root, "image");
+    Directory.CreateDirectory(image);
+    try
+    {
+        // 挑三个小包（1 个 INF + 少量载荷），避免把测试拖成几分钟。
+        var candidates = Directory.GetDirectories(repository)
+            .Select(d => (Dir: d, Files: Directory.GetFiles(d)))
+            .Where(x => x.Files.Length is >= 2 and <= 6)
+            .Where(x => x.Files.Count(f => f.EndsWith(".inf", StringComparison.OrdinalIgnoreCase)) == 1)
+            .OrderBy(x => x.Files.Length)
+            .Take(3)
+            .ToList();
+        True(candidates.Count == 3, $"找不到 3 个可以当样本的商店目录（{candidates.Count}）");
+
+        foreach (var (dir, files) in candidates)
+        {
+            string storeId = Path.GetFileName(dir);
+            string inf = files.First(f => f.EndsWith(".inf", StringComparison.OrdinalIgnoreCase));
+            string infName = Path.GetFileName(inf);
+
+            var landed = DriverStoreService.LandPackage(image, dir, storeId, infName,
+                files.Select(Path.GetFileName), publishedInfName: infName,
+                log: m => Console.WriteLine("  " + m));
+
+            True(landed.Files.Count == files.Length,
+                $"落盘文件数不符：{landed.Files.Count} vs {files.Length}（{storeId}）");
+            True(landed.PublishedUnderOriginalName, "收件箱驱动应当以原名发布");
+            True(File.Exists(landed.PublishedInfPath), $"没有发布 INF：{landed.PublishedInfPath}");
+
+            var (checkedFiles, problems) = DriverStoreService.VerifyPackage(dir, landed.StoreDirectory,
+                infName, landed.PublishedInfPath);
+            True(checkedFiles == files.Length, $"回读文件数不符：{checkedFiles} vs {files.Length}");
+            True(problems.Count == 0, $"回读不一致（{storeId}）：{string.Join("；", problems.Take(3))}");
+            Console.WriteLine($"  {storeId}：{checkedFiles} 个文件逐个字节一致，INF 已按原名发布");
+        }
+
+        // 商店目录的路径规则：<image>\Windows\System32\DriverStore\FileRepository\<StoreId>（无中间层）。
+        string probe = DriverStoreService.StoreDirectoryOf(image, "x.inf_x86_0123456789abcdef");
+        True(probe.EndsWith(@"Windows\System32\DriverStore\FileRepository\x.inf_x86_0123456789abcdef",
+             StringComparison.OrdinalIgnoreCase), $"商店目录规则不对：{probe}");
+    }
+    finally
+    {
+        try { Directory.Delete(root, recursive: true); } catch { /* 临时目录清不掉不影响结论 */ }
+    }
+}
 static void OcidDriverDatabaseLedger()
 {
     const string sourceMount = "OCIDDB";      // 真机 hive（只读用）
