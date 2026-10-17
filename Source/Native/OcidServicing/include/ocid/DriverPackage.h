@@ -198,17 +198,31 @@ bool ChoosePublishedInfName(unsigned int importFlags,
 //   DriverBinary -> copied into <StoreId> only
 //   NotImported  -> not part of the import (no importPath, or another tree)
 //
-// The INF is the file whose import path ends in the `driver_infs` segment, so the
-// distinction is structural and needs no guessing. Measured: 231 of 5664 manifests in
-// a real 8061 package store are driver packages, and none of them carries a payload in
-// the package store itself - the files come from the build tree, which in an offline
-// build means the package payload directory or the nttree that was just placed.
+// The INF is the file staged in an INF staging directory, so the distinction is
+// structural and needs no guessing. Measured on a real 8061 package store
+// (5664 manifests, 231 of them type="driverUpdate", 973 file entries in total):
+//
+//   $(build.nttree)\                  724    payload (the .sys / .dll etc.)
+//   $(build.nttree)\driver_infs\      208  } one INF per package: 208 + 22 + 1 = 231
+//   $(build.nttree)\printer_infs\      22  } (printer and "manifested" drivers stage
+//   $(build.nttree)\manifested_infs\    1  }  their INF somewhere else)
+//   $(build.nttree)\multi\             17    NOT an INF staging dir (see below)
+//   $(build.nttree)\ua\                 1    NOT an INF staging dir (see below)
+//
+// Every driver package carries exactly one INF under one of the three staging
+// directories; the 18 entries under `multi` and `ua` are not accounted for by that
+// identity and are therefore treated as payload for now - do not mistake them for INFs
+// without new evidence.
 // ---------------------------------------------------------------------------
 enum class DriverImportFileKind { NotImported = 0, Inf, DriverBinary };
 
 // importPath -> kind. Case-insensitive; a trailing separator is ignored; an empty
 // string is NotImported.
 DriverImportFileKind ClassifyDriverImportFile(const std::wstring& importPath);
+
+// The INF staging directory names (import path segment, case-insensitive). Exposed so
+// callers can explain *why* a file was classified as an INF.
+bool IsInfStagingSegment(const std::wstring& segment);
 
 // Is this component a driver package at all? Both attributes are compared
 // case-insensitively; a missing attribute means "no".

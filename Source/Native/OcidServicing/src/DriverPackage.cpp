@@ -329,15 +329,22 @@ bool IsSep(wchar_t c) { return c == L'\\' || c == L'/'; }
 
 } // namespace
 
+bool IsInfStagingSegment(const std::wstring& segment)
+{
+    const std::wstring s = AsciiLower(segment);
+    return s == L"driver_infs" || s == L"printer_infs" || s == L"manifested_infs";
+}
+
 DriverImportFileKind ClassifyDriverImportFile(const std::wstring& importPath)
 {
     const std::wstring p = WithoutTrailingSlashes(AsciiLower(importPath));
     if (p.empty()) return DriverImportFileKind::NotImported;
 
-    // 末段是 `driver_infs` ⇒ 这条声明的是 INF。
+    // 末段是 INF 暂存目录（driver_infs / printer_infs / manifested_infs）⇒ 这条声明的是 INF。
+    // 真机直方图：208 + 22 + 1 = 231 = 驱动包数，即每个包恰好一个 INF。
     const size_t sep = p.find_last_of(L"\\/");
     const std::wstring leaf = (sep == std::wstring::npos) ? p : p.substr(sep + 1);
-    if (leaf == L"driver_infs") return DriverImportFileKind::Inf;
+    if (IsInfStagingSegment(leaf)) return DriverImportFileKind::Inf;
 
     // 构建树（nttree）里的其他文件都是驱动载荷。
     static const std::wstring kNtTree = L"$(build.nttree)";

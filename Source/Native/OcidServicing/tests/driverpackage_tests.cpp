@@ -259,6 +259,17 @@ static void ImportFileSet()
 {
     CheckInt((long long)ClassifyDriverImportFile(L"$(build.nttree)\\driver_infs\\"),
              (long long)DriverImportFileKind::Inf, "末段 driver_infs ⇒ INF");
+    CheckInt((long long)ClassifyDriverImportFile(L"$(build.nttree)\\printer_infs\\"),
+             (long long)DriverImportFileKind::Inf, "末段 printer_infs ⇒ INF（真机 22 条）");
+    CheckInt((long long)ClassifyDriverImportFile(L"$(build.nttree)\\manifested_infs\\"),
+             (long long)DriverImportFileKind::Inf, "末段 manifested_infs ⇒ INF（真机 1 条）");
+    CheckInt((long long)ClassifyDriverImportFile(L"$(build.nttree)\\multi\\"),
+             (long long)DriverImportFileKind::DriverBinary, "multi 不是 INF 暂存目录（真机 17 条，当载荷）");
+    CheckInt((long long)ClassifyDriverImportFile(L"$(build.nttree)\\ua\\"),
+             (long long)DriverImportFileKind::DriverBinary, "ua 不是 INF 暂存目录（真机 1 条，当载荷）");
+    Check(IsInfStagingSegment(L"PRINTER_INFS"), "INF 暂存目录名大小写不敏感");
+    Check(!IsInfStagingSegment(L"multi"), "multi 不是暂存目录");
+    Check(!IsInfStagingSegment(L""), "空段不是暂存目录");
     CheckInt((long long)ClassifyDriverImportFile(L"$(build.nttree)\\driver_infs"),
              (long long)DriverImportFileKind::Inf, "少了尾分隔符也算 INF");
     CheckInt((long long)ClassifyDriverImportFile(L"$(BUILD.NTTREE)\\DRIVER_INFS\\"),
