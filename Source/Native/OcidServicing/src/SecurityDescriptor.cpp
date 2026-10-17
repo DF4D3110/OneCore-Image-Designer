@@ -556,4 +556,299 @@ namespace ocid {
         return true;
     }
 
+    namespace {
+
+        /// 打开当前进程令牌并启用一个特权。拿不到就失败 —— 这里的每个特权都是"没它就别想进门"。
+        bool EnablePrivilege(const wchar_t* name, std::wstring& err)
+        {
+            HANDLE token = nullptr;
+            if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
+                err = L"OpenProcessToken 失败，Win32 错误 " + std::to_wstring(::GetLastError());
+                return false;
+            }
+            LUID luid{};
+            if (!::LookupPrivilegeValueW(nullptr, name, &luid)) {
+                const DWORD rc = ::GetLastError();
+                ::CloseHandle(token);
+                err = std::wstring(L"LookupPrivilegeValue(") + name + L") 失败，Win32 错误 " + std::to_wstring(rc);
+                return false;
+            }
+            TOKEN_PRIVILEGES tp{};
+            tp.PrivilegeCount = 1;
+            tp.Privileges[0].Luid = luid;
+            tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+            ::SetLastError(ERROR_SUCCESS);
+            ::AdjustTokenPrivileges(token, FALSE, &tp, sizeof(tp), nullptr, nullptr);
+            const DWORD rc = ::GetLastError();
+            ::CloseHandle(token);
+            if (rc != ERROR_SUCCESS) {
+                err = std::wstring(L"启用特权 ") + name + L" 失败，Win32 错误 " + std::to_wstring(rc);
+                if (rc == ERROR_NOT_ALL_ASSIGNED) err += L"（当前身份没有这个特权）";
+                return false;
+            }
+            return true;
+        }
+
+        /// 当前令牌的用户 SID（调用方用 LocalFree 释放）。
+        PSID DuplicateUserSid(std::wstring& err)
+        {
+            HANDLE token = nullptr;
+            if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) {
+                err = L"OpenProcessToken 失败，Win32 错误 " + std::to_wstring(::GetLastError());
+                return nullptr;
+            }
+            DWORD need = 0;
+            ::GetTokenInformation(token, TokenUser, nullptr, 0, &need);
+            if (need == 0) {
+                const DWORD rc = ::GetLastError();
+                ::CloseHandle(token);
+                err = L"GetTokenInformation 探测长度失败，Win32 错误 " + std::to_wstring(rc);
+                return nullptr;
+            }
+            std::vector<unsigned char> buf(need);
+            if (!::GetTokenInformation(token, TokenUser, buf.data(), need, &need)) {
+                const DWORD rc = ::GetLastError();
+                ::CloseHandle(token);
+                err = L"GetTokenInformation 失败，Win32 错误 " + std::to_wstring(rc);
+                return nullptr;
+            }
+            ::CloseHandle(token);
+            const PSID sid = reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid;
+            const DWORD len = ::GetLengthSid(sid);
+            PSID copy = ::LocalAlloc(LPTR, len);
+            if (copy == nullptr) { err = L"LocalAlloc(SID) 失败"; return nullptr; }
+            if (!::CopySid(len, copy, sid)) {
+                const DWORD rc = ::GetLastError();
+                ::LocalFree(copy);
+                err = L"CopySid 失败，Win32 错误 " + std::to_wstring(rc);
+                return nullptr;
+            }
+            return copy;
+        }
+
+        /// 把 SID 转成 `S-1-5-…` 文本。
+        std::wstring SidToString(PSID sid)
+        {
+            LPWSTR text = nullptr;
+            if (!::ConvertSidToStringSidW(sid, &text)) return std::wstring();
+            std::wstring out(text);
+            ::LocalFree(text);
+            return out;
+        }
+
+    } // namespace
+
+    bool CurrentUserSidString(std::wstring& out, std::wstring& err)
+    {
+        out.clear();
+        err.clear();
+        PSID sid = DuplicateUserSid(err);
+        if (sid == nullptr) return false;
+        out = SidToString(sid);
+        ::LocalFree(sid);
+        if (out.empty()) { err = L"ConvertSidToStringSid 失败"; return false; }
+        return true;
+    }
+
+    bool TakeKeyOwnership(void* rootKey, const std::wstring& subKey,
+                          std::wstring& priorSddl, std::wstring& err)
+    {
+        priorSddl.clear();
+        err.clear();
+
+        if (rootKey == nullptr) { err = L"根键句柄为空"; return false; }
+
+        // 1) 进门钥匙：SeTakeOwnership。SeRestore/SeBackup 顺手开——写 owner 与读原 DACL 都可能要。
+        if (!EnablePrivilege(SE_TAKE_OWNERSHIP_NAME, err)) return false;
+        { std::wstring ignored; EnablePrivilege(SE_RESTORE_NAME, ignored); EnablePrivilege(SE_BACKUP_NAME, ignored); }
+
+        // 2) 先用 WRITE_OWNER+READ_CONTROL 开；READ_CONTROL 被拒是常态（那正是要夺权的原因），
+        //    退回只带 WRITE_OWNER 的句柄。
+        HKEY target = nullptr;
+        LSTATUS rc = ::RegOpenKeyExW(static_cast<HKEY>(rootKey), subKey.c_str(), 0,
+                                     WRITE_OWNER | READ_CONTROL, &target);
+        bool canRead = rc == ERROR_SUCCESS;
+        if (!canRead) {
+            rc = ::RegOpenKeyExW(static_cast<HKEY>(rootKey), subKey.c_str(), 0, WRITE_OWNER, &target);
+        }
+        if (rc != ERROR_SUCCESS) {
+            err = L"以 WRITE_OWNER 打开键失败，Win32 错误 " + std::to_wstring(rc);
+            if (rc == ERROR_ACCESS_DENIED) {
+                err += L"：需要管理员身份 + SeTakeOwnershipPrivilege（普通管理员默认有这个特权但未启用）";
+            } else if (rc == ERROR_FILE_NOT_FOUND) {
+                err += L"：键不存在";
+            }
+            return false;
+        }
+
+        // 3) 夺权前先把旧 SDDL 读出来（读不到就留空，调用方必须当成"无法还原"）。
+        if (canRead) {
+            std::wstring readErr;
+            if (!ReadKeySddl(target, 0, priorSddl, readErr)) priorSddl.clear();
+        }
+
+        // 4) **第一步只写 owner**。RegOpenKeyExW 的掩码是"或"关系：READ_CONTROL 被拒时句柄上只有
+        //    WRITE_OWNER，而 WRITE_OWNER **不包含 WRITE_DAC** —— 同一次 RegSetKeySecurity 里
+        //    既写 owner 又写 DACL 会拿 ERROR_ACCESS_DENIED(5)。这是实测踩出来的坑。
+        PSID userSid = DuplicateUserSid(err);
+        if (userSid == nullptr) { ::RegCloseKey(target); return false; }
+
+        SECURITY_DESCRIPTOR ownerSd{};
+        bool ok = ::InitializeSecurityDescriptor(&ownerSd, SECURITY_DESCRIPTOR_REVISION) != FALSE;
+        if (ok) ok = ::SetSecurityDescriptorOwner(&ownerSd, userSid, FALSE) != FALSE;
+        if (!ok) {
+            const DWORD wrc = ::GetLastError();
+            ::LocalFree(userSid);
+            ::RegCloseKey(target);
+            err = L"构造 owner 安全描述符失败，Win32 错误 " + std::to_wstring(wrc);
+            return false;
+        }
+
+        rc = ::RegSetKeySecurity(target, OWNER_SECURITY_INFORMATION, &ownerSd);
+        if (canRead) { /* 句柄带 READ_CONTROL，留着也没用，统一关掉重开 */ }
+        ::RegCloseKey(target);
+        if (rc != ERROR_SUCCESS) {
+            ::LocalFree(userSid);
+            err = L"RegSetKeySecurity(OWNER) 失败，Win32 错误 " + std::to_wstring(rc);
+            return false;
+        }
+
+        // 5) 夺到 owner 之后，owner 隐式拥有 READ_CONTROL|WRITE_DAC ⇒ 换一个带这两个权限的句柄写 DACL。
+        HKEY owned = nullptr;
+        rc = ::RegOpenKeyExW(static_cast<HKEY>(rootKey), subKey.c_str(), 0,
+                            READ_CONTROL | WRITE_DAC, &owned);
+        if (rc != ERROR_SUCCESS) {
+            ::LocalFree(userSid);
+            err = L"夺取 owner 后仍无法以 READ_CONTROL|WRITE_DAC 打开键，Win32 错误 " + std::to_wstring(rc);
+            return false;
+        }
+        if (priorSddl.empty()) {
+            std::wstring readErr;
+            if (!ReadKeySddl(owned, 0, priorSddl, readErr)) priorSddl.clear();
+        }
+
+        const DWORD aclBytes = sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + ::GetLengthSid(userSid);
+        std::vector<unsigned char> aclBuf(aclBytes);
+        PACL acl = reinterpret_cast<PACL>(aclBuf.data());
+        ok = ::InitializeAcl(acl, aclBytes, ACL_REVISION) != FALSE;
+        // 用**可继承**的 ACE：`DriverDatabase` 下面还有 {DriverPackages, DriverInfFiles, DeviceIds} 三层、
+        // 上千个键，逐个夺权不现实。带 OBJECT|CONTAINER_INHERIT 的 ACE 在 RegSetKeySecurity 时会
+        // 传播到已存在的子键（与 WinSxS 那次学到的"给容器写 DACL 会传播给已存在子对象"同一条规律），
+        // 一次就把整棵树打开。
+        if (ok) ok = ::AddAccessAllowedAceEx(acl, ACL_REVISION, OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+                                            KEY_ALL_ACCESS, userSid) != FALSE;
+
+        SECURITY_DESCRIPTOR sd{};
+        if (ok) ok = ::InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION) != FALSE;
+        if (ok) ok = ::SetSecurityDescriptorDacl(&sd, TRUE, acl, FALSE) != FALSE;
+        // 这里**不**设 SE_DACL_PROTECTED：protected 会切断继承传播，正好抵消上面的可继承 ACE。
+
+        if (!ok) {
+            const DWORD wrc = ::GetLastError();
+            ::LocalFree(userSid);
+            ::RegCloseKey(owned);
+            err = L"构造安全描述符失败，Win32 错误 " + std::to_wstring(wrc);
+            return false;
+        }
+
+        rc = ::RegSetKeySecurity(owned, DACL_SECURITY_INFORMATION, &sd);
+        ::LocalFree(userSid);
+        ::RegCloseKey(owned);
+        if (rc != ERROR_SUCCESS) {
+            err = L"RegSetKeySecurity(DACL) 失败，Win32 错误 " + std::to_wstring(rc);
+            return false;
+        }
+        return true;
+    }
+
+    namespace
+    {
+        constexpr int kKeyTreeMaxDepth = 48;
+
+        /// 深度优先：先夺这一层的权，再往下走。
+        bool TakeTreeRecursive(HKEY root, const std::wstring& path, int depth,
+                               std::vector<std::pair<std::wstring, std::wstring>>& priors,
+                               std::wstring& err)
+        {
+            if (depth > kKeyTreeMaxDepth) {
+                err = L"键树深度超过上限（疑似环）：" + path;
+                return false;
+            }
+
+            std::wstring prior;
+            if (!TakeKeyOwnership(reinterpret_cast<void*>(root), path, prior, err)) return false;
+            if (!prior.empty()) priors.emplace_back(path, prior);
+
+            // 夺权后的 DACL 给了当前用户 KEY_ALL_ACCESS，枚举自然通得过。
+            HKEY self = nullptr;
+            LSTATUS rc = ::RegOpenKeyExW(root, path.empty() ? nullptr : path.c_str(), 0,
+                                        KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE, &self);
+            if (rc != ERROR_SUCCESS) {
+                err = L"夺权后枚举子键失败（" + path + L"），Win32 错误 " + std::to_wstring(rc);
+                return false;
+            }
+
+            std::vector<std::wstring> children;
+            wchar_t name[512];
+            for (DWORD index = 0;; ++index) {
+                DWORD len = static_cast<DWORD>(std::size(name));
+                rc = ::RegEnumKeyExW(self, index, name, &len, nullptr, nullptr, nullptr, nullptr);
+                if (rc == ERROR_NO_MORE_ITEMS) break;
+                if (rc != ERROR_SUCCESS) {
+                    ::RegCloseKey(self);
+                    err = L"RegEnumKeyEx 失败（" + path + L"），Win32 错误 " + std::to_wstring(rc);
+                    return false;
+                }
+                children.emplace_back(name, len);
+            }
+            ::RegCloseKey(self);
+
+            for (const std::wstring& child : children) {
+                const std::wstring childPath = path.empty() ? child : path + L"\\" + child;
+                if (!TakeTreeRecursive(root, childPath, depth + 1, priors, err)) return false;
+            }
+            return true;
+        }
+    } // namespace
+
+    bool TakeKeyTreeOwnership(void* rootKey, const std::wstring& subKey,
+                              std::vector<std::pair<std::wstring, std::wstring>>& priors,
+                              std::wstring& err)
+    {
+        priors.clear();
+        err.clear();
+        if (rootKey == nullptr) { err = L"根键句柄为空"; return false; }
+        return TakeTreeRecursive(static_cast<HKEY>(rootKey), subKey, 0, priors, err);
+    }
+
+    bool RestoreKeyTreeSddl(void* rootKey,
+                            const std::vector<std::pair<std::wstring, std::wstring>>& priors,
+                            std::wstring& err)
+    {
+        err.clear();
+        if (rootKey == nullptr) { err = L"根键句柄为空"; return false; }
+
+        // 还原 owner 要 SeRestorePrivilege（把 owner 还给 SYSTEM 时没有它就会被拒）。
+        { std::wstring ignored; EnablePrivilege(SE_RESTORE_NAME, ignored); EnablePrivilege(SE_TAKE_OWNERSHIP_NAME, ignored); }
+
+        // **逆序**：先子后父。父先还原会把子键上的临时 ACE 一起带掉，子键就再打不开了。
+        for (auto it = priors.rbegin(); it != priors.rend(); ++it) {
+            HKEY key = nullptr;
+            LSTATUS rc = ::RegOpenKeyExW(static_cast<HKEY>(rootKey), it->first.c_str(), 0,
+                                        READ_CONTROL | WRITE_DAC | WRITE_OWNER, &key);
+            if (rc != ERROR_SUCCESS) {
+                err = L"还原时打不开键（" + it->first + L"），Win32 错误 " + std::to_wstring(rc);
+                return false;
+            }
+            std::wstring applyErr;
+            const SddlApplyResult result = ApplySddlToKey(key, it->second, applyErr);
+            ::RegCloseKey(key);
+            if (result == SddlApplyResult::Failed) {
+                err = L"还原 SDDL 失败（" + it->first + L"）：" + applyErr;
+                return false;
+            }
+        }
+        return true;
+    }
+
 } // namespace ocid

@@ -175,4 +175,48 @@ namespace ocid {
     /// 路径是否存在（计划阶段判"这条要不要落"用；`ApplySddlToPath` 自己不检查）。
     bool PathExists(const std::wstring& path);
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // 键的所有权（离线镜像里写 DriverDatabase 时唯一的进门钥匙）
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // 实测：8061 镜像的 `config\DRIVERS`（就是驱动数据库 hive）里，
+    // `DriverDatabase` 键连**枚举**都拒管理员（Access denied）。这不是权限没配好，
+    // 而是它的 owner/DACL 属于 SYSTEM/TrustedInstaller —— 和 WinSxS 是同一类问题。
+    //
+    // 这时唯一能进门的钥匙是 `SeTakeOwnershipPrivilege`：拿到所有权之后，WRITE_DAC
+    // 自然到手，才能把原来的 DACL 读出来（`priorSddl`）以便**用完还原**。
+    //
+    // 语义：
+    //   · 成功 ⇒ `priorSddl` = 夺权前的 SDDL（读不到时为空串，调用方须当成"无法还原"）；
+    //     键的 owner 变成当前用户，DACL 换成"当前用户 KEY_ALL_ACCESS"的临时 ACL；
+    //   · 失败 ⇒ 什么都没改（读完旧 SDDL 之后才动 DACL，失败点不会留下半改状态）。
+    bool TakeKeyOwnership(void* rootKey, const std::wstring& subKey,
+                          std::wstring& priorSddl, std::wstring& err);
+
+    /// 返回当前进程用户 SID 的字符串形式（`S-1-5-21-…`）。拿不到返回 false。
+    bool CurrentUserSidString(std::wstring& out, std::wstring& err);
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 整棵键树的所有权（DriverDatabase 是**树**，只拿下根键不够）
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // 实测（8061 真机 hive）：拿下 `DriverDatabase` 的 owner+DACL 之后，
+    // 写 `DriverDatabase\DriverPackages\…` 仍然 Access denied —— 子键各有自己的
+    // 受保护 DACL，**继承 ACE 的传播只发生在"创建"时，不会补写已存在的子键**
+    // （把 ACE 设成可继承并重设父键 DACL 也不行，实测无效）。所以只能逐键夺权。
+    //
+    // 语义：
+    //   · `priors` 收集 `(相对路径, 夺权前 SDDL)`，**深度优先、父在前**；
+    //   · 调用方必须用 `RestoreKeyTreeSddl` 按**逆序**还原（先子后父）。
+
+    /// 逐键夺权整棵树（含 `subKey` 自身），把每层夺权前的 SDDL 收进 `priors`。
+    bool TakeKeyTreeOwnership(void* rootKey, const std::wstring& subKey,
+                              std::vector<std::pair<std::wstring, std::wstring>>& priors,
+                              std::wstring& err);
+
+    /// 按逆序把 `priors` 里的 SDDL 逐键还原（owner + DACL + 继承标志）。
+    bool RestoreKeyTreeSddl(void* rootKey,
+                            const std::vector<std::pair<std::wstring, std::wstring>>& priors,
+                            std::wstring& err);
+
 } // namespace ocid

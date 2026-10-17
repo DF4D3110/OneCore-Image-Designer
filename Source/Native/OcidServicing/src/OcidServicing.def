@@ -22,6 +22,10 @@ EXPORTS
     OcidDescribeSddl
     OcidApplyKeySddl
     OcidReadKeySddl
+  OcidTakeKeyOwnership
+OcidTakeKeyTreeOwnership
+OcidRestoreKeyTreeSddl
+  OcidCurrentUserSid
     OcidApplyPathSddl
     OcidReadPathSddl
     OcidPathExists

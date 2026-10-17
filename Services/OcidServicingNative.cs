@@ -1,4 +1,4 @@
-// OCID - 原生服务栈 DLL 的 P/Invoke 门面（OcidServicing.dll）
+﻿// OCID - 原生服务栈 DLL 的 P/Invoke 门面（OcidServicing.dll）
 //
 // ── 为什么要有这一层 ──────────────────────────────────────────────────────
 //
@@ -241,6 +241,34 @@ namespace OneCore_Image_Designer.Services
             [Out] char[]? daclSids, uint daclSidsCap, out uint daclSidsLen, out int daclSidsAvailable,
             [Out] char[]? errBuf, uint errCap);
 
+        /// <summary>
+        /// 拿下键的所有权并把夺权前的 SDDL 交回来（用完由调用方还原）。
+        /// 离线镜像里的 <c>DriverDatabase</c> 属于 SYSTEM/TrustedInstaller，管理员连枚举都被拒，
+        /// 这条路上唯一能进门的钥匙是 SeTakeOwnershipPrivilege。
+        /// </summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int OcidTakeKeyOwnership(
+            IntPtr rootKey, string subKey,
+            [Out] char[]? outPriorSddl, uint outCap, out uint outLen,
+            [Out] char[]? errBuf, uint errCap);
+
+        /// <summary>当前进程用户 SID 文本（诊断用）。</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int OcidCurrentUserSid(
+            [Out] char[]? outBuf, uint outCap, out uint outLen,
+            [Out] char[]? errBuf, uint errCap);
+
+        /// <summary>逐键夺权整棵树（子键各有受保护 DACL，只拿根键不够 —— 实测）。</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int OcidTakeKeyTreeOwnership(
+            IntPtr rootKey, string subKey,
+            [Out] char[]? outText, uint outCap, out uint outLen,
+            [Out] char[]? errBuf, uint errCap);
+
+        /// <summary>按 `相对路径\tSDDL` 文本逆序还原整棵树的 SDDL。</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern int OcidRestoreKeyTreeSddl(
+            IntPtr rootKey, string text, [Out] char[]? errBuf, uint errCap);
         // ── DMI：离线导入驱动包（见原生 include/ocid/DriverPackage.h 的证据链） ──
 
         /// <summary>驱动包目录名：lower("&lt;INF 名&gt;_&lt;架构&gt;_&lt;16 位十六进制&gt;")，哈希按 INF 文件字节算。</summary>
@@ -696,6 +724,120 @@ namespace OneCore_Image_Designer.Services
             }
         }
 
+        /// <summary>
+        /// 拿下键的所有权（管理员 + SeTakeOwnershipPrivilege），返回**夺权前**的 SDDL。
+        /// </summary>
+        /// <remarks>
+        /// 夺权后键上是一条「当前用户 KEY_ALL_ACCESS」的受保护临时 ACL —— 写完之后**必须**
+        /// 用返回的 SDDL 调 <see cref="ApplyKeySddl"/> 还原，否则就是把镜像里的安全边界改掉了。
+        /// 返回的 SDDL 为空串表示夺权前读不到（无法还原），调用方应当把它当失败处理。
+        /// </remarks>
+        public static bool TryTakeKeyOwnership(IntPtr rootKey, string subKey,
+                                               out string priorSddl, out string error)
+        {
+            priorSddl = "";
+            error = "";
+            var err = new char[ErrCap];
+            try
+            {
+                var buf = new char[8 * 1024];
+                int rc = OcidTakeKeyOwnership(rootKey, subKey, buf, (uint)buf.Length,
+                                              out uint len, err, ErrCap);
+                if (rc == (int)Rc.Buffer && len > 0)
+                {
+                    buf = new char[len + 1];
+                    rc = OcidTakeKeyOwnership(rootKey, subKey, buf, (uint)buf.Length, out len, err, ErrCap);
+                }
+                if (rc != (int)Rc.Ok) { error = ErrText(err, rc); return false; }
+                priorSddl = new string(buf, 0, (int)len);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = $"调用原生库失败：{ex.Message}";
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 逐键夺权整棵树（含 <paramref name="subKey"/> 自身），返回每层夺权前的
+        /// `相对路径&lt;TAB&gt;SDDL` 文本（`\r\n` 分隔）。
+        /// </summary>
+        /// <remarks>
+        /// 为什么要树：<c>DriverDatabase</c> 的子键（DriverPackages/…）各有**受保护** DACL，
+        /// 继承 ACE 的传播只发生在创建时，不会补写到已存在的子键（实测把父键 ACE 改成可继承
+        /// 再重设 DACL 也无效）⇒ 只能逐键夺权。用完必须调
+        /// <see cref="TryRestoreKeyTreeSddl"/> 逆序还原。
+        /// </remarks>
+        public static bool TryTakeKeyTreeOwnership(IntPtr rootKey, string subKey,
+                                                  out string priorText, out string error)
+        {
+            priorText = "";
+            error = "";
+            var err = new char[ErrCap];
+            try
+            {
+                // 缓冲区要**循环**扩容：第二次夺权读到的"原 SDDL"其实是上一次留下的临时 ACL，
+                // 里面的 owner 从 SYSTEM 换成了当前用户（SID 文本更长），所以重试一次反而可能更长。
+                var buf = new char[64 * 1024];
+                int rc = (int)Rc.Buffer;
+                uint len = 0;
+                for (int attempt = 0; attempt < 6 && rc == (int)Rc.Buffer; attempt++)
+                {
+                    rc = OcidTakeKeyTreeOwnership(rootKey, subKey, buf, (uint)buf.Length, out len, err, ErrCap);
+                    if (rc == (int)Rc.Buffer)
+                    {
+                        buf = new char[Math.Max(len * 2 + 64, 64 * 1024)];
+                    }
+                }
+                if (rc != (int)Rc.Ok) { error = ErrText(err, rc); return false; }
+                priorText = new string(buf, 0, (int)len);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = $"调用原生库失败：{ex.Message}";
+                return false;
+            }
+        }
+
+        /// <summary>按 <see cref="TryTakeKeyTreeOwnership"/> 交回的文本逆序还原 SDDL。</summary>
+        public static bool TryRestoreKeyTreeSddl(IntPtr rootKey, string priorText, out string error)
+        {
+            error = "";
+            var err = new char[ErrCap];
+            try
+            {
+                int rc = OcidRestoreKeyTreeSddl(rootKey, priorText ?? "", err, ErrCap);
+                if (rc != (int)Rc.Ok) { error = ErrText(err, rc); return false; }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = $"调用原生库失败：{ex.Message}";
+                return false;
+            }
+        }
+        /// <summary>当前进程用户 SID 文本（diagnostics）。</summary>
+        public static bool TryGetCurrentUserSid(out string sid, out string error)
+        {
+            sid = "";
+            error = "";
+            var err = new char[ErrCap];
+            try
+            {
+                var buf = new char[512];
+                int rc = OcidCurrentUserSid(buf, (uint)buf.Length, out uint len, err, ErrCap);
+                if (rc != (int)Rc.Ok) { error = ErrText(err, rc); return false; }
+                sid = new string(buf, 0, (int)len);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = $"调用原生库失败：{ex.Message}";
+                return false;
+            }
+        }
         // ─────────────────────────────────────────────────────────────────────
         // 安全描述符（SDDL）→ 磁盘上的文件/目录（CSI 落位）
         // ─────────────────────────────────────────────────────────────────────

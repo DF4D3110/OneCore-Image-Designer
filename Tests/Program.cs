@@ -1,10 +1,11 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Text.Json;
+using Microsoft.Win32;
 using OneCore_Image_Designer.Models;
 using OneCore_Image_Designer.Services;
 
@@ -27,6 +28,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Ocid CSI copies payload to the store, hardlinks destinations and applies file ACL", () => { OcidCsiFilePlacement(); return Task.CompletedTask; }),
     ("Ocid protected directory write takes ownership then restores the lock", () => { OcidTrustedInstallerAccess(); return Task.CompletedTask; }),
     ("Ocid driver package store id, oemN.inf names and DriverDatabase property names", () => { OcidDriverPackage(); return Task.CompletedTask; })
+    ,("Ocid DriverDatabase ledger writes a hived copy and reads back value-for-value", () => { OcidDriverDatabaseLedger(); return Task.CompletedTask; })
 };
 
 var failures = new List<string>();
@@ -1100,6 +1102,124 @@ static byte[] Bytes(string s)
     return b;
 }
 
+
+// ───────────────────────── DMI：DriverDatabase 落盘（真机回读） ─────────────────────────
+//
+// 验收方式：把真机 hive（Q: 上的 8061 x86 client 的 SYSTEM，之前会话已经挂在 HKLM\OCIDDB）
+// 用 reg save 存一份、用 reg load 挂成 HKLM\OCIDTEST，**先清空**三个驱动库子树，
+// 再用我们算出来的计划文件重新写一遍，最后和真机逐值比对 kind + 数据。
+//
+// 为什么先清空：不清空的话"写"这一步可能是空转，比对仍然全过 —— 那就什么都没证明。
+// 计划文件由原生工具产生（ocid_manifest dmi-ledger），C# 只负责照单写。
+static void OcidDriverDatabaseLedger()
+{
+    const string sourceMount = "OCIDDB";      // 真机 hive（只读用）
+    const string testMount = "OCIDTEST";      // 我们写的副本
+    string ledger = Environment.GetEnvironmentVariable("OCID_LEDGER_JSONL") ?? @"E:\ocid_verify\ledger2.jsonl";
+    string imageSystem = Environment.GetEnvironmentVariable("OCID_IMAGE_SYSTEM")
+        ?? @"Q:\Windows\System32\config\SYSTEM";
+
+    if (!File.Exists(ledger)) { Console.WriteLine($"  [skip] 没有计划文件 {ledger}"); return; }
+    if (!File.Exists(imageSystem)) { Console.WriteLine($"  [skip] 没挂载真机镜像 {imageSystem}"); return; }
+
+    var root = NewTempDirectory();
+    string hived = Path.Combine(root, "system.hiv");
+    try
+    {
+        // 【用哪份 hive 写】镜像里的 `config\DRIVERS` 就是**真正的驱动数据库 hive**：
+        // 它的 `DriverDatabase` 属于 SYSTEM/TrustedInstaller，管理员直接枚举都是 Access denied
+        // （实测）。这正是离线落盘要面对的真实条件 —— 所以测试也走同一条路：
+        // 拷一份 DRIVERS → reg load → 夺所有权 → 写 → 逐值比对 → **还原原 SDDL** → unload。
+        string driversHive = Path.Combine(Path.GetDirectoryName(imageSystem)!, "DRIVERS");
+        True(File.Exists(driversHive), "镜像里没有 config\\DRIVERS");
+        File.Copy(driversHive, hived, overwrite: true);
+
+        RunReg("load", $@"HKLM\{testMount}", hived);
+        try
+        {
+            PrivilegeHelper.EnableServicingPrivileges(m => Console.WriteLine("  " + m));
+
+            using (var testRoot = Registry.LocalMachine.OpenSubKey(testMount, writable: true)
+                       ?? throw new InvalidOperationException($"{testMount} 打不开"))
+            {
+                True(OcidServicingNative.TryGetCurrentUserSid(out string sid, out string sidErr),
+                     $"拿不到当前用户 SID：{sidErr}");
+
+                True(OcidServicingNative.TryTakeKeyTreeOwnership(testRoot.Handle.DangerousGetHandle(), "DriverDatabase",
+                        out string priorText, out string ownErr),
+                    $"逐键夺权失败：{ownErr}（进程需要管理员 + SeTakeOwnershipPrivilege）");
+                int takenKeys = priorText.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
+                True(takenKeys > 1, "应当拿下整棵树，而不是只有根键");
+                Console.WriteLine($"  逐键夺权成功：{takenKeys} 个键，当前用户 {sid}");
+
+                var (rows, keys, values) = DriverDatabaseService.ApplyLedgerJsonl(testRoot, ledger, "DriverDatabase",
+                    m => Console.WriteLine("  " + m));
+                True(rows > 0 && values > 0, "计划文件是空的");
+                Console.WriteLine($"  写入：{rows} 行 / {keys} 键 / {values} 值");
+
+                // 还原原 SDDL（夺权只是**写入窗口**，不是永久改镜像）。
+                True(OcidServicingNative.TryRestoreKeyTreeSddl(testRoot.Handle.DangerousGetHandle(), priorText,
+                        out string restoreErr),
+                    $"还原 SDDL 失败：{restoreErr} —— 镜像的安全边界会被留下改动");
+                Console.WriteLine($"  原 SDDL 已还原（{takenKeys} 个键）");
+            }
+            using var expected = Registry.LocalMachine.OpenSubKey(sourceMount)
+                ?? throw new InvalidOperationException($"{sourceMount} 打不开");
+            using var actual = Registry.LocalMachine.OpenSubKey(testMount)
+                ?? throw new InvalidOperationException($"{testMount} 打不开");
+            // 真机镜像里 575 个商店目录只有 158 个还有台账记录（其余是清理后留下的文件），
+            // 所以拿"真机有记录的"当金标准；`0007`（签名者）来自目录签名验证，不在比对范围。
+            var (compared, mismatch, skipped) = DriverDatabaseService.CompareLedger(expected, actual, ledger,
+                "DriverDatabase", m => Console.Error.WriteLine("  " + m),
+                skipMissingInExpected: true, skipValueNames: new HashSet<string> { "0007" });
+            Console.WriteLine($"  回读比对：{compared} 个值，不一致 {mismatch}，真机无记录跳过 {skipped}");
+            True(compared > 1200, $"比对的值太少（{compared}）—— 计划文件或挂载不对");
+            True(mismatch == 0, $"{mismatch} 个值与真机不一致");
+        }
+        finally
+        {
+            RunReg("unload", $@"HKLM\{testMount}");
+        }
+    }
+    finally
+    {
+        try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch { }
+    }
+}
+
+// 把 SDDL 应用到已打开的键（还原用）。失败打印原因并返回 false。
+static bool OcIdApply(RegistryKey key, string sddl)
+{
+    var outcome = OcIdServicingNativeApply(key, sddl, out string err);
+    if (!outcome) Console.Error.WriteLine($"  [sddl] {err}");
+    return outcome;
+}
+
+static bool OcIdServicingNativeApply(RegistryKey key, string sddl, out string error)
+{
+    var outcome = OneCore_Image_Designer.Services.OcidServicingNative.ApplyKeySddl(
+        key.Handle.DangerousGetHandle(), sddl, out error);
+    return outcome == OneCore_Image_Designer.Services.OcidServicingNative.SddlApplyOutcome.Applied
+           || outcome == OneCore_Image_Designer.Services.OcidServicingNative.SddlApplyOutcome.SkippedInherit;
+}
+static void RunReg(params string[] args)
+{
+    var psi = new System.Diagnostics.ProcessStartInfo("reg.exe")
+    {
+        UseShellExecute = false,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        CreateNoWindow = true,
+    };
+    foreach (var a in args) psi.ArgumentList.Add(a);
+    using var proc = System.Diagnostics.Process.Start(psi)
+        ?? throw new InvalidOperationException("reg.exe 起不来");
+    string stdout = proc.StandardOutput.ReadToEnd();
+    string stderr = proc.StandardError.ReadToEnd();
+    proc.WaitForExit();
+    if (proc.ExitCode != 0)
+        throw new InvalidOperationException($"reg {string.Join(' ', args)} 失败 ({proc.ExitCode}): {stderr}{stdout}");
+}
 static string Hex(byte[] b) => Convert.ToHexString(b);
 
 static string NewTempDirectory()

@@ -1,4 +1,4 @@
-// OCID - 服务栈原生库的 C 导出面（供 C# 通过 P/Invoke 调用）
+﻿// OCID - 服务栈原生库的 C 导出面（供 C# 通过 P/Invoke 调用）
 //
 // ── 为什么要有这个文件 ────────────────────────────────────────────────────
 //
@@ -407,6 +407,128 @@ extern "C" {
         }
     }
 
+    /// 拿下键的所有权（离线镜像里的 DriverDatabase 属于 SYSTEM/TrustedInstaller，
+    /// 管理员连枚举都被拒），并把**夺权前**的 SDDL 交还给调用方以便用完还原。
+    ///
+    /// 返回 0 成功 / 1 参数错 / 4 失败（原因在 errBuf，通常是缺特权或键不存在）。
+    int __cdecl OcidTakeKeyOwnership(void* rootKey, const wchar_t* subKey,
+                                     wchar_t* outPriorSddl, unsigned int outCap, unsigned int* outLen,
+                                     wchar_t* errBuf, unsigned int errCap)
+    {
+        if (outLen) *outLen = 0;
+        if (!rootKey || !subKey) return OCID_ERR_ARGUMENT;
+        try
+        {
+            std::wstring prior, err;
+            if (!TakeKeyOwnership(rootKey, W(subKey), prior, err))
+            {
+                SetErr(errBuf, errCap, err);
+                return OCID_ERR_BAD_VALUE;
+            }
+            return CopyOutStr(prior, outPriorSddl, outCap, outLen);
+        }
+        catch (...)
+        {
+            SetErr(errBuf, errCap, L"获取键所有权时发生未预期异常");
+            return OCID_ERR_INTERNAL;
+        }
+    }
+
+    /// 当前进程用户 SID 文本（`S-1-5-21-…`）。诊断/日志用。
+    int __cdecl OcidCurrentUserSid(wchar_t* outBuf, unsigned int outCap, unsigned int* outLen,
+                                   wchar_t* errBuf, unsigned int errCap)
+    {
+        if (outLen) *outLen = 0;
+        try
+        {
+            std::wstring sid, err;
+            if (!CurrentUserSidString(sid, err))
+            {
+                SetErr(errBuf, errCap, err);
+                return OCID_ERR_BAD_VALUE;
+            }
+            return CopyOutStr(sid, outBuf, outCap, outLen);
+        }
+        catch (...)
+        {
+            SetErr(errBuf, errCap, L"读取当前用户 SID 时发生未预期异常");
+            return OCID_ERR_INTERNAL;
+        }
+    }
+    /// 逐键夺权整棵树（DriverDatabase 的子键各有受保护 DACL，继承 ACE 不会补写到
+    /// 已存在的子键上 —— 实测无效），并把每层夺权前的 SDDL 以
+    /// `相对路径<TAB>SDDL` 文本（`\r\n` 分隔）交回，供 `OcidRestoreKeyTreeSddl` 逆序还原。
+    ///
+    /// 返回 0 成功 / 2 缓冲区不足（按 outLen 扩容重来）/ 4 失败 / 6 内部异常。
+    int __cdecl OcidTakeKeyTreeOwnership(void* rootKey, const wchar_t* subKey,
+                                         wchar_t* outText, unsigned int outCap, unsigned int* outLen,
+                                         wchar_t* errBuf, unsigned int errCap)
+    {
+        if (outLen) *outLen = 0;
+        if (!rootKey || !subKey) return OCID_ERR_ARGUMENT;
+        try
+        {
+            std::vector<std::pair<std::wstring, std::wstring>> priors;
+            std::wstring err;
+            if (!TakeKeyTreeOwnership(rootKey, W(subKey), priors, err))
+            {
+                SetErr(errBuf, errCap, err);
+                return OCID_ERR_BAD_VALUE;
+            }
+
+            std::wstring text;
+            for (const auto& entry : priors)
+            {
+                text += entry.first;
+                text.push_back(L'\t');
+                text += entry.second;
+                text += L"\r\n";
+            }
+            return CopyOutStr(text, outText, outCap, outLen);
+        }
+        catch (...)
+        {
+            SetErr(errBuf, errCap, L"逐键夺权时发生未预期异常");
+            return OCID_ERR_INTERNAL;
+        }
+    }
+
+    /// 按 `相对路径<TAB>SDDL` 文本把整棵树的 SDDL 逆序还原（先子后父）。
+    ///
+    /// 返回 0 成功 / 1 参数错 / 4 失败 / 6 内部异常。
+    int __cdecl OcidRestoreKeyTreeSddl(void* rootKey, const wchar_t* text,
+                                       wchar_t* errBuf, unsigned int errCap)
+    {
+        if (!rootKey || !text) return OCID_ERR_ARGUMENT;
+        try
+        {
+            std::vector<std::pair<std::wstring, std::wstring>> priors;
+            std::wstring remaining(text);
+            while (!remaining.empty())
+            {
+                const std::size_t eol = remaining.find(L"\r\n");
+                std::wstring line = (eol == std::wstring::npos) ? remaining : remaining.substr(0, eol);
+                remaining = (eol == std::wstring::npos) ? std::wstring() : remaining.substr(eol + 2);
+                if (line.empty()) continue;
+                const std::size_t tab = line.find(L'\t');
+                if (tab == std::wstring::npos) continue;
+                priors.emplace_back(line.substr(0, tab), line.substr(tab + 1));
+            }
+
+            std::wstring err;
+            if (!RestoreKeyTreeSddl(rootKey, priors, err))
+            {
+                SetErr(errBuf, errCap, err);
+                return OCID_ERR_BAD_VALUE;
+            }
+            return OCID_OK;
+        }
+        catch (...)
+        {
+            SetErr(errBuf, errCap, L"还原键树 SDDL 时发生未预期异常");
+            return OCID_ERR_INTERNAL;
+        }
+    }
     /// SDDL 的文本级解读（段存在性 / ACE 计数 / 需设置的 SECURITY_INFORMATION 位）。
     /// 供上层在落盘前决策与告警，不碰注册表。
     ///
