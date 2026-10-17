@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -30,6 +30,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Ocid driver package store id, oemN.inf names and DriverDatabase property names", () => { OcidDriverPackage(); return Task.CompletedTask; })
     ,("Ocid DriverDatabase ledger writes a hived copy and reads back value-for-value", () => { OcidDriverDatabaseLedger(); return Task.CompletedTask; })
     ,("Ocid driver store lands package files and publishes the INF", () => { OcidDriverStoreLanding(); return Task.CompletedTask; })
+    ,("Ocid DMI import lands files, publishes oemN.inf and writes the database in one pass", () => { OcidDmiImport(); return Task.CompletedTask; })
 };
 
 var failures = new List<string>();
@@ -1235,6 +1236,92 @@ static void OcidDriverDatabaseLedger()
         finally
         {
             RunReg("unload", $@"HKLM\{testMount}");
+        }
+    }
+    finally
+    {
+        try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch { }
+    }
+}
+
+// 端到端：一次 Import 把"分 oemN.inf 名、铺文件、发布 INF、写库、位图"全做完，
+// 然后逐样回读。第三方包（inbox=false）走 oemN.inf 分配，这是收件箱路径没覆盖的分支。
+static void OcidDmiImport()
+{
+    string repository = @"Q:\Windows\System32\DriverStore\FileRepository";
+    string driversHive = @"Q:\Windows\System32\config\DRIVERS";
+    if (!Directory.Exists(repository) || !File.Exists(driversHive))
+    {
+        Console.WriteLine("  [skip] 没有真机镜像（Q:）");
+        return;
+    }
+
+    string root = NewTempDirectory();
+    string hive = Path.Combine(root, "drivers.hiv");
+    try
+    {
+        string image = Path.Combine(root, "image");
+        Directory.CreateDirectory(image);
+        Directory.CreateDirectory(Path.Combine(image, "Windows", "INF"));
+
+        var candidate = Directory.GetDirectories(repository)
+            .Select(d => (Dir: d, Files: Directory.GetFiles(d)))
+            .Where(x => x.Files.Length is >= 2 and <= 4)
+            .Where(x => x.Files.Count(f => f.EndsWith(".inf", StringComparison.OrdinalIgnoreCase)) == 1)
+            .OrderBy(x => x.Files.Length)
+            .First();
+        string storeId = Path.GetFileName(candidate.Dir);
+        string infName = Path.GetFileName(candidate.Files.First(f => f.EndsWith(".inf", StringComparison.OrdinalIgnoreCase)));
+        var fileNames = candidate.Files.Select(Path.GetFileName).ToList();
+
+        // 计划文件：包记录 + 真机记录里那 3 个必须的 INF 值，够验证"写库确实发生了"。
+        string ledger = Path.Combine(root, "one.jsonl");
+        File.WriteAllLines(ledger, new[]
+        {
+            "{\"keys\":[{\"path\":\"DriverPackages\\\\" + storeId.Replace("\\", "\\\\") +
+            "\",\"values\":[{\"name\":\"0002\",\"type\":\"sz\",\"text\":\"" + infName + "\"}," +
+            "{\"name\":\"0005\",\"type\":\"dword\",\"dword\":1}," +
+            "{\"name\":\"000a\",\"type\":\"dword\",\"dword\":0}]}]}"
+        });
+
+        File.Copy(driversHive, hive, overwrite: true);
+        RunReg("load", @"HKLM\OCIDIMP", hive);
+        try
+        {
+            PrivilegeHelper.EnableServicingPrivileges(m => Console.WriteLine("  " + m));
+            using var hiveRoot = Registry.LocalMachine.OpenSubKey("OCIDIMP", writable: true)
+                ?? throw new InvalidOperationException("OCIDIMP 打不开");
+
+            // DriverDatabase 属于 SYSTEM/TrustedInstaller：先夺所有权再写（真机同样条件）。
+            using (var probe = Registry.LocalMachine.OpenSubKey("OCIDIMP", writable: true)!)
+            {
+                True(OcidServicingNative.TryTakeKeyTreeOwnership(probe.Handle.DangerousGetHandle(),
+                        "DriverDatabase", out _, out string ownErr), $"夺所有权失败：{ownErr}");
+            }
+
+            var result = DmiImportService.Import(image, hiveRoot, storeId, infName, candidate.Dir, fileNames,
+                inbox: false, architecture: 0, ledger, m => Console.WriteLine("  " + m));
+
+            True(result.PublishedInfName.StartsWith("oem", StringComparison.OrdinalIgnoreCase) &&
+                 result.PublishedInfName.EndsWith(".inf", StringComparison.OrdinalIgnoreCase),
+                $"第三方包应当发布成 oemN.inf，实际 {result.PublishedInfName}");
+            True(result.BitmapChanged, "分配 oemN.inf 应当改动位图");
+            True(result.Landed.Count == fileNames.Count, $"落盘文件数不符：{result.Landed.Count} vs {fileNames.Count}");
+            True(File.Exists(Path.Combine(image, "Windows", "INF", result.PublishedInfName)),
+                "发布后的 oemN.inf 不在 Windows\\INF 下");
+
+            using var storeKey = DriverDatabaseService.EnsureKey(hiveRoot, "DriverDatabase");
+            var bitmap = storeKey.GetValue("0004") as byte[];
+            True(bitmap is { Length: DmiImportService.OemBitmapSize }, "根键 0004 位图没写成 4099 字节");
+            True(storeKey.GetValue("0003") is int, "根键 0003 架构值没写");
+            using var package = storeKey.OpenSubKey("DriverPackages\\" + storeId)
+                ?? throw new InvalidOperationException("包记录没写进库");
+            Equal(infName, package.GetValue("0002") as string);
+            Console.WriteLine($"  {storeId} → {result.PublishedInfName}，{result.Landed.Count} 个文件，{result.Values} 个值");
+        }
+        finally
+        {
+            RunReg("unload", @"HKLM\OCIDIMP");
         }
     }
     finally
