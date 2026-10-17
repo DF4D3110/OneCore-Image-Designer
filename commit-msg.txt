@@ -1,8 +1,0 @@
-SMI 键 ACL 回读也改比 SID 集合（与 CSI 共用同一个判据）
-
-- SidsCompatible 从 CsiFileService 的私有实现提到 OcidServicingNative，成为
-  SMI 键路径与 CSI 文件路径**同一个**判据：声明里的 SID 回读必须都有；声明是受保护
-  DACL 时还必须一个不多；ACE 条数只要求"不少于"（系统会把"仅继承"ACE 拆成两条）。
-- 键路径原来只比 P 标志 + 条数，漏得掉"身份写错但条数正好对"这种错。
-- 不一致日志补上原因行（原来 note 为空，看不出为什么判不一致）。
-- 验证：C# 离线回归 16/16；真实镜像 --smi P:\ --apply 4/4 写入、ACL 回读一致 1/1、PASS。
