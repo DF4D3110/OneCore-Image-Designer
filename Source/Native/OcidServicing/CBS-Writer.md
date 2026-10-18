@@ -188,6 +188,8 @@ pwsh -NoProfile -File .\assemble-cbs-store.ps1 `
 #    -SkeletonFamilies —— 该开关只给 8419 那种旧桶已被裁剪、只剩骨架的镜像。
 
 # 8419 ARM（单桶 6.2.8419.0，首会话/旧桶都已裁剪）：骨架家庭 + 根区开关 + 覆盖表
+#   （同样可以全自动：先 Extract-CbsInputs，再 -RootInfo；-RootMinimal/-Ccpinterface/
+#     -InstallersShortcut 由 root_info.json 自动带出）
 pwsh -NoProfile -File .\assemble-cbs-store.ps1 `
     -ImageRoot 'E:\ocid_verify\mnt8419\' -Arch arm `
     -StackVersion '6.2.8419.0 (winmain.120521-1835)' `
