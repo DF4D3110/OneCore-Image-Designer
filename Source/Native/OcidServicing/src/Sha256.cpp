@@ -107,10 +107,14 @@ std::vector<std::uint8_t> Sha256(const std::vector<std::uint8_t>& data)
 
 std::string Sha256Hex(const std::vector<std::uint8_t>& data)
 {
+    // 注意：这里先把**整份数据**做 SHA-256，再把 32 字节摘要写成小写十六进制。
+    // 曾经写成“把输入字节直接 hex 出来”（少了哈希），导致部署计划的
+    // Catalogs 键变成整份 .cat 的十六进制（1.1 GB 的输出文件）——别退回那个写法。
     static const char* digits = "0123456789abcdef";
+    const std::vector<std::uint8_t> digest = Sha256(data);
     std::string out;
-    out.reserve(data.size() * 2);
-    for (std::uint8_t b : data)
+    out.reserve(digest.size() * 2);
+    for (std::uint8_t b : digest)
     {
         out.push_back(digits[b >> 4]);
         out.push_back(digits[b & 0x0F]);

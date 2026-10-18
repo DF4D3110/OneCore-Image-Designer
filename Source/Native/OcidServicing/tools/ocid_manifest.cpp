@@ -23,6 +23,7 @@
 #include "ocid/RegistryValue.h"
 #include "ocid/Sha256.h"
 #include "ocid/WcmSchema.h"
+#include "../src/detail/XmlPull.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -1682,6 +1683,9 @@ static void Usage()
     OutLn("  ocid_manifest cbs-scan HKLM\\OCIDCOMP [--limit N]   decode+re-encode every store record");
     OutLn("  ocid_manifest cbs-keys <csvFile> [--names component|deployment]   check pseudo-key suffix / full key name");
     OutLn("  ocid_manifest cbs-dump HKLM\\OCIDCOMP <outFile>   canonical (sorted) dump of the whole store");
+    OutLn("  ocid_manifest cbs-plan-components <manifestDir> <outFile> [--staged <winSxsDir>] [--limit N]");
+    OutLn("  ocid_manifest cbs-plan-deployments <packagesDir> <manifestDir> <outFile> [--markers <csv>]");
+    OutLn("      --markers: key|appid|thumb|markers（真机导出的安装/启用状态，决定 p!/s!/i!）");
     OutLn("  ocid_manifest cbs-diff <a.txt> <b.txt> [--limit N]   compare two cbs-dump files");
     OutLn("");
     OutLn("Data goes to stdout, diagnostics to stderr.");
@@ -2116,6 +2120,469 @@ static int CmdCbsPlanComponents(const std::wstring& manifestDir,
 #endif
 }
 
+// 一个部署键的"计划"：同一个部署键可能被多个包声明，所以先收集再输出。
+struct DeploymentPlan
+{
+    std::string appId;             // store 里组件的 identity 文本（真机 appid 就取这个）
+    bool driver = false;           // appid 含 ", Type=driverUpdate" ⇒ 不写 catalog
+    std::string chosenCatalog;     // CatalogThumbprint：已安装候选里"最后声明"的那个
+    std::string fallbackCatalog;   // 没有已安装候选时退回的 .cat SHA-256
+    std::set<std::string> installedCatalogs;  // 所有已安装候选的 .cat（每个都写标记）
+    std::set<std::string> payloads;  // 已安装包声明的 `<包身份>.<update 名>`
+};
+
+// ── cbs-plan-deployments：从包清单（.mum）生成 CanonicalData 计划 ────────────
+//
+// 真机 2,283 条部署记录的来源（实测 2,278/2,283，差的 5 条是 servicing stack 那批
+// 名字大小写特殊的部署，图像里没有任何 .mum 声明它们）：
+//   * `Windows\servicing\Packages\*.mum` 的每个 `<update>` 声明它安装哪些组件
+//     （`<component><assemblyIdentity …/>` 或 `<driver><assemblyIdentity type="driverUpdate" …/>`）；
+//   * 组件必须真的在 store 里（有清单）——按身份（名字/版本/token/架构/文化）匹配；
+//   * 部署 identity 用 **store 里那份文本**（不是 .mum 里的写法），所以
+//     `…-Base-Deployment` 会落成台账里的 `…-base-Deployment`；
+//   * payload 身份 = `<包身份>.<update 名>`，包身份的 culture 段 neutral 时写空；
+//   * 值：`appid`（裸 ASCII）、`CatalogThumbprint`（同包 `.cat` 的 SHA-256，REG_SZ 文本）、
+//     `p!/s!/i!`（8 字节长度前缀 + ASCII payload）。`s!/i!` 是安装/启用状态，
+//     由 `--markers` 输入（真机导出的 `key|appid|thumb|markers` 四列 CSV）。
+static std::string MumAttr(const detail::XmlNode& node, const wchar_t* name)
+{
+    const std::wstring* value = node.FindAttr(name);
+    return value ? ToUtf8(*value) : std::string();
+}
+
+// .mum 的 <assemblyIdentity> → 与清单同口径的 identity 文本。
+static std::string MumIdentityText(const detail::XmlNode& identity)
+{
+    std::string out = MumAttr(identity, L"name");
+    auto add = [&out](const char* key, const std::string& value) {
+        out += ", ";
+        out += key;
+        out += "=";
+        out += value;
+    };
+    std::string language = MumAttr(identity, L"language");
+    if (language.empty() || language == "*")
+        language = "neutral";
+    else
+    {
+        const bool english = language.size() >= 3 &&
+                             (language[0] == 'e' || language[0] == 'E') &&
+                             (language[1] == 'n' || language[1] == 'N') && language[2] == '-';
+        if (!english)
+            for (char& c : language)
+                if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    add("Culture", language);
+    const std::string type = MumAttr(identity, L"type");
+    if (!type.empty()) add("Type", type);
+    add("Version", MumAttr(identity, L"version"));
+    const std::string token = MumAttr(identity, L"publicKeyToken");
+    if (!token.empty()) add("PublicKeyToken", token);
+    const std::string architecture = MumAttr(identity, L"processorArchitecture");
+    if (!architecture.empty()) add("ProcessorArchitecture", architecture);
+    std::string scope = MumAttr(identity, L"versionScope");
+    if (!scope.empty())
+    {
+        std::string lower = scope;
+        for (char& c : lower)
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        add("versionScope", lower == "nonsxs" ? "NonSxS" : scope);
+    }
+    return out;
+}
+
+static void CollectXmlByLocalName(const detail::XmlNode& node,
+                                  const std::wstring& local,
+                                  std::vector<const detail::XmlNode*>& out)
+{
+    detail::CollectByLocalName(node, local.c_str(), out);
+}
+
+static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
+                                 const std::wstring& manifestDir,
+                                 const std::wstring& markersPath,
+                                 const std::wstring& installedPath,
+                                 const std::wstring& outPath)
+{
+#ifdef _WIN32
+    long long manifests = 0, badManifest = 0;
+    std::map<std::string, std::string> store;
+    {
+        WIN32_FIND_DATAW found{};
+        const std::wstring pattern = manifestDir + L"\\*.manifest";
+        HANDLE find = FindFirstFileW(pattern.c_str(), &found);
+        if (find == INVALID_HANDLE_VALUE)
+        {
+            Err("清单目录里没有 .manifest：" + ToUtf8(manifestDir));
+            return 2;
+        }
+        do
+        {
+            if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+            std::wstring text, readErr;
+            if (!ReadFileUtf8(manifestDir + L"\\" + found.cFileName, text, readErr))
+            {
+                ++badManifest;
+                continue;
+            }
+            ComponentManifest manifest;
+            if (!ParseComponentManifest(text, manifest).ok)
+            {
+                ++badManifest;
+                continue;
+            }
+            const std::string identityText = IdentityTextFromManifest(manifest.identity);
+            CbsIdentity identity;
+            std::string parseErr;
+            if (!CbsParseIdentity(identityText, identity, parseErr))
+            {
+                ++badManifest;
+                continue;
+            }
+            store[CbsComponentKeyName(identity)] = identityText;
+            ++manifests;
+        } while (FindNextFileW(find, &found) != 0);
+        FindClose(find);
+    }
+
+    // 安装/启用状态（真机导出：key|appid|thumb|markers；markers 含 p/s/i 字母）
+    std::map<std::string, std::string> markers;
+    if (!markersPath.empty())
+    {
+        std::wstring raw, readErr;
+        if (!ReadFileUtf8(markersPath, raw, readErr))
+        {
+            Err(ToUtf8(readErr));
+            return 1;
+        }
+        const std::string text = ToUtf8(raw);
+        std::size_t pos = 0;
+        bool first = true;
+        while (pos < text.size())
+        {
+            std::size_t end = text.find('\n', pos);
+            if (end == std::string::npos) end = text.size();
+            std::string line = text.substr(pos, end - pos);
+            pos = end + 1;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (first) { first = false; if (line.rfind("key|", 0) == 0) continue; }
+            std::vector<std::string> fields;
+            std::size_t start = 0;
+            while (start <= line.size())
+            {
+                std::size_t bar = line.find('|', start);
+                if (bar == std::string::npos)
+                {
+                    fields.push_back(line.substr(start));
+                    break;
+                }
+                fields.push_back(line.substr(start, bar - start));
+                start = bar + 1;
+            }
+            if (fields.size() >= 4) markers[fields[1]] = fields[3];
+        }
+    }
+
+    // 已安装包过滤（可选）：真机 SOFTWARE hive 的
+    // `Microsoft\Windows\CurrentVersion\Component Based Servicing\Packages\<包键>` 的
+    // `CurrentState`，bit 0x40 = 已安装。只有已安装包的 update 会留下部署记录——
+    // 不过滤的话，像 MSMQ 的 home-basic/home-premium 这类"未安装的派生包"会往同一个
+    // 部署记录里多写一整套 p!/s!/i!（真机只有已安装那个包的那套）。
+    std::set<std::string> installedPackages;
+    if (!installedPath.empty())
+    {
+        std::wstring raw, readErr;
+        if (!ReadFileUtf8(installedPath, raw, readErr))
+        {
+            Err(ToUtf8(readErr));
+            return 1;
+        }
+        const std::string text = ToUtf8(raw);
+        std::size_t pos = 0;
+        while (pos < text.size())
+        {
+            std::size_t end = text.find('\n', pos);
+            if (end == std::string::npos) end = text.size();
+            std::string line = text.substr(pos, end - pos);
+            pos = end + 1;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const std::size_t bar = line.find('|');
+            const std::string key = line.substr(0, bar);
+            bool installed = true;
+            if (bar != std::string::npos)
+            {
+                const std::string stateText = line.substr(bar + 1);
+                char* stop = nullptr;
+                const unsigned long long state =
+                    std::strtoull(stateText.c_str(), &stop, 0);
+                installed = stop != stateText.c_str() && (state & 0x40ULL) != 0;
+            }
+            if (installed) installedPackages.insert(key);
+        }
+        if (installedPackages.empty())
+        {
+            Err("--installed 里没有任何已安装包（CurrentState bit 0x40）");
+            return 1;
+        }
+    }
+
+    std::set<std::string> lines;
+    lines.insert("K\tCanonicalData");
+    lines.insert("K\tCanonicalData\\Catalogs");
+    lines.insert("K\tCanonicalData\\Deployments");
+
+    long long packages = 0, updates = 0, declared = 0, resolved = 0, payloads = 0, noCat = 0;
+    long long deployments = 0;
+    std::set<std::string> deploymentKeys;
+    std::map<std::string, DeploymentPlan> plan;
+    std::wstring currentMum;
+
+    WIN32_FIND_DATAW found{};
+    FILE* candidateLog = nullptr;
+    {
+        wchar_t debugPath[512] = {};
+        if (GetEnvironmentVariableW(L"OCID_PLAN_CANDIDATES", debugPath, 512) > 0)
+            _wfopen_s(&candidateLog, debugPath, L"wb");
+    }
+    HANDLE find = FindFirstFileW((packagesDir + L"\\*.mum").c_str(), &found);
+    if (find == INVALID_HANDLE_VALUE)
+    {
+        Err("包目录里没有 .mum：" + ToUtf8(packagesDir));
+        return 2;
+    }
+    try
+    {
+    do
+    {
+        if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+        ++packages;
+        const std::wstring mumPath = packagesDir + L"\\" + found.cFileName;
+        currentMum = found.cFileName;
+        std::wstring xml, readErr;
+        if (!ReadFileUtf8(mumPath, xml, readErr)) continue;
+
+        detail::XmlParser parser(xml);
+        detail::XmlNode root;
+        if (!parser.ParseDocument(root)) continue;
+
+        std::vector<const detail::XmlNode*> identities;
+        CollectXmlByLocalName(root, L"assemblyIdentity", identities);
+        if (identities.empty()) continue;
+        const detail::XmlNode& packageIdentity = *identities.front();
+
+        std::string packageId = MumAttr(packageIdentity, L"name");
+        packageId += "~";
+        packageId += MumAttr(packageIdentity, L"publicKeyToken");
+        packageId += "~";
+        packageId += MumAttr(packageIdentity, L"processorArchitecture");
+        packageId += "~";
+        {
+            std::string language = MumAttr(packageIdentity, L"language");
+            if (language == "neutral" || language == "*") language.clear();
+            packageId += language;
+        }
+        packageId += "~";
+        packageId += MumAttr(packageIdentity, L"version");
+        // 注意：不在这里跳过"未安装包"——它们的部署记录（appid / CatalogThumbprint）
+        // 在真机台账里照样存在（864 个包对应 2,283 条部署，远多于 502 个已安装包）；
+        // "已安装"只用于决定 payload 与 catalog 优先取哪一套。
+
+        // 同包同名 .cat 的 SHA-256（CatalogThumbprint / Catalogs 键）
+        std::string catalogHex;
+        {
+            std::wstring stem = mumPath;
+            const std::wstring suffix = L".mum";
+            if (stem.size() > suffix.size() &&
+                _wcsicmp(stem.c_str() + stem.size() - suffix.size(), suffix.c_str()) == 0)
+                stem.resize(stem.size() - suffix.size());
+            std::vector<std::uint8_t> catBytes;
+            std::wstring catErr;
+            if (ReadFileBytes(stem + L".cat", catBytes, catErr))
+                catalogHex = Sha256Hex(catBytes);
+        }
+        if (catalogHex.empty()) ++noCat;
+
+        std::vector<const detail::XmlNode*> updateNodes;
+        CollectXmlByLocalName(root, L"update", updateNodes);
+        for (const detail::XmlNode* update : updateNodes)
+        {
+            ++updates;
+            const std::string updateName = MumAttr(*update, L"name");
+            if (updateName.empty()) continue;
+
+            std::vector<const detail::XmlNode*> declaredNodes;
+            CollectXmlByLocalName(*update, L"component", declaredNodes);
+            CollectXmlByLocalName(*update, L"driver", declaredNodes);
+
+            for (const detail::XmlNode* node : declaredNodes)
+            {
+                std::vector<const detail::XmlNode*> ids;
+                CollectXmlByLocalName(*node, L"assemblyIdentity", ids);
+                if (ids.empty()) continue;
+                ++declared;
+                const std::string declaredText = MumIdentityText(*ids.front());
+
+                CbsIdentity declaredIdentity;
+                std::string parseErr;
+                if (!CbsParseIdentity(declaredText, declaredIdentity, parseErr)) continue;
+                const std::string componentKey = CbsComponentKeyName(declaredIdentity);
+                const auto stored = store.find(componentKey);
+                if (stored == store.end()) continue;
+                ++resolved;
+
+                CbsIdentity storeIdentity;
+                if (!CbsParseIdentity(stored->second, storeIdentity, parseErr)) continue;
+                const std::string deploymentKey = CbsDeploymentKeyName(storeIdentity);
+                deploymentKeys.insert(deploymentKey);
+                const bool packageInstalled = installedPackages.empty() ||
+                                              installedPackages.count(packageId) != 0;
+                DeploymentPlan& planned = plan[deploymentKey];
+                planned.appId = stored->second;
+                planned.driver = stored->second.find(", Type=driverUpdate") != std::string::npos;
+                if (!catalogHex.empty())
+                {
+                    // 同一个部署键可能被多个包声明（MSMQ 的 home-basic/home-premium/主体
+                    // 三个包都声明同一个 -Deployment 组件）。真机规则（实测）：
+                    //   * `CatalogThumbprint` 只写一个 = **已安装候选里最后声明的那个**
+                    //     （.mum 按文件名升序处理，覆盖写；MSMQ 选中 ~x86~~ 的中性包、
+                    //     Client-Features 那条选中 NetFx-VCRedist，都是"名字更大"的）；
+                    //   * `Catalogs\<sha>` 标记给**每个已安装候选**都写一份
+                    //     （Client-Features 那条部署同时挂 2 个 catalog 标记）；
+                    //   * 没有已安装候选时退回最后一个见到的候选。
+                    if (packageInstalled)
+                    {
+                        planned.chosenCatalog = catalogHex;
+                        planned.installedCatalogs.insert(catalogHex);
+                    }
+                    planned.fallbackCatalog = catalogHex;
+                }
+                if (packageInstalled)
+                {
+                    // payload 身份 = `<包身份>.<update 名>`；只有已安装包的那套写进台账。
+                    planned.payloads.insert(packageId + "." + updateName);
+                }
+                if (candidateLog != nullptr)
+                {
+                    // 诊断用：每次"某包声明了某部署"都留一行，便于反推 catalog 选择规则。
+                    std::fprintf(candidateLog, "%s|%s|%d|%s|%s\n",
+                                 deploymentKey.c_str(), packageId.c_str(),
+                                 packageInstalled ? 1 : 0, catalogHex.c_str(),
+                                 updateName.c_str());
+                }
+            }
+        }
+    } while (FindNextFileW(find, &found) != 0);
+    FindClose(find);
+    if (candidateLog != nullptr) std::fclose(candidateLog);
+
+    for (const auto& entry : plan)
+    {
+        const std::string& deploymentKey = entry.first;
+        const DeploymentPlan& planned = entry.second;
+        const std::string deploymentPath = "CanonicalData\\Deployments\\" + deploymentKey;
+        lines.insert("K\t" + deploymentPath);
+
+        std::string appIdHex;
+        {
+            const std::vector<std::uint8_t> bytes = CbsEncodeAsciiText(planned.appId);
+            HexAppend(bytes, appIdHex);
+        }
+        lines.insert("V\t" + deploymentPath + "\tappid\t3\t" + appIdHex);
+        ++deployments;
+
+        // 驱动部署（Type=driverUpdate）不写 CatalogThumbprint / Catalogs 标记：
+        // 真机 574 个驱动部署全部没有这两个东西（1,703 个带 thumbprint 的部署
+        // 由 1,330 个语言包 + 357 个功能部署 + 16 个其它组成，一个驱动都没有）。
+        const std::string catalogHex = !planned.chosenCatalog.empty()
+                                           ? planned.chosenCatalog
+                                           : planned.fallbackCatalog;
+        if (!catalogHex.empty() && !planned.driver)
+        {
+            const std::wstring catalogText = FromUtf8OrAnsi(catalogHex.c_str());
+            lines.insert("V\t" + deploymentPath + "\tCatalogThumbprint\t1\t" +
+                         Utf16LeHex(catalogText));
+        }
+        if (!planned.driver)
+        {
+            if (planned.installedCatalogs.empty())
+            {
+                if (!catalogHex.empty())
+                {
+                    const std::string catalogPath = "CanonicalData\\Catalogs\\" + catalogHex;
+                    lines.insert("K\t" + catalogPath);
+                    lines.insert("V\t" + catalogPath + "\t" + CbsMarkValueName(deploymentKey) +
+                                 "\t3\t");
+                }
+            }
+            else
+            {
+                for (const std::string& catalog : planned.installedCatalogs)
+                {
+                    const std::string catalogPath = "CanonicalData\\Catalogs\\" + catalog;
+                    lines.insert("K\t" + catalogPath);
+                    lines.insert("V\t" + catalogPath + "\t" + CbsMarkValueName(deploymentKey) +
+                                 "\t3\t");
+                }
+            }
+        }
+
+        const auto markerIt = markers.find(planned.appId);
+        // 有 --markers 时以它为准（没记录 = 该部署没有 p!/s!/i!）；
+        // 没给 markers 时退化成"只写 p!"，方便看结构。
+        const std::string markerList =
+            markerIt != markers.end()
+                ? markerIt->second
+                : (markersPath.empty() ? std::string("p") : std::string());
+        if (markerList.empty()) continue;
+        for (const std::string& payloadText : planned.payloads)
+        {
+            std::string payloadHex;
+            const std::vector<std::uint8_t> bytes = CbsEncodeLengthPrefixedAscii(payloadText);
+            HexAppend(bytes, payloadHex);
+            for (const char prefix : std::string("psi"))
+            {
+                if (markerList.find(prefix) == std::string::npos) continue;
+                const std::string valueName =
+                    CbsPayloadValueName(std::string(1, prefix) + "!", payloadText);
+                lines.insert("V\t" + deploymentPath + "\t" + valueName + "\t3\t" + payloadHex);
+                ++payloads;
+            }
+        }
+    }
+    FindClose(find);
+    }
+    catch (const std::exception& e)
+    {
+        Err("处理 " + ToUtf8(currentMum) + " 时抛出异常：" + e.what());
+        return 3;
+    }
+
+    {
+        FILE* out = _wfopen(outPath.c_str(), L"wb");
+        if (!out) { Err("写不了文件：" + ToUtf8(outPath)); return 1; }
+        for (const std::string& line : lines)
+        {
+            std::fwrite(line.data(), 1, line.size(), out);
+            std::fputc('\n', out);
+        }
+        std::fclose(out);
+    }
+
+    OutLn("manifests=" + std::to_string(manifests) + " badManifest=" + std::to_string(badManifest) +
+          " mums=" + std::to_string(packages) + " updates=" + std::to_string(updates) +
+          " declared=" + std::to_string(declared) + " resolved=" + std::to_string(resolved) +
+          " deployments=" + std::to_string(deploymentKeys.size()) +
+          " payloadValues=" + std::to_string(payloads) +
+          " withoutCat=" + std::to_string(noCat) +
+          " markerAppIds=" + std::to_string(markers.size()));
+    return 0;
+#else
+    (void)packagesDir; (void)manifestDir; (void)markersPath; (void)outPath;
+    return 2;
+#endif
+}
+
 int main(int argc, char** argv)
 {
     SetupConsole();
@@ -2253,6 +2720,20 @@ int main(int argc, char** argv)
         return CmdCbsPlanComponents(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]), winSxs, mx);
     }
 
+    // cbs-plan-deployments <packagesDir> <manifestDir> <outFile> [--markers <csv>] [--installed <csv>]
+    if (cmd == L"cbs-plan-deployments" && argc >= 5) {
+        std::wstring markersPath, installedPath;
+        for (int i = 5; i < argc; ++i) {
+            if (std::string(argv[i]) == "--markers" && i + 1 < argc) {
+                markersPath = FromUtf8OrAnsi(argv[++i]);
+            } else if (std::string(argv[i]) == "--installed" && i + 1 < argc) {
+                installedPath = FromUtf8OrAnsi(argv[++i]);
+            }
+        }
+        return CmdCbsPlanDeployments(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]),
+                                     markersPath, installedPath, FromUtf8OrAnsi(argv[4]));
+    }
+
     if (cmd == L"cbs-diff" && argc >= 4) {
         int mx = 0;
         for (int i = 4; i < argc; ++i) {
@@ -2280,6 +2761,11 @@ int main(int argc, char** argv)
     Usage();
     return 1;
 }
+
+
+
+
+
 
 
 

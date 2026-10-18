@@ -21,10 +21,11 @@ std::vector<std::uint8_t> Sha256(const std::vector<std::uint8_t>& data);
 // 同上的便捷重载（对内存块）。
 std::vector<std::uint8_t> Sha256(const void* data, std::size_t size);
 
-// 小写十六进制（64 个字符）。
+// 数据 SHA-256 摘要的小写十六进制（64 个字符）。
 std::string Sha256Hex(const std::vector<std::uint8_t>& data);
 
 // 标准 base64（带 '=' 填充）；台账里 f256 的基64 就是它。
 std::string Base64Encode(const std::vector<std::uint8_t>& data);
 
 }  // namespace ocid
+
