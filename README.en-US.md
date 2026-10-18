@@ -171,7 +171,7 @@ component plan → deployment/catalog plan → versioned-index plan → root val
 | Decode → re-encode of a whole store (`cbs-scan`) | 0 mismatches |
 | Component/deployment/family keys, pseudo-key fold | 13,325/13,325 and 2,283/2,283 |
 | `f!`, `p!/s!/i!`, `S256H`, `CatalogThumbprint`, `Catalogs`, `f256!`, `MCP_*`, `CF` | solved and implemented |
-| Acceptance (per key/value/byte vs. Microsoft's store) | 8061 x86 43,100 keys/120,978 values; 8061 ARM 613/1,408; 8419 ARM 23,328/61,277 — `cbs-diff` is 0/0 for all three |
+| Acceptance (per key/value/byte vs. Microsoft's store) | 8061 x86 43,100 keys/120,978 values; 8061 ARM 613/1,408; 8419 ARM 23,328/61,277; 16299 amd64 73,535 keys/215,978 values — `cbs-diff` is 0/0 for all four |
 | Install-history values | Taken as inputs: `Extract-CbsInputs.ps1` exports them, `make-cbs-overrides.ps1` builds the override table |
 | `WinSxS\ManifestCache\*_blobs.bin` (PCM/CDF) | Container layer reproduces byte-exactly (62.1% of whole files), element-record tables still in progress |
 
@@ -297,8 +297,8 @@ This is an active work in progress. Three things are worth stating plainly:
 1. **The servicing stack rewrite is more than half done, and the finished parts are self-contained.**
    SMI (WCM declarations and value encoding), the CMI merge decisions, DMI (driver store import),
    CSI (file placement), CBS (reading *and* writing the COMPONENTS store) and offline ACL/TrustedInstaller
-   handling are all implemented in `Source/Native/OcidServicing`. For CBS, the store written for three
-   reference images (8061 x86, 8061 ARM, 8419 ARM) matches Microsoft's own COMPONENTS store byte for
+   handling are all implemented in `Source/Native/OcidServicing`. For CBS, the store written for four
+   reference images (8061 x86, 8061 ARM, 8419 ARM, 16299 amd64) matches Microsoft's own COMPONENTS store byte for
    byte, key for key, value for value (`cbs-diff` reports 0/0). The only part not yet self-contained is
    the `WinSxS\ManifestCache` PCM/CDF encoder: its container layer already reproduces files exactly, the
    element-record tables are still being worked out.
@@ -306,7 +306,7 @@ This is an active work in progress. Three things are worth stating plainly:
    identity culture casing, `c!` attribution, catalog choice, `MCP_*` and version-node flag bits) come
    from the image's installation history and cannot be derived from a package set. `Extract-CbsInputs.ps1`
    exports them from a reference image and `make-cbs-overrides.ps1` turns the residue into an override
-   table that assembly consumes explicitly. Images from 16299 on additionally need the `DCM` compact
+   table that assembly consumes explicitly. Images from 16299 on use the `DCM` compact
    manifest format decoded first (see `Source/Native/OcidServicing/CBS-Writer.md`).
 3. **Some workflows depend on software the user must provide** — the ADK, the IoT Core Kits, a
    separately built UUP converter, and administrator rights. Where a workflow cannot run it says so

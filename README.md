@@ -162,9 +162,10 @@ pwsh -NoProfile -File .\ocid-assemble.ps1 -ImageRoot 'Q:\' `
 | 读侧全库 decode→re-encode（`cbs-scan`） | 0 不一致 |
 | 组件/部署/家庭键、伪键折叠 | 13,325/13,325 与 2,283/2,283 命中 |
 | `f!`、`p!/s!/i!`、`S256H`、`CatalogThumbprint`、`Catalogs`、`f256!`、`MCP_*`、`CF` | 已解并落地 |
-| 验收（对微软原版逐键/逐值/逐字节） | 8061 x86 43,100 键/120,978 值；8061 ARM 613/1,408；8419 ARM 23,328/61,277 —— `cbs-diff` 均 0/0 |
+| 验收（对微软原版逐键/逐值/逐字节） | 8061 x86 43,100 键/120,978 值；8061 ARM 613/1,408；8419 ARM 23,328/61,277；16299 amd64 73,535 键/215,978 值 —— `cbs-diff` 均 0/0 |
+| 现代镜像（16299+） | `DCM` 紧凑清单（msdelta + `wcp.dll` 字典）已解；`f!` 改 DWORD 状态位、`f256!` 取清单声明哈希、`S256H` 取解压后 XML、新增 `Drivers` 台账 —— 全流程同样 0/0 |
 | 安装历史类值 | 作为输入：`Extract-CbsInputs.ps1` 一条命令导出，`make-cbs-overrides.ps1` 生成覆盖表 |
-| `WinSxS\ManifestCache\*_blobs.bin`（PCM/CDF） | 容器层可逐字节重建（62.1% 整文件一致），元素记录表族仍在推进 |
+| `WinSxS\ManifestCache\*_blobs.bin`（PCM/CDF） | 容器层可逐字节重建（整文件一致率 62.1% → 94.6%），元素记录表族仍在推进 |
 
 架构、算法与复现命令见 `Source/Native/OcidServicing/CBS-Writer.md`。
 
@@ -273,13 +274,13 @@ DotnetPackaging.Msix、DeflateBlockCompressor、LibSxS、Img2Ffu、StorageSpace�
 
 1. **服务栈的重写已完成一半以上，且已完成的部分是自带的。** SMI（WCM 声明与值编码）、CMI 合并决策、
    DMI（驱动库导入）、CSI（文件落位）、CBS（COMPONENTS 台账的读与写）以及离线 ACL/TI 处理都已由
-   `Source/Native/OcidServicing` 自己实现；CBS 写侧在三个真机镜像（8061 x86、8061 ARM、8419 ARM）上
-   与微软原版的 COMPONENTS 做到逐键/逐值/逐字节一致（`cbs-diff` 0/0）。尚未自带的只有
+   `Source/Native/OcidServicing` 自己实现；CBS 写侧在四个真机镜像（8061 x86、8061 ARM、8419 ARM、
+   16299 amd64）上与微软原版的 COMPONENTS 做到逐键/逐值/逐字节一致（`cbs-diff` 0/0）。尚未自带的只有
    `WinSxS\ManifestCache` 的 PCM/CDF 编码器（容器层已逐字节可复现，元素记录表族仍在推进）。
 2. **安装历史类信息必须作为输入。** 有些值（`f256` 多段的段序、identity 文化大小写、`c!` 归属、
-   catalog 选择、`MCP_*`/(default) 位图）来自镜像的安装历史，不能从包集推导；
+   catalog 选择、`MCP_*`/(default) 位图、现代 `f!` 的非 1 状态位）来自镜像的安装历史，不能从包集推导；
    `Extract-CbsInputs.ps1` 从参考镜像导出它们，`make-cbs-overrides.ps1` 生成覆盖表，组装时显式传入。
-   16299 及之后的镜像还需要先解 `DCM` 紧凑清单格式（见 `Source/Native/OcidServicing/CBS-Writer.md`）。
+   16299 及之后的镜像清单是 `DCM` 紧凑格式（已解，见 `Source/Native/OcidServicing/CBS-Writer.md`）。
 3. **部分流程依赖用户自备的软件** —— ADK、IoT Core Kits、单独构建的 UUP 转换器，以及管理员权限。
    流程跑不起来时会明确说明，而不是静默降级。
 
