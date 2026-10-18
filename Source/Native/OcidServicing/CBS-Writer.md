@@ -165,7 +165,7 @@ ocid_manifest cbs-write plan-bad.txt rollback.hiv --transactional
   → reg load 后该 hive 里没有任何键（500 个键全部回滚）
 ```
 
-需要 Win8+ 的 KTM 服务（桌面版/Server 默认运行）；`--transactional` 不加则退回普通写入。
+需要 Win8+ 的 KTM 服务（桌面版/Server 默认运行）；`--transactional` 不加则退回普通写入。`assemble-cbs-store.ps1 -Transactional` 会把开关透传下来（ARM 8061 走事务提交后对真机仍 0/0）。
 
 ## 7. 剩余工作
 
