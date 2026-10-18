@@ -44,6 +44,7 @@ param(
     [string] $Time = '',
     [switch] $RootMinimal,
     [string[]] $StackEntries = @(),
+    [switch] $Transactional,
     [string] $DiffAgainst,
     [string] $Exe
 )
@@ -195,7 +196,9 @@ if ($Override -and (Test-Path $Override)) {
 [IO.File]::WriteAllLines($planMerged, $sorted, (New-Object Text.UTF8Encoding($false)))
 Write-Host ("[assemble] merged lines: {0}" -f $sorted.Count)
 
-Invoke-Planner 'write' @('cbs-write', $planMerged, $hive)
+$writeArgs = @('cbs-write', $planMerged, $hive)
+if ($Transactional) { $writeArgs += '--transactional' }
+Invoke-Planner 'write' $writeArgs
 Write-Host ("[assemble] hive: {0} ({1} bytes)" -f $hive, (Get-Item $hive).Length)
 
 if ($DiffAgainst) {
