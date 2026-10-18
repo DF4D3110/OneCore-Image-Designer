@@ -2108,8 +2108,9 @@ static void Usage()
     OutLn("  ocid_manifest cbs-dump HKLM\\OCIDCOMP <outFile>   canonical (sorted) dump of the whole store");
     OutLn("  ocid_manifest cbs-plan-components <manifestDir> <outFile> [--staged <winSxsDir>] [--limit N]");
     OutLn("  ocid_manifest cbs-plan-deployments <packagesDir> <manifestDir> <outFile> [--markers <csv>]");
-    OutLn("      [--installed <csv>] [--claims <csv>] [--flags <csv>]");
+    OutLn("      [--installed <csv>] [--claims <csv>] [--flags <csv>] [--sessions <dir>]");
     OutLn("      --claims: 组件键|部署键（c! 归属，安装计划输入）；--flags: 组件键|CF 十进制");
+    OutLn("      --sessions: Windows\\servicing\\Sessions（按 <Resolve> 顺序决定 CatalogThumbprint）");
     OutLn("  ocid_manifest cbs-plan-versioned <manifestDir> <packagesDir> <stagedDir> <stackVersion> <outFile>");
     OutLn("      [--buckets <csv>] [--cache <csv>] [--ct <csv>] [--version-flags <csv>] [--mcp <csv>]");
     OutLn("      --buckets: 家庭键|桶文本（安装历史：被更早服务栈暂存的组件留在那个桶）");
@@ -2555,13 +2556,121 @@ static int CmdCbsPlanComponents(const std::wstring& manifestDir,
 // 一个部署键的"计划"：同一个部署键可能被多个包声明，所以先收集再输出。
 struct DeploymentPlan
 {
+    // 声明过本部署组件的包（按 .mum 文件名升序追加，即"声明顺序"）。
+    // 为什么要留住全部候选：真机选哪个 .cat 当 CatalogThumbprint 既不是"最后声明"、
+    // 也不是"已安装优先"，而是**安装会话里最后被 <Resolve> 的那个包**（见
+    // ChooseDeploymentCatalog），所以选择必须推迟到读完会话日志之后做。
+    struct Candidate
+    {
+        std::string packageId;   // 包身份（与 Sessions\*.xml 的 `<Resolve package="…">` 同口径）
+        std::string catalogHex;  // 该包同名 .cat 的 SHA-256
+        bool installed = false;  // --installed 的 CurrentState & 0x40
+    };
     std::string appId;             // store 里组件的 identity 文本（真机 appid 就取这个）
     bool driver = false;           // appid 含 ", Type=driverUpdate" ⇒ 不写 catalog
-    std::string chosenCatalog;     // CatalogThumbprint：已安装候选里"最后声明"的那个
-    std::string fallbackCatalog;   // 没有已安装候选时退回的 .cat SHA-256
-    std::set<std::string> installedCatalogs;  // 所有已安装候选的 .cat（每个都写标记）
+    std::vector<Candidate> candidates;
     std::set<std::string> payloads;  // 已安装包声明的 `<包身份>.<update 名>`
 };
+
+// 语言包部署（身份文本里 Culture≠neutral）的候选范围与中性部署不同：
+// 真机 en-US 的 MSMQ 语言包部署，CatalogThumbprint 指向的是**未安装**的
+// home-premium 包（会话里它最后被 Resolve），qps-ploc 那一组三个候选全未安装、
+// 也照样都留了 catalog 标记。所以这里按 culture 判断"是不是语言包部署"。
+// 包身份的比较必须大小写无关：.mum 里的语言标签是小写（`language="qps-ploc"`），
+// 而会话日志的 `<Resolve package="…">` 抄的是 CBS 的原样大写（`qps-PLOC`）。
+// 按原样比较会让 qps-ploc 的语言包部署一条都匹配不上，悄悄退回"最后声明"规则
+// （真机却选了会话里最后 Resolve 的那个），而 en-US 因为两边写法一致反而看不出问题。
+static std::string AsciiLowerCopy(const std::string& text)
+{
+    std::string out = text;
+    for (char& c : out)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return out;
+}
+
+static bool IsLanguageScopedIdentity(const std::string& identityText)
+{
+    const std::size_t at = identityText.find("Culture=");
+    if (at == std::string::npos) return false;
+    const std::size_t begin = at + 8;
+    const std::size_t end = identityText.find(',', begin);
+    const std::string culture =
+        identityText.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+    return !culture.empty() && culture != "neutral";
+}
+
+// 选 CatalogThumbprint。
+//
+// 有 --sessions 时：真机那次安装是谁最后被 `<Resolve>` 谁就落成 thumbprint。
+//   * 语言包部署 → 全部声明候选里取 Resolve 序号最大者（同序取后声明）；
+//   * 中性部署 → 只在**已安装**候选里挑：真机 MSMQ 的 9 条中性部署记录选的是已安装的
+//     主体包，而不是名字更大的 home-basic/home-premium（未安装的派生包）。
+// 会话里没出现过的部署（所有候选都查不到序号）退回老规则，保证不给 --sessions 时
+// 与原行为逐字节一致：已安装候选里最后声明，没已安装候选就退回最后声明的那个。
+static std::string ChooseDeploymentCatalog(const DeploymentPlan& planned,
+                                           const std::map<std::string, long long>& resolveOrder)
+{
+    const bool languageScoped = IsLanguageScopedIdentity(planned.appId);
+    if (!resolveOrder.empty())
+    {
+        long long bestSeq = -1;
+        std::string bestCatalog;
+        for (const DeploymentPlan::Candidate& candidate : planned.candidates)
+        {
+            if (!languageScoped && !candidate.installed) continue;
+            const auto found = resolveOrder.find(AsciiLowerCopy(candidate.packageId));
+            if (found == resolveOrder.end()) continue;
+            // >= 而不是 >：候选按声明顺序排列，同序号时后声明的覆盖（真机同序取后声明）。
+            if (found->second >= bestSeq)
+            {
+                bestSeq = found->second;
+                bestCatalog = candidate.catalogHex;
+            }
+        }
+        if (!bestCatalog.empty()) return bestCatalog;
+    }
+    std::string installedCatalog;
+    std::string lastCatalog;
+    for (const DeploymentPlan::Candidate& candidate : planned.candidates)
+    {
+        if (candidate.catalogHex.empty()) continue;
+        lastCatalog = candidate.catalogHex;
+        if (candidate.installed) installedCatalog = candidate.catalogHex;
+    }
+    return installedCatalog.empty() ? lastCatalog : installedCatalog;
+}
+
+// `CanonicalData\Catalogs\<sha>` 要挂哪些 `c!<部署键>` 标记。
+//
+// 真机的标记 = "参与过这次安装的 catalog"，不是只挑一个：
+//   * 语言包部署 → 全部声明候选（en-US/qps-ploc 的 home-basic/home-premium 即使
+//     未安装、甚至从没在会话里出现过，也照样有标记）；
+//   * 其余部署 → 已安装候选；一个已安装候选都没有时退回选中的那一个
+//     （真机这 749 个部署只有一个标记，与"最后声明"的旧行为一致）。
+// 不给 --sessions 时保持旧语义：已安装候选逐个标记，否则只标退回的那个。
+static std::set<std::string> ChooseCatalogMarks(const DeploymentPlan& planned,
+                                                const std::string& chosenCatalog,
+                                                bool useSessions)
+{
+    std::set<std::string> marks;
+    if (useSessions)
+    {
+        const bool allCandidates = IsLanguageScopedIdentity(planned.appId);
+        for (const DeploymentPlan::Candidate& candidate : planned.candidates)
+        {
+            if (candidate.catalogHex.empty()) continue;
+            if (candidate.installed || allCandidates) marks.insert(candidate.catalogHex);
+        }
+    }
+    else
+    {
+        for (const DeploymentPlan::Candidate& candidate : planned.candidates)
+            if (candidate.installed && !candidate.catalogHex.empty())
+                marks.insert(candidate.catalogHex);
+    }
+    if (marks.empty() && !chosenCatalog.empty()) marks.insert(chosenCatalog);
+    return marks;
+}
 
 // ── cbs-plan-deployments：从包清单（.mum）生成 CanonicalData 计划 ────────────
 //
@@ -2636,6 +2745,7 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
                                  const std::wstring& installedPath,
                                  const std::wstring& claimsPath,
                                  const std::wstring& flagsPath,
+                                 const std::wstring& sessionsDir,
                                  const std::wstring& outPath)
 {
 #ifdef _WIN32
@@ -2795,10 +2905,76 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
         }
     }
 
+    // ── 安装会话日志（--sessions）────────────────────────────────────────────
+    // 真机那次安装到底选中了哪个包的 .cat，取决于 `Windows\servicing\Sessions` 里
+    // `<Resolve package="…">` 的**出现顺序**：同一个组件被多个包声明时，最后被
+    // Resolve 的包才留下 CatalogThumbprint（实测 1,694/1,703，而"最后声明"只有
+    // 1,671/1,703）。所以要建"包身份 → 最后出现序号"的表。
+    //
+    // 目录里的坑（8061 x86 实测）：
+    //   * 11 对 `<id>.xml` / `<id>.back.xml`：.back 是上一版备份，要跳过；
+    //   * 还有聚合文件 `Sessions.xml`（根是 <Sessions>，内含全部 11 个会话的副本），
+    //     不跳过就会把每个 Resolve 数两遍 ⇒ 按根元素本地名过滤，只认 <Session>；
+    //   * 文件名形如 `2012_510515`（<年>_<序号>），按名字升序排就是时间序。
+    std::map<std::string, long long> resolveOrder;
+    long long resolves = 0;
+    if (!sessionsDir.empty())
+    {
+        std::vector<std::wstring> sessionFiles;
+        {
+            WIN32_FIND_DATAW sessionFound{};
+            HANDLE sessionFind = FindFirstFileW((sessionsDir + L"\\*.xml").c_str(), &sessionFound);
+            if (sessionFind == INVALID_HANDLE_VALUE)
+            {
+                Err("会话目录里没有 .xml：" + ToUtf8(sessionsDir));
+                return 2;
+            }
+            do
+            {
+                if ((sessionFound.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+                const std::wstring name = sessionFound.cFileName;
+                const std::wstring suffix = L".back.xml";
+                if (name.size() > suffix.size() &&
+                    _wcsicmp(name.c_str() + name.size() - suffix.size(), suffix.c_str()) == 0)
+                    continue;
+                sessionFiles.push_back(name);
+            } while (FindNextFileW(sessionFind, &sessionFound) != 0);
+            FindClose(sessionFind);
+        }
+        std::sort(sessionFiles.begin(), sessionFiles.end());
+        for (const std::wstring& name : sessionFiles)
+        {
+            std::wstring text, readErr;
+            if (!ReadFileUtf8(sessionsDir + L"\\" + name, text, readErr)) continue;
+            detail::XmlParser parser(text);
+            detail::XmlNode root;
+            if (!parser.ParseDocument(root)) continue;
+            if (_wcsicmp(root.LocalName().c_str(), L"Session") != 0) continue;  // 聚合文件
+            std::vector<const detail::XmlNode*> resolveNodes;
+            CollectXmlByLocalName(root, L"Resolve", resolveNodes);
+            for (const detail::XmlNode* node : resolveNodes)
+            {
+                ++resolves;
+                const std::string package = MumAttr(*node, L"package");
+                if (package.empty()) continue;
+                // 后出现直接覆盖 ⇒ 表里存的就是"最后出现序号"。
+                // 键统一小写，见 AsciiLowerCopy 的注释（.mum 与 Session 的语言标签大小写不同）。
+                resolveOrder[AsciiLowerCopy(package)] = resolves;
+            }
+        }
+        if (resolveOrder.empty())
+        {
+            Err("--sessions 目录里没解析出任何 <Resolve>：" + ToUtf8(sessionsDir));
+            return 2;
+        }
+    }
+    const bool useSessions = !resolveOrder.empty();
+
     long long packages = 0, updates = 0, declared = 0, resolved = 0, payloads = 0, noCat = 0;
     long long deployments = 0;
     std::set<std::string> deploymentKeys;
     std::map<std::string, DeploymentPlan> plan;
+    long long flagDeployments = 0;  // 由 --flags 的 CF=12 补出来的部署记录条数
     std::wstring currentMum;
 
     WIN32_FIND_DATAW found{};
@@ -2906,19 +3082,11 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
                 if (!catalogHex.empty())
                 {
                     // 同一个部署键可能被多个包声明（MSMQ 的 home-basic/home-premium/主体
-                    // 三个包都声明同一个 -Deployment 组件）。真机规则（实测）：
-                    //   * `CatalogThumbprint` 只写一个 = **已安装候选里最后声明的那个**
-                    //     （.mum 按文件名升序处理，覆盖写；MSMQ 选中 ~x86~~ 的中性包、
-                    //     Client-Features 那条选中 NetFx-VCRedist，都是"名字更大"的）；
-                    //   * `Catalogs\<sha>` 标记给**每个已安装候选**都写一份
-                    //     （Client-Features 那条部署同时挂 2 个 catalog 标记）；
-                    //   * 没有已安装候选时退回最后一个见到的候选。
-                    if (packageInstalled)
-                    {
-                        planned.chosenCatalog = catalogHex;
-                        planned.installedCatalogs.insert(catalogHex);
-                    }
-                    planned.fallbackCatalog = catalogHex;
+                    // 三个包都声明同一个 -Deployment 组件）。真机选谁当 CatalogThumbprint
+                    // 由安装会话顺序决定（见 ChooseDeploymentCatalog），所以这里只把候选
+                    // 收集起来，等读完会话日志、输出时再定。
+                    planned.candidates.push_back(
+                        DeploymentPlan::Candidate{packageId, catalogHex, packageInstalled});
                 }
                 if (packageInstalled)
                 {
@@ -2939,6 +3107,35 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
     FindClose(find);
     if (candidateLog != nullptr) std::fclose(candidateLog);
 
+    // 部署记录的第二个来源：`--flags` 里 CF=12 的组件。
+    //
+    // 真机有 5 条部署记录（`Microsoft-Windows-ServicingStack-{base,admin,ds,net,termsrv}
+    // -Deployment`）在 864 个 .mum 里一条声明都没有（Foundation-Package.mum 只声明
+    // `Microsoft-Windows-Foundation`，不声明这些），但它们在真机 `DerivedData\Components`
+    // 里是 CF=12（清单在 | 文件在）。所以按"CF=12 的组件如果不是任何 .mum 声明的部署，
+    // 就补一条只有 appid 的部署记录"来复刻——纯清单/flags 驱动，不读真机台账。
+    //
+    // 如实记录缺口：8061 图像里符合条件的只有 ds 一条（它同时有 .manifest、有 flags 行）；
+    // 另外 4 条在清单目录和 --flags 里都完全不存在，从镜像无从重建；而且 Foundation-
+    // Package.mum 没有声明这些组件，"按组件键反查声明包"也拿不到 payload，只能只发 appid。
+    for (const auto& flagEntry : flagOverrides)
+    {
+        const long long closure = std::strtoll(flagEntry.second.c_str(), nullptr, 10);
+        if (closure != 12) continue;
+        const auto stored = store.find(flagEntry.first);
+        if (stored == store.end()) continue;
+        CbsIdentity flagIdentity;
+        std::string flagParseErr;
+        if (!CbsParseIdentity(stored->second, flagIdentity, flagParseErr)) continue;
+        const std::string flagDeploymentKey = CbsDeploymentKeyName(flagIdentity);
+        if (plan.count(flagDeploymentKey) != 0) continue;  // .mum 已经产出的不重复
+        DeploymentPlan& planned = plan[flagDeploymentKey];
+        planned.appId = stored->second;
+        planned.driver = stored->second.find(", Type=driverUpdate") != std::string::npos;
+        deploymentKeys.insert(flagDeploymentKey);
+        ++flagDeployments;
+    }
+
     for (const auto& entry : plan)
     {
         const std::string& deploymentKey = entry.first;
@@ -2957,9 +3154,7 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
         // 驱动部署（Type=driverUpdate）不写 CatalogThumbprint / Catalogs 标记：
         // 真机 574 个驱动部署全部没有这两个东西（1,703 个带 thumbprint 的部署
         // 由 1,330 个语言包 + 357 个功能部署 + 16 个其它组成，一个驱动都没有）。
-        const std::string catalogHex = !planned.chosenCatalog.empty()
-                                           ? planned.chosenCatalog
-                                           : planned.fallbackCatalog;
+        const std::string catalogHex = ChooseDeploymentCatalog(planned, resolveOrder);
         if (!catalogHex.empty() && !planned.driver)
         {
             const std::wstring catalogText = FromUtf8OrAnsi(catalogHex.c_str());
@@ -2968,25 +3163,12 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
         }
         if (!planned.driver)
         {
-            if (planned.installedCatalogs.empty())
+            for (const std::string& catalog : ChooseCatalogMarks(planned, catalogHex, useSessions))
             {
-                if (!catalogHex.empty())
-                {
-                    const std::string catalogPath = "CanonicalData\\Catalogs\\" + catalogHex;
-                    lines.insert("K\t" + catalogPath);
-                    lines.insert("V\t" + catalogPath + "\t" + CbsMarkValueName(deploymentKey) +
-                                 "\t3\t");
-                }
-            }
-            else
-            {
-                for (const std::string& catalog : planned.installedCatalogs)
-                {
-                    const std::string catalogPath = "CanonicalData\\Catalogs\\" + catalog;
-                    lines.insert("K\t" + catalogPath);
-                    lines.insert("V\t" + catalogPath + "\t" + CbsMarkValueName(deploymentKey) +
-                                 "\t3\t");
-                }
+                const std::string catalogPath = "CanonicalData\\Catalogs\\" + catalog;
+                lines.insert("K\t" + catalogPath);
+                lines.insert("V\t" + catalogPath + "\t" + CbsMarkValueName(deploymentKey) +
+                             "\t3\t");
             }
         }
 
@@ -3129,7 +3311,10 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
           " payloadValues=" + std::to_string(payloads) +
           " withoutCat=" + std::to_string(noCat) +
           " markerAppIds=" + std::to_string(markers.size()) +
-          " claims=" + std::to_string(claimValues) + " flags=" + std::to_string(flagValues));
+          " claims=" + std::to_string(claimValues) + " flags=" + std::to_string(flagValues) +
+          " resolves=" + std::to_string(resolves) +
+          " sessionPackages=" + std::to_string(resolveOrder.size()) +
+          " flagDeployments=" + std::to_string(flagDeployments));
     return 0;
 #else
     (void)packagesDir; (void)manifestDir; (void)markersPath; (void)outPath;
@@ -3899,9 +4084,9 @@ int main(int argc, char** argv)
     }
 
     // cbs-plan-deployments <packagesDir> <manifestDir> <outFile> [--markers <csv>] [--installed <csv>]
-    //                      [--claims <csv>] [--flags <csv>]
+    //                      [--claims <csv>] [--flags <csv>] [--sessions <dir>]
     if (cmd == L"cbs-plan-deployments" && argc >= 5) {
-        std::wstring markersPath, installedPath, claimsPath, flagsPath;
+        std::wstring markersPath, installedPath, claimsPath, flagsPath, sessionsDir;
         for (int i = 5; i < argc; ++i) {
             if (std::string(argv[i]) == "--markers" && i + 1 < argc) {
                 markersPath = FromUtf8OrAnsi(argv[++i]);
@@ -3911,11 +4096,13 @@ int main(int argc, char** argv)
                 claimsPath = FromUtf8OrAnsi(argv[++i]);
             } else if (std::string(argv[i]) == "--flags" && i + 1 < argc) {
                 flagsPath = FromUtf8OrAnsi(argv[++i]);
+            } else if (std::string(argv[i]) == "--sessions" && i + 1 < argc) {
+                sessionsDir = FromUtf8OrAnsi(argv[++i]);
             }
         }
         return CmdCbsPlanDeployments(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]),
                                      markersPath, installedPath, claimsPath, flagsPath,
-                                     FromUtf8OrAnsi(argv[4]));
+                                     sessionsDir, FromUtf8OrAnsi(argv[4]));
     }
 
     // cbs-plan-versioned <manifestDir> <packagesDir> <stagedDir> <stackVersion> <outFile>

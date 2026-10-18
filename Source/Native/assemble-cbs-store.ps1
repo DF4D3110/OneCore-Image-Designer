@@ -33,6 +33,7 @@ param(
     [string] $Installed,
     [string] $Claims,
     [string] $Flags,
+    [string] $Sessions,
     [string] $Buckets,
     [string] $Cache,
     [string] $Ct,
@@ -99,6 +100,13 @@ if ($Markers)   { $depArgs += @('--markers', $Markers) }
 if ($Installed) { $depArgs += @('--installed', $Installed) }
 if ($Claims)    { $depArgs += @('--claims', $Claims) }
 if ($Flags)     { $depArgs += @('--flags', $Flags) }
+if (-not $Sessions) {
+    # 会话日志是"那次安装到底选了哪个 .cat"的唯一证据（Sessions\<id>.xml 的 Resolve 顺序）；
+    # 镜像里有就默认带上，没有就保持老的"最后声明"规则。
+    $candidate = Join-Path $root 'Windows\servicing\Sessions'
+    if (Test-Path $candidate) { $Sessions = $candidate }
+}
+if ($Sessions)  { $depArgs += @('--sessions', $Sessions) }
 Invoke-Planner 'deployments' $depArgs
 
 $verArgs = @('cbs-plan-versioned', $Manifests, $Packages, $WinSxs, $StackVersion, $planVersioned)
