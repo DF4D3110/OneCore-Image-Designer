@@ -94,12 +94,15 @@
 | 8061 ARM（`P:`） | 613 键 / 1,408 值 | 613 键 / 1,408 值 | **only-in-a 0 / 0、only-in-b 0 / 0** |
 
 **没有覆盖表时**（纯清单 + 安装历史输入）的差额：x86 `only-in-a 1 键 / 42 值`、
-`only-in-b 0 键 / 57 值`；ARM `only-in-a 0 键 / 20 值`、`only-in-b 0 键 / 53 值`。
-按成因分（x86）：f256 段序 24/25、servicing stack payload 17、identity 大小写 8/8、
-appid 大小写 5/5、多余 CT 3、`UnstagedFiles` 2、多余 `c!` 1、多余 `CatalogThumbprint` 1、
-多余 Catalogs 键 1 —— **全部落在上面第 4 节的不可推导清单里**，没有一项属于算法缺口。
+`only-in-b 0 键 / 43 值`；ARM `only-in-a 0 键 / 20 值`、`only-in-b 0 键 / 53 值`。
+按成因分（x86）：f256 段序 24/25、identity 大小写 8/8、appid 大小写 5/5、多余 CT 3、
+`UnstagedFiles` 2、多余 `c!` 1、多余 `CatalogThumbprint` 1、多余 Catalogs 键 1 ——
+**全部落在上面第 4 节的不可推导清单里**，没有一项属于算法缺口。
+ARM 侧多出的 33 条 `p!/s!/i!` 是因为 ARM 镜像只有 4 个包、没有 Foundation 包，
+清单里推出的部署组件拿不到 Windows Foundation 交付名字（x86 侧已由"清单独有部署继承
+Foundation 交付 payload"复刻）。
 
-覆盖表规模：x86 100 行（88 `set` + 11 `remove` + 1 `remove-key`）、ARM 73 行（全是 `set`）。
+覆盖表规模：x86 86 行（`set`/`remove`/`remove-key` 合计）、ARM 73 行（全是 `set`）。
 它只承担第 4 节那几类历史事实，不含任何"本可以推导"的值。
 
 两个桶的规则（`--buckets` 把家庭指到更早的服务栈桶时）：真机在**两个桶**里都有这个家庭——
