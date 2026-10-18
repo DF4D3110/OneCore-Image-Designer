@@ -2033,7 +2033,7 @@ static void Usage()
     OutLn("      [--installed <csv>] [--claims <csv>] [--flags <csv>]");
     OutLn("      --claims: 组件键|部署键（c! 归属，安装计划输入）；--flags: 组件键|CF 十进制");
     OutLn("  ocid_manifest cbs-plan-versioned <manifestDir> <packagesDir> <stagedDir> <stackVersion> <outFile>");
-    OutLn("      [--buckets <csv>] [--cache <csv>] [--ct <csv>] [--version-flags <csv>]");
+    OutLn("      [--buckets <csv>] [--cache <csv>] [--ct <csv>] [--version-flags <csv>] [--mcp <csv>]");
     OutLn("      --buckets: 家庭键|桶文本（安装历史：被更早服务栈暂存的组件留在那个桶）");
     OutLn("      --cache: 桶文本|缓存 id 8hex|已用字节（ManifestCacheIdentifier/UtilizedSpace）");
     OutLn("  ocid_manifest cbs-plan-root <x86|arm|arm64|amd64|ia64> <stackVersion> <outFile>");
@@ -3075,6 +3075,7 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
                                const std::wstring& cachePath,
                                const std::wstring& ctPath,
                                const std::wstring& versionFlagsPath,
+                               const std::wstring& mcpPath,
                                const std::wstring& outPath)
 {
 #ifdef _WIN32
@@ -3364,6 +3365,55 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
         }
     }
 
+    // --mcp <csv>：行 `相对版本节点路径|MCP id 8hex|offset|length`（ManifestCache 块的
+    // 位置由工作栈按写入历史决定——同一文件里的块偶有空隙，说明历史上被回收过，
+    // 所以纯清单无法推出 offset；这里当安装历史输入，用于验证其余内容已逐字节对齐）。
+    std::map<std::string, std::string> mcpValueOverride;
+    if (!mcpPath.empty())
+    {
+        std::wstring wideText, readErr;
+        if (!ReadFileUtf8(mcpPath, wideText, readErr))
+        {
+            Err("读不了 --mcp 文件：" + ToUtf8(mcpPath));
+            return 2;
+        }
+        const std::string text = ToUtf8(wideText);
+        std::size_t pos = 0;
+        while (pos < text.size())
+        {
+            std::size_t end = text.find('\n', pos);
+            if (end == std::string::npos) end = text.size();
+            std::string line = text.substr(pos, end - pos);
+            pos = end + 1;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            std::vector<std::string> parts;
+            std::size_t start = 0;
+            for (;;)
+            {
+                const std::size_t bar = line.find('|', start);
+                if (bar == std::string::npos) { parts.push_back(line.substr(start)); break; }
+                parts.push_back(line.substr(start, bar - start));
+                start = bar + 1;
+            }
+            if (parts.size() != 4) continue;
+            const std::uint32_t offset = static_cast<std::uint32_t>(std::strtoul(parts[2].c_str(), nullptr, 10));
+            const std::uint32_t length = static_cast<std::uint32_t>(std::strtoul(parts[3].c_str(), nullptr, 10));
+            std::vector<std::uint8_t> bytes(12, 0);
+            bytes[4] = static_cast<std::uint8_t>(offset & 0xFF);
+            bytes[5] = static_cast<std::uint8_t>((offset >> 8) & 0xFF);
+            bytes[6] = static_cast<std::uint8_t>((offset >> 16) & 0xFF);
+            bytes[7] = static_cast<std::uint8_t>((offset >> 24) & 0xFF);
+            bytes[8] = static_cast<std::uint8_t>(length & 0xFF);
+            bytes[9] = static_cast<std::uint8_t>((length >> 8) & 0xFF);
+            bytes[10] = static_cast<std::uint8_t>((length >> 16) & 0xFF);
+            bytes[11] = static_cast<std::uint8_t>((length >> 24) & 0xFF);
+            std::string hex;
+            HexAppend(bytes, hex);
+            mcpValueOverride[parts[0] + "|" + parts[1]] = hex;
+        }
+    }
+
     long long manifests = 0, stagedFiles = 0, f256 = 0, ct = 0, bad = 0;
     // 家庭层 f256 值可能由多个版本的条目拼接而成（键 = "家庭路径\t值名"）。
     std::map<std::string, std::map<std::string, std::string>> fileSegments;
@@ -3415,6 +3465,14 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
         if (versionFlag != versionFlagOverride.end())
         {
             lines.insert("V\t" + versionPath + "\t\t4\t" + versionFlag->second);
+        }
+        for (const auto& mcpEntry : mcpValueOverride)
+        {
+            const std::size_t mcpBar = mcpEntry.first.find('|');
+            if (mcpBar == std::string::npos) continue;
+            if (mcpEntry.first.substr(0, mcpBar) != versionPath) continue;
+            lines.insert("V\t" + versionPath + "\tMCP_" + mcpEntry.first.substr(mcpBar + 1) +
+                         "\t3\t" + mcpEntry.second);
         }
         if (movedToOlderBucket)
         {
@@ -3759,9 +3817,9 @@ int main(int argc, char** argv)
     }
 
     // cbs-plan-versioned <manifestDir> <packagesDir> <stagedDir> <stackVersion> <outFile>
-    //                   [--buckets <csv>] [--cache <csv>] [--ct <csv>] [--version-flags <csv>]
+    //                   [--buckets <csv>] [--cache <csv>] [--ct <csv>] [--version-flags <csv>] [--mcp <csv>]
     if (cmd == L"cbs-plan-versioned" && argc >= 7) {
-        std::wstring bucketsPath, cachePath, ctPath, versionFlagsPath;
+        std::wstring bucketsPath, cachePath, ctPath, versionFlagsPath, mcpPath;
         for (int i = 7; i + 1 < argc; ++i)
         {
             const std::wstring opt = FromUtf8OrAnsi(argv[i]);
@@ -3769,10 +3827,11 @@ int main(int argc, char** argv)
             else if (opt == L"--cache") cachePath = FromUtf8OrAnsi(argv[++i]);
             else if (opt == L"--ct") ctPath = FromUtf8OrAnsi(argv[++i]);
             else if (opt == L"--version-flags") versionFlagsPath = FromUtf8OrAnsi(argv[++i]);
+            else if (opt == L"--mcp") mcpPath = FromUtf8OrAnsi(argv[++i]);
         }
         return CmdCbsPlanVersioned(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]),
                                    FromUtf8OrAnsi(argv[4]), FromUtf8OrAnsi(argv[5]),
-                                   bucketsPath, cachePath, ctPath, versionFlagsPath,
+                                   bucketsPath, cachePath, ctPath, versionFlagsPath, mcpPath,
                                    FromUtf8OrAnsi(argv[6]));
     }
 

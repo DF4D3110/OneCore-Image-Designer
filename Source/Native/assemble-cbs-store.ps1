@@ -37,6 +37,7 @@ param(
     [string] $Cache,
     [string] $Ct,
     [string] $VersionFlags,
+    [string] $Mcp,
     [string] $Pending = '',
     [string] $Time = '',
     [string] $DiffAgainst,
@@ -105,6 +106,7 @@ if ($Buckets) { $verArgs += @('--buckets', $Buckets) }
 if ($Cache)   { $verArgs += @('--cache', $Cache) }
 if ($Ct)      { $verArgs += @('--ct', $Ct) }
 if ($VersionFlags) { $verArgs += @('--version-flags', $VersionFlags) }
+if ($Mcp) { $verArgs += @('--mcp', $Mcp) }
 Invoke-Planner 'versioned' $verArgs
 
 $rootArgs = @('cbs-plan-root', $Arch, $StackVersion, $planRoot)
@@ -141,5 +143,6 @@ if ($DiffAgainst) {
 }
 
 exit 0
+
 
 
