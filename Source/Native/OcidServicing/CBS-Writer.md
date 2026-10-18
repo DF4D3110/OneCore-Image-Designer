@@ -67,12 +67,20 @@
 
 1. **组件 identity 的 8 条大小写**（`Microsoft-Windows-ServicingStack-{Base,Admin,Ds,Net,Termsrv}-Deployment`、
    `PseudoTool-HashIDSpy*`）：真机存的是更早一份清单的写法，当前镜像里的清单是小写。
-2. **ManifestCache 块外层的 28 字节头**（`+0x00/+0x08` 两个 u64、`+0x10` u32）：穷举
+   它会连锁改掉这些组件的键后缀、`appid`，以及 5 条 servicing stack 部署记录。
+2. **5 条 `Microsoft-Windows-ServicingStack-*-Deployment` 部署记录**：864 个 `.mum` 一条都没声明
+   它们；真机的 payload 指向别处（`Microsoft-Windows-Foundation-Package~…~Foundation`）⇒
+   这 5 条及其 `p!/s!/i!`（17 条值）只能作为安装计划输入。
+3. **f256 多段拼接的顺序**：同一家庭里同一文件跨版本（例 `6.2.8061.0` 与 `4.0.8061.0`）会拼成一个值，
+   段序 = 安装顺序。真机 61 条多段值里 44 升序 / 17 降序，与架构、文化、CF 都无相关性 ⇒ 只能抄。
+4. **`CT`/`UnstagedFiles`/个别 `c!`、`CatalogThumbprint`**：来自会话历史（哪次 Resolve 真正落盘），
+   镜像内无痕迹。
+5. **ManifestCache 块外层的 28 字节头**（`+0x00/+0x08` 两个 u64、`+0x10` u32）：穷举
    fold64/H39/SHA1/256/512/MD5/CRC32/Adler32 × {压缩流、PcmH、清单 XML、XML 的 UTF-16、
    `ManifestCacheIdentifier`} 全灭。它只影响 `_blobs.bin` 缓存文件，不影响 COMPONENTS。
-3. **PCM 里文档第 0 元素记录的 `b0` bit4..6**：真机来自未初始化栈字节（0..7 都出现），
+6. **PCM 里文档第 0 元素记录的 `b0` bit4..6**：真机来自未初始化栈字节（0..7 都出现），
    没有语义，只能照抄或任意填。
-4. **type6 表的 `flags.bit0`**：清单里构造不出触发条件，按来源表照抄；重装时由安装计划带入。
+7. **type6 表的 `flags.bit0`**：清单里构造不出触发条件，按来源表照抄；重装时由安装计划带入。
 
 ## 5. 与真机对拍结果（2026-10，两个架构都做到 0 差异）
 
@@ -85,12 +93,14 @@
 | 8061 x86（`Q:`） | 43,100 键 / 120,978 值 | 43,100 键 / 120,978 值 | **only-in-a 0 / 0、only-in-b 0 / 0** |
 | 8061 ARM（`P:`） | 613 键 / 1,408 值 | 613 键 / 1,408 值 | **only-in-a 0 / 0、only-in-b 0 / 0** |
 
-覆盖表规模：x86 236 行（60 `set` + 175 `remove` + 1 `remove-key`）、ARM 78 行（全是 `set`）。
-它承担的是"任何算法都推不出来、只能抄"的部分：PCM 尚未自研完的 `MCP_*`/`(default)`、
-8 条历史 identity 大小写、f256 多段拼接的安装顺序、ARM 根值 `LastWCPVersionToAccessStore`
-末尾那个 NUL 等。**没有覆盖表时**（纯清单 + 安装历史输入）的差额是：
-x86 `only-in-a 1 键 / 71 值`、`only-in-b 10 键 / 262 值`（96% 是 `MCP_*` + `(default)`，
-即 PCM 编码器那一步）；ARM `only-in-a 1 值 / only-in-b 1 值`。
+**没有覆盖表时**（纯清单 + 安装历史输入）的差额：x86 `only-in-a 1 键 / 42 值`、
+`only-in-b 0 键 / 57 值`；ARM `only-in-a 0 键 / 20 值`、`only-in-b 0 键 / 53 值`。
+按成因分（x86）：f256 段序 24/25、servicing stack payload 17、identity 大小写 8/8、
+appid 大小写 5/5、多余 CT 3、`UnstagedFiles` 2、多余 `c!` 1、多余 `CatalogThumbprint` 1、
+多余 Catalogs 键 1 —— **全部落在上面第 4 节的不可推导清单里**，没有一项属于算法缺口。
+
+覆盖表规模：x86 100 行（88 `set` + 11 `remove` + 1 `remove-key`）、ARM 73 行（全是 `set`）。
+它只承担第 4 节那几类历史事实，不含任何"本可以推导"的值。
 
 两个桶的规则（`--buckets` 把家庭指到更早的服务栈桶时）：真机在**两个桶**里都有这个家庭——
 内容只落在真正暂存过它的桶（由 `--mcp` 的行反推），另一个桶只留骨架
@@ -139,8 +149,11 @@ pwsh -NoProfile -File .\assemble-cbs-store.ps1 `
 
 ## 7. 剩余工作
 
-1. **PCM 表构建器**（`BuildPcmTables`）：把清单 XML 直接编译成 35 张表（现状只能复现
-   容器与表骨架，表内容仍靠参考实现 oracle）。这一步做完，`MCP_*` 与 `(default)` 就能自研生成，
-   覆盖表里最大的那两类可以删掉。
-2. 覆盖表瘦身：把"能推导"的行逐条升级成算法（先做 `--sessions` 覆盖不到的边角、f256 段序）。
+1. **PCM 表构建器**（`BuildPcmTables`）：把清单 XML 直接编译成 35 张表。现状：容器、TOC、槽位、
+   串池桶序、type6 规模定律、type 2/6/8/9/A/B 表编解码都已自研并逐字节自证（3,041 份语料全过）；
+   缺的是 68 B 文档记录 / 96 B 文件记录 / dependency / type 8/9/10 的字段语义（由 wcp 里 114 个
+   schema handler 生成，正在反编译）。做完后 `WinSxS\ManifestCache` 也能自研生成；
+   注意**它不影响 COMPONENTS**（`MCP_*`/`(default)` 已经走 `--mcp`/`--version-flags` 输入）。
+2. 覆盖表瘦身：把第 4 节里还能从镜像推出来的行逐条升级成算法（优先 f256 段序——若能从
+   组件登记顺序或 CF 位推出来）。
 3. 然后进入 KTM 事务化（把上面所有写入包进事务，失败可回滚）。
