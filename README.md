@@ -261,12 +261,18 @@ DotnetPackaging.Msix、DeflateBlockCompressor、LibSxS、Img2Ffu、StorageSpace�
 
 ## 状态
 
-本项目仍在积极开发中。有两点值得直说：
+本项目仍在积极开发中。有三点值得直说：
 
-1. **服务栈的重写尚未完成。** 上表所列模块已实现并有测试覆盖，但应用在 CBS/CSI 相关工作中仍会驱动上游
-   服务栈二进制。方向是**逐模块替换**它们，而不是重分发它们，最终使「从包集组装镜像」不再需要操作系统
-   自身的服务组件。
-2. **部分流程依赖用户自备的软件** —— ADK、IoT Core Kits、单独构建的 UUP 转换器，以及管理员权限。
+1. **服务栈的重写已完成一半以上，且已完成的部分是自带的。** SMI（WCM 声明与值编码）、CMI 合并决策、
+   DMI（驱动库导入）、CSI（文件落位）、CBS（COMPONENTS 台账的读与写）以及离线 ACL/TI 处理都已由
+   `Source/Native/OcidServicing` 自己实现；CBS 写侧在三个真机镜像（8061 x86、8061 ARM、8419 ARM）上
+   与微软原版的 COMPONENTS 做到逐键/逐值/逐字节一致（`cbs-diff` 0/0）。尚未自带的只有
+   `WinSxS\ManifestCache` 的 PCM/CDF 编码器（容器层已逐字节可复现，元素记录表族仍在推进）。
+2. **安装历史类信息必须作为输入。** 有些值（`f256` 多段的段序、identity 文化大小写、`c!` 归属、
+   catalog 选择、`MCP_*`/(default) 位图）来自镜像的安装历史，不能从包集推导；
+   `Extract-CbsInputs.ps1` 从参考镜像导出它们，`make-cbs-overrides.ps1` 生成覆盖表，组装时显式传入。
+   16299 及之后的镜像还需要先解 `DCM` 紧凑清单格式（见 `Source/Native/OcidServicing/CBS-Writer.md`）。
+3. **部分流程依赖用户自备的软件** —— ADK、IoT Core Kits、单独构建的 UUP 转换器，以及管理员权限。
    流程跑不起来时会明确说明，而不是静默降级。
 
 ## 关于

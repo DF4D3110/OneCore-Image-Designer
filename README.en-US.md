@@ -292,14 +292,23 @@ WPMT.Core, and the `msdelta.dll` system component — is listed in full in
 
 ## Status
 
-This is an active work in progress. Two things are worth stating plainly:
+This is an active work in progress. Three things are worth stating plainly:
 
-1. **The servicing stack rewrite is incomplete.** The modules listed above are implemented and
-   tested, but the application still drives upstream servicing binaries for CBS/CSI work. The
-   direction is to replace them module by module rather than to redistribute them, so that
-   assembling an image from a package set no longer requires the operating system's own servicing
-   components.
-2. **Some workflows depend on software the user must provide** — the ADK, the IoT Core Kits, a
+1. **The servicing stack rewrite is more than half done, and the finished parts are self-contained.**
+   SMI (WCM declarations and value encoding), the CMI merge decisions, DMI (driver store import),
+   CSI (file placement), CBS (reading *and* writing the COMPONENTS store) and offline ACL/TrustedInstaller
+   handling are all implemented in `Source/Native/OcidServicing`. For CBS, the store written for three
+   reference images (8061 x86, 8061 ARM, 8419 ARM) matches Microsoft's own COMPONENTS store byte for
+   byte, key for key, value for value (`cbs-diff` reports 0/0). The only part not yet self-contained is
+   the `WinSxS\ManifestCache` PCM/CDF encoder: its container layer already reproduces files exactly, the
+   element-record tables are still being worked out.
+2. **Install-history information has to be supplied as input.** Some values (`f256` segment order,
+   identity culture casing, `c!` attribution, catalog choice, `MCP_*` and version-node flag bits) come
+   from the image's installation history and cannot be derived from a package set. `Extract-CbsInputs.ps1`
+   exports them from a reference image and `make-cbs-overrides.ps1` turns the residue into an override
+   table that assembly consumes explicitly. Images from 16299 on additionally need the `DCM` compact
+   manifest format decoded first (see `Source/Native/OcidServicing/CBS-Writer.md`).
+3. **Some workflows depend on software the user must provide** — the ADK, the IoT Core Kits, a
    separately built UUP converter, and administrator rights. Where a workflow cannot run it says so
    instead of silently degrading.
 
