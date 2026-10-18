@@ -47,6 +47,7 @@ param(
  [switch] $Ccpinterface,
  [switch] $InstallersShortcut,
     [string[]] $StackEntries = @(),
+    [string] $RootInfo,
     [switch] $Transactional,
     [switch] $SkipFileVerify,
     [switch] $SkipStoreVerify,
@@ -126,6 +127,28 @@ if ($VersionFlags) { $verArgs += @('--version-flags', $VersionFlags) }
 if ($Mcp) { $verArgs += @('--mcp', $Mcp) }
 if ($SkeletonFamilies) { $verArgs += @('--skeleton-families', $SkeletonFamilies) }
 Invoke-Planner 'versioned' $verArgs
+
+if ($RootInfo) {
+    if (-not (Test-Path $RootInfo)) { throw "missing root info: $RootInfo" }
+    $info = Get-Content -Raw -Path $RootInfo | ConvertFrom-Json
+    if (-not $PSBoundParameters.ContainsKey('Pending') -and $info.pendingXmlIdentifier) { $Pending = $info.pendingXmlIdentifier }
+    if (-not $PSBoundParameters.ContainsKey('Time')) {
+        foreach ($e in $info.stackEntries) {
+            if ($e.name -eq $StackVersion) { $Time = ($e.text -split ' ')[0]; break }
+        }
+    }
+    if (-not $PSBoundParameters.ContainsKey('StackEntries')) {
+        $derived = @()
+        foreach ($e in $info.stackEntries) {
+            if ($e.name -eq $StackVersion) { continue }
+            if (-not $e.name) { continue }
+            $derived += ('' + $e.name + '|' + $e.text)
+        }
+        $StackEntries = $derived
+    }
+    if (-not $PSBoundParameters.ContainsKey('RootMinimal') -and $null -eq $info.executionState) { $RootMinimal = [switch]$true }
+    if (-not $PSBoundParameters.ContainsKey('Ccpinterface') -and $info.ccpinterface) { $Ccpinterface = [switch]$true }
+}
 
 $rootArgs = @('cbs-plan-root', $Arch, $StackVersion, $planRoot)
 if ($Pending) { $rootArgs += @('--pending', $Pending) }

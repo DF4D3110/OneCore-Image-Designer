@@ -130,6 +130,15 @@ Foundation 交付 payload"复刻）。8419 的 253 条里最大一类是"骨架�
 cd D:\GitHub_Projects\OneCore-Image-Designer\Source\Native
 pwsh -NoProfile -File .\build-servicing.ps1
 
+# 0) 参考镜像的"安装历史"输入（替代以前散落在 E:\ocid_verify 的手工导出）
+#    需要 COMPONENTS 已挂载（reg load HKLM\OCIDCOMP ...），SOFTWARE 可给文件或已挂载的键：
+pwsh -NoProfile -File .\Extract-CbsInputs.ps1 `
+    -Hive 'HKLM\OCIDCOMP' -OutDir 'E:\ocid_verify\inputs8061' `
+    -DefaultBucket '6.2.8061.0 (fbl_core1_soc.110803-1830)' `
+    -InstalledHive 'HKLM\OCIDSOFT'
+#    产出 markers/claims/flags/buckets/cache/ct/version_flags/mcp/skeleton_families/
+#    packages_state/root_info.json + truth.txt（同时是 cbs-diff 的基准）
+
 pwsh -NoProfile -File .\assemble-cbs-store.ps1 `
     -ImageRoot 'Q:\' `
     -StackVersion '6.2.8061.0 (fbl_core1_soc.110803-1830)' `
