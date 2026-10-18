@@ -3413,7 +3413,11 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
     } while (FindNextFileW(find, &found) != 0);
     FindClose(find);
 
-    // 把按版本收集的 f256 条目拼接进 lines（版本从高到低）。
+    // 把按版本收集的 f256 条目拼接进 lines。
+    // 段序 = 真机的安装顺序（不可由版本排序推导：既有 5.82→6.0 这样的升序，
+    // 也有 6.2→4.0 这样的降序）。实测 4,712 条多段值里升序占绝大多数
+    // （35 组 5.82→6.0、8 组 1.0.0.0→6.2，只有 12 组是 6.2→4.0），所以这里
+    // 按版本升序输出，剩下的降序案例当安装历史差异处理。
     for (const auto& entry : fileSegments)
     {
         const std::size_t tab = entry.first.find('\t');
@@ -3421,8 +3425,7 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
         const std::string familyPath = entry.first.substr(0, tab);
         const std::string valueName = entry.first.substr(tab + 1);
         std::string joined;
-        for (auto it = entry.second.rbegin(); it != entry.second.rend(); ++it)
-            joined += it->second;
+        for (const auto& segment : entry.second) joined += segment.second;
         lines.insert("V\t" + familyPath + "\t" + valueName + "\t3\t" +
                      Utf16LeHex(FromUtf8OrAnsi(joined.c_str())));
         ++f256;
