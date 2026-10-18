@@ -2887,7 +2887,10 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
                 fields.push_back(line.substr(start, bar - start));
                 start = bar + 1;
             }
-            if (fields.size() >= 4) markers[fields[1]] = fields[3];
+            // appid 大小写可能与我们拼出来的身份文本不同（真机有 8 条大小写异常：
+            // servicing stack 的 base/admin/ds/net/termsrv 部署与 pseudotool），
+            // 键统一小写存放、查询也小写，否则整个部署会丢掉 p!/s!/i! 与 payload。
+            if (fields.size() >= 4) markers[AsciiLowerCopy(fields[1])] = fields[3];
         }
     }
 
@@ -3182,6 +3185,7 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
     // 如实记录缺口：8061 图像里符合条件的只有 ds 一条（它同时有 .manifest、有 flags 行）；
     // 另外 4 条在清单目录和 --flags 里都完全不存在，从镜像无从重建；而且 Foundation-
     // Package.mum 没有声明这些组件，"按组件键反查声明包"也拿不到 payload，只能只发 appid。
+    std::set<std::string> flagDerivedKeys;
     for (const auto& flagEntry : flagOverrides)
     {
         const long long closure = std::strtoll(flagEntry.second.c_str(), nullptr, 10);
@@ -3197,7 +3201,36 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
         planned.appId = stored->second;
         planned.driver = stored->second.find(", Type=driverUpdate") != std::string::npos;
         deploymentKeys.insert(flagDeploymentKey);
+        flagDerivedKeys.insert(flagDeploymentKey);
         ++flagDeployments;
+    }
+
+    // 上述"只在清单里、没有 .mum 声明"的部署组件（真机 x86 5 条、ARM 11 条 servicing stack
+    // 部署）在真机台账里带的是同一个 payload 集合 —— Windows Foundation 包的
+    // `WindowsFoundationDelivery` 更新。这两个镜像是用同一套基础交付装出来的，所以
+    // 它们被那次交付一并落位。纯 .mum 反查不到（Foundation-Package.mum 只声明
+    // Microsoft-Windows-Foundation 一个组件），因此按"继承了 Foundation 交付"实现：
+    // 找到 appid 名为 Microsoft-Windows-Foundation 的部署，把它的 payload 集合复制给
+    // 这些部署。若无该部署则保持空（不猜）。
+    if (!flagDerivedKeys.empty())
+    {
+        std::set<std::string> foundationPayloads;
+        for (const auto& entry : plan)
+        {
+            CbsIdentity candidateIdentity;
+            std::string candidateErr;
+            if (!CbsParseIdentity(entry.second.appId, candidateIdentity, candidateErr)) continue;
+            if (candidateIdentity.name != "Microsoft-Windows-Foundation") continue;
+            foundationPayloads = entry.second.payloads;
+            break;
+        }
+        if (!foundationPayloads.empty())
+        {
+            for (const std::string& key : flagDerivedKeys)
+            {
+                plan[key].payloads = foundationPayloads;
+            }
+        }
     }
 
     for (const auto& entry : plan)
@@ -3236,7 +3269,7 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
             }
         }
 
-        const auto markerIt = markers.find(planned.appId);
+        const auto markerIt = markers.find(AsciiLowerCopy(planned.appId));
         // 有 --markers 时以它为准（没记录 = 该部署没有 p!/s!/i!）；
         // 没给 markers 时退化成"只写 p!"，方便看结构。
         const std::string markerList =
