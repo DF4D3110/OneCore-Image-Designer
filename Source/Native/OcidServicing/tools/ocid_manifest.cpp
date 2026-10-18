@@ -2651,6 +2651,35 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
     lines.insert("K\tCanonicalData\\Catalogs");
     lines.insert("K\tCanonicalData\\Deployments");
 
+    // --flags 预读：部署组件默认要写 CF=12（清单在|文件在），但真机有 7 个部署组
+    // 件的闭包状态是 4（只有清单在位，例如 NetFx2/NetFx3/WPF 的部署组件）。
+    // 既然 --flags 是安装态输入，就让它压过这里的默认值：先读进来，后面部署
+    // 组件写 CF=12 时跳过被 --flags 覆盖的键，最后再按 --flags 逐条写。
+    std::map<std::string, std::string> flagOverrides;
+    if (!flagsPath.empty())
+    {
+        std::wstring rawText;
+        std::wstring readError;
+        if (!ReadFileUtf8(flagsPath, rawText, readError))
+        {
+            Err("读不了 --flags：" + ToUtf8(readError));
+            return 2;
+        }
+        const std::string utf8Text = ToUtf8(rawText);
+        std::size_t cursor = 0;
+        while (cursor < utf8Text.size())
+        {
+            std::size_t end = utf8Text.find('\n', cursor);
+            if (end == std::string::npos) end = utf8Text.size();
+            std::string line = utf8Text.substr(cursor, end - cursor);
+            cursor = end + 1;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const std::size_t bar = line.find('|');
+            if (bar == std::string::npos) continue;
+            flagOverrides[line.substr(0, bar)] = line.substr(bar + 1);
+        }
+    }
+
     long long packages = 0, updates = 0, declared = 0, resolved = 0, payloads = 0, noCat = 0;
     long long deployments = 0;
     std::set<std::string> deploymentKeys;
@@ -2867,7 +2896,8 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
                 const std::string componentPath =
                     "DerivedData\\Components\\" + CbsComponentKeyName(deploymentIdentity);
                 lines.insert("K\t" + componentPath);
-                lines.insert("V\t" + componentPath + "\tCF\t4\t0c000000");
+                if (flagOverrides.count(CbsComponentKeyName(deploymentIdentity)) == 0)
+                    lines.insert("V\t" + componentPath + "\tCF\t4\t0c000000");
                 if (!markerList.empty() && !planned.payloads.empty())
                     lines.insert("V\t" + componentPath + "\t" +
                                  CbsMarkValueName(deploymentKey) + "\t3\t");
@@ -2946,24 +2976,23 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
             Err("读不了 --claims：" + readErr);
             return 2;
         }
-        if (!readTwoColumn(flagsPath, [&](const std::string& componentKey, const std::string& valueText) {
-                if (componentKey.empty() || valueText.empty()) return;
-                const long long value = std::strtoll(valueText.c_str(), nullptr, 10);
-                if (value <= 0 || value > 0x3F) return;
-                std::uint8_t bytes[4] = {static_cast<std::uint8_t>(value & 0xFF),
-                                         static_cast<std::uint8_t>((value >> 8) & 0xFF),
-                                         static_cast<std::uint8_t>((value >> 16) & 0xFF),
-                                         static_cast<std::uint8_t>((value >> 24) & 0xFF)};
-                const std::string componentPath = "DerivedData\\Components\\" + componentKey;
-                lines.insert("K\t" + componentPath);
-                std::string hex;
-                HexAppend(std::vector<std::uint8_t>(bytes, bytes + 4), hex);
-                lines.insert("V\t" + componentPath + "\tCF\t4\t" + hex);
-                ++flagValues;
-            }, readErr))
+        for (const auto& overrideEntry : flagOverrides)
         {
-            Err("读不了 --flags：" + readErr);
-            return 2;
+            const std::string& componentKey = overrideEntry.first;
+            const std::string& valueText = overrideEntry.second;
+            if (componentKey.empty() || valueText.empty()) continue;
+            const long long value = std::strtoll(valueText.c_str(), nullptr, 10);
+            if (value <= 0 || value > 0x3F) continue;
+            std::uint8_t bytes[4] = {static_cast<std::uint8_t>(value & 0xFF),
+                                     static_cast<std::uint8_t>((value >> 8) & 0xFF),
+                                     static_cast<std::uint8_t>((value >> 16) & 0xFF),
+                                     static_cast<std::uint8_t>((value >> 24) & 0xFF)};
+            const std::string componentPath = "DerivedData\\Components\\" + componentKey;
+            lines.insert("K\t" + componentPath);
+            std::string hex;
+            HexAppend(std::vector<std::uint8_t>(bytes, bytes + 4), hex);
+            lines.insert("V\t" + componentPath + "\tCF\t4\t" + hex);
+            ++flagValues;
         }
     }
 

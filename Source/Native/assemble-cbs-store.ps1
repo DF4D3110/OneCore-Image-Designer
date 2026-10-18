@@ -31,6 +31,11 @@ param(
     [string] $WinSxs,
     [string] $Markers,
     [string] $Installed,
+    [string] $Claims,
+    [string] $Flags,
+    [string] $Buckets,
+    [string] $Cache,
+    [string] $Ct,
     [string] $Pending = '',
     [string] $Time = '',
     [string] $DiffAgainst,
@@ -90,9 +95,15 @@ Invoke-Planner 'components' @('cbs-plan-components', $Manifests, $planComponents
 $depArgs = @('cbs-plan-deployments', $Packages, $Manifests, $planDeployments)
 if ($Markers)   { $depArgs += @('--markers', $Markers) }
 if ($Installed) { $depArgs += @('--installed', $Installed) }
+if ($Claims)    { $depArgs += @('--claims', $Claims) }
+if ($Flags)     { $depArgs += @('--flags', $Flags) }
 Invoke-Planner 'deployments' $depArgs
 
-Invoke-Planner 'versioned' @('cbs-plan-versioned', $Manifests, $Packages, $WinSxs, $StackVersion, $planVersioned)
+$verArgs = @('cbs-plan-versioned', $Manifests, $Packages, $WinSxs, $StackVersion, $planVersioned)
+if ($Buckets) { $verArgs += @('--buckets', $Buckets) }
+if ($Cache)   { $verArgs += @('--cache', $Cache) }
+if ($Ct)      { $verArgs += @('--ct', $Ct) }
+Invoke-Planner 'versioned' $verArgs
 
 $rootArgs = @('cbs-plan-root', $Arch, $StackVersion, $planRoot)
 if ($Pending) { $rootArgs += @('--pending', $Pending) }
@@ -128,3 +139,4 @@ if ($DiffAgainst) {
 }
 
 exit 0
+
