@@ -329,3 +329,18 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
    "文件 + 注册表"的原子性已用顺序约定 + 提交前核对解决（见 6.2，`cbs-verify-files` 已接进
    `assemble-cbs-store.ps1`）；真正把文件复制也包进 KTM（`CreateFileTransacted`）没有做，
    因为顺序约定已经满足"落位失败则台账不变"，而事务化文件 API 对 WinSxS 的 TI ACL 不友好。
+
+## 8. 现代镜像（16299+）的已知差异
+
+用 16299 amd64 的完整镜像实测过一遍（`E:\ocid_dism\notes.md` 有取数步骤）：
+
+| 层 | 结果 |
+| --- | --- |
+| COMPONENTS 读侧 | **完全可用**：`0.0.0.6`、arch=9、22,167 组件 / 3,686 部署 / 2,109 catalogs / 单桶 `10.0.16299.15 (WinBuild.160101.0800)`、22,015 家庭；`cbs-scan` 全库 0 不一致 |
+| 根/派生布局 | 多出顶层 `Drivers\{amd64,x86}`（驱动库台账）、`NonCanonicalData`；`Installers` 为空；`CCPInterface` 存在 |
+| `CF` | 出现位 4/5/12 之外的值（3,020 条）⇒ 闭包状态位还有别的组合，需按 `--flags` 输入 |
+| **组件清单** | **阻断**：19,483 份里只有 192 份是 XML，其余 19,275 份是 `DCM\x01PA30…` 二进制紧凑清单（高熵；ntdll 的 LZNT1/XPRESS/LZMS 直接解压全失败） |
+| ManifestCache | 首块仍是 `PcmH`（ver=1、22 表、toc=0x90）⇒ PCM 容器规则跨版本同构 |
+
+结论：写侧对 8061/8419 这类"XML 清单 + 0.0.0.6"镜像已闭环；要覆盖 16299+，需要先解 DCM
+（紧凑清单容器）与 `Drivers`/`NonCanonicalData` 两个新台账，这不是现有管道的小改。
