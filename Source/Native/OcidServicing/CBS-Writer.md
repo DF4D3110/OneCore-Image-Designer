@@ -281,16 +281,23 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
    - 后续任务（"路线四"，已推进到 4b）：读 `GeneratePCM` 的 intern helpers + ladder 实验，做到"无 oracle"
      的整份 PCM 重建。**当前进度**（严格 200 对验证集 T0..T4 = 199/200 不回退；全语料 2,757 对）：
      T1 槽数相同 2,105（76.4%）、T2 type+len 2,012（73.0%）、T3 payload 全同 1,711（62.1%）、
-     T4 整文件同 733（26.6%）。已实现：表槽插入序 = `PCM_KEYS` 序（1,2,9,17,666,210…）、
+     T4 整文件同 1,711（62.1%，容器物理序修好后由 26.6% 提升；T3 通过者现在全部整文件一致）。已实现：表槽插入序 = `PCM_KEYS` 序（1,2,9,17,666,210…）、
      `f2` = 前置记录槽号定律、sdddef 16B / `<directory>` 20B / `<memberships>` / `<string>` /
      `<rescache>` / `<file><hash>` 16B 记录布局、表头 flags（0x10/0x20/0x40/0x01）与两个 intern 时序修正。
-     **未闭环的卡点**（都已在 `E:\ocid_verify\pcm_route4\pcm_route4b.md` 定位）：
-     ① 容器物理布局（卡 978 份 = T3→T4 的唯一差距）：桶数是 **7/72/722 阶梯**（容量 5N），
-     N=72 已实证，但桶内链序非纯 FIFO（30 桶里 6 桶逆序，LIFO 全错），疑为 `CSingleInstanceTable`
-     对重复 payload 的单实例合并/重挂；② MdHd `b0` bit4..6 是写侧未初始化栈字节（卡 684 份，
-     只差这 1 字节，需反汇编 `CMicrodomWriter`）；③ count≥7 时落盘的表 `f0` 哈希函数仍有反例
-     （卡 110+ 份）。中间产物在 `E:\ocid_verify\pcm_route3\`（`buildpcm_self.py`）、
-     `E:\ocid_verify\pcm_route4\`（`buildpcm_self2.py`、`pcm_route4b.md`）与 `E:\ocid_verify\pcm_schema_route2.md`。
+     **卡点①已解（容器物理布局）**：entry 哈希表不是"固定 7/72/722 阶梯"，而是**增长模型**——
+初始 7 桶 / capacity 35；每插入一项后若 `count > capacity` 则 `newN = 2*count`、
+`capacity = 5*newN`，旧桶**按桶序 tail-append** 重建；最终物理序 = 桶 0..N-1 依次展开。
+桶索引 = `RtlHashLBlob(payload)` 的**低 32 位** mod N（`h = h*0x1FFFFFFF7 + word_le32`）。
+实测 3,041 份真实 PCM：**2,969 份（97.6%）物理序完全一致**；剩 72 份（n 恰好刚过 36 的样本）
+的差异是"缓存重写历史"——它们的 TOC 槽号（插入序）与物理序不同源，属安装历史，不可由清单推导。
+这也解释了路线四 4b 的误判：它用固定阶梯近似增长模型，对刚好跨越增长的样本等价于"桶内逆序"。
+中间产物在 `E:\ocid_verify\pcm_route3\`（`buildpcm_self.py`）、`E:\ocid_verify\pcm_route4\`
+（`buildpcm_self2.py`、`pcm_route4b.md`）与 `E:\ocid_verify\pcm_schema_route2.md`。
+仓库侧 `src/Pcm.cpp` 的 `BucketOrder()` 从一开始就是增长模型，可直接对拍（本次已用 Python 复核）。
+**仍开放**：② MdHd `b0` bit4..6 是写侧未初始化栈字节（卡 684 份，只差这 1 字节，已反编译
+`MicrodomWriterImplementation` 六个函数确认二进制里没有对它的位组合，属真 UB）；
+③ count≥7 时落盘的表 `f0` 哈希函数仍有反例（卡 110+ 份）；④ 元素记录（`<file>`/`<registryKeys>`/
+`<membership>`/`<localization>`）驱动的 key `1/2/9/16/17/201/210/666/34` 表内容（大族 0%）。
    - 注意**PCM 不影响 COMPONENTS**（`MCP_*`/`(default)` 已经走 `--mcp`/`--version-flags` 输入）。
 2. 覆盖表瘦身：第 4 节剩下的行已逐条试过推导（f256 段序试了架构/文化/CF/组件键哈希序，
    只能解释 56/60 的顺序且方向不定；CT 的归属包不在 `.mum` 声明集合里）⇒ 保留为输入。
