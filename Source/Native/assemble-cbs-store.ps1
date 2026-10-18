@@ -39,8 +39,11 @@ param(
     [string] $Ct,
     [string] $VersionFlags,
     [string] $Mcp,
+    [string] $Override,
     [string] $Pending = '',
     [string] $Time = '',
+    [switch] $RootMinimal,
+    [string[]] $StackEntries = @(),
     [string] $DiffAgainst,
     [string] $Exe
 )
@@ -120,6 +123,10 @@ Invoke-Planner 'versioned' $verArgs
 $rootArgs = @('cbs-plan-root', $Arch, $StackVersion, $planRoot)
 if ($Pending) { $rootArgs += @('--pending', $Pending) }
 if ($Time)    { $rootArgs += @('--time', $Time) }
+if ($RootMinimal) { $rootArgs += '--minimal' }
+foreach ($entry in $StackEntries) {
+    if ($entry) { $rootArgs += @('--stack-entry', $entry) }
+}
 Invoke-Planner 'root' $rootArgs
 
 Write-Host '[assemble] merging plans'
@@ -128,6 +135,63 @@ foreach ($p in @($planComponents, $planDeployments, $planVersioned, $planRoot)) 
     $merged += [IO.File]::ReadAllLines($p)
 }
 $sorted = $merged | Sort-Object -Unique
+if ($Override -and (Test-Path $Override)) {
+    # 覆盖表：把"只能从安装历史抄"的值按行替换/删除。
+    # 行格式（TAB 分隔）：
+    #   set    <相对路径> <值名> <类型> <hex>   替换该值（没有则新增）
+    #   remove <相对路径> <值名>                删除该值
+    # 典型用途：组件 identity 里 8 条历史大小写、f256 多段拼接的安装顺序、
+    # 根键的 ServicingStackVersions 时间串、servicing stack 部署的 payload。
+    Write-Host ("[assemble] applying overrides: {0}" -f $Override)
+    $dropSet = New-Object 'System.Collections.Generic.HashSet[string]'
+    $dropKeySet = New-Object 'System.Collections.Generic.HashSet[string]'
+    $addList = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($raw in [IO.File]::ReadAllLines($Override)) {
+        if (-not $raw -or $raw.StartsWith('#')) { continue }
+        $f = $raw -split "`t"
+        if ($f.Count -lt 2) { continue }
+        if ($f[0] -eq 'remove-key') {
+            [void]$dropKeySet.Add($f[1])
+            continue
+        }
+        if ($f.Count -lt 3) { continue }
+        $prefix = 'V' + "`t" + $f[1] + "`t" + $f[2] + "`t"
+        [void]$dropSet.Add($prefix)
+        if ($f[0] -eq 'set') {
+            if ($f.Count -lt 5) { continue }
+            $addList.Add('V' + "`t" + $f[1] + "`t" + $f[2] + "`t" + $f[3] + "`t" + $f[4])
+        }
+    }
+    $kept = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($line in $sorted) {
+        if ($line.Length -gt 2 -and $line[0] -eq 'K') {
+            $parts = $line -split "`t", 2
+            if ($parts.Count -ge 2) {
+                $skipKey = $false
+                foreach ($dk in $dropKeySet) {
+                    if ($parts[1] -eq $dk -or $parts[1].StartsWith($dk + '\')) { $skipKey = $true; break }
+                }
+                if ($skipKey) { continue }
+            }
+        }
+        if ($line.Length -gt 2 -and $line[0] -eq 'V') {
+            $parts = $line -split "`t", 4
+            if ($parts.Count -ge 4) {
+                $key = 'V' + "`t" + $parts[1] + "`t" + $parts[2] + "`t"
+                if ($dropSet.Contains($key)) { continue }
+                $skipKey = $false
+                foreach ($dk in $dropKeySet) {
+                    if ($parts[1] -eq $dk -or $parts[1].StartsWith($dk + '\')) { $skipKey = $true; break }
+                }
+                if ($skipKey) { continue }
+            }
+        }
+        $kept.Add($line)
+    }
+    foreach ($extra in $addList) { $kept.Add($extra) }
+    $sorted = $kept | Sort-Object -Unique
+    Write-Host ("[assemble] merged lines after overrides: {0}" -f $sorted.Count)
+}
 [IO.File]::WriteAllLines($planMerged, $sorted, (New-Object Text.UTF8Encoding($false)))
 Write-Host ("[assemble] merged lines: {0}" -f $sorted.Count)
 

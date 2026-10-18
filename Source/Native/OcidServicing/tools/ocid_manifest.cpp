@@ -3482,8 +3482,7 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
     std::set<std::string> lines;
     const std::string defaultBucketText = ToUtf8(stackVersion);
     const std::string bucket = "DerivedData\\VersionedIndex\\" + defaultBucketText;
-    lines.insert("K\t" + bucket);
-    lines.insert("K\t" + bucket + "\\ComponentFamilies");
+    std::set<std::string> cacheBucketTexts;
 
     // 桶级缓存标识（ManifestCacheIdentifier = 4 字节小端；UtilizedSpace_MCP_<id> = 8 字节小端）。
     // 两者都是存储创建/写入时生成的，不由清单推导 ⇒ --cache <csv>（行 `桶文本|id十六进制|已用字节`）。
@@ -3520,6 +3519,7 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
             }
             if (fields.size() < 3) continue;
             const std::string bucketText = fields[0];
+            cacheBucketTexts.insert(bucketText);
             const std::string bucketPath = "DerivedData\\VersionedIndex\\" + bucketText;
             lines.insert("K\t" + bucketPath);
             std::string idHex = fields[1];
@@ -3560,6 +3560,12 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
                          "\t3\t" + usedHex);
         }
     }
+
+    // 当前桶（= 本镜像服务栈版本那个桶）的根键总是存在：即使所有家庭都被更早的服务栈
+    // 暂存到旧桶，真机也会在当前桶留下"家庭键 + 空版本节点 + SomeUnparsedVersionsExist"的骨架
+    // （ARM 8061 镜像 118 个家庭全在旧桶，当前桶仍有 118 个只带标记的家庭键）。
+    lines.insert("K\t" + bucket);
+    lines.insert("K\t" + bucket + "\\ComponentFamilies");
 
     // --ct <csv>：行 `家庭键|版本|64hex`（安装历史里真机记录的 CT，纯清单推不出那 912 条）。
     std::map<std::string, std::string> ctOverride;
@@ -3680,6 +3686,30 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
     long long manifests = 0, stagedFiles = 0, f256 = 0, ct = 0, bad = 0;
     // 家庭层 f256 值可能由多个版本的条目拼接而成（键 = "家庭路径\t值名"）。
     std::map<std::string, std::map<std::string, std::string>> fileSegments;
+    // `--mcp` 的行带完整版本节点路径 ⇒ 可以反推"某个家庭在哪些桶里真有内容"。
+    // 真机规则：内容只落在最后一次暂存它的那个/那些桶里；被打包的旧家庭在别的桶里
+    // 只留骨架（家庭键 + 空版本节点 + SomeUnparsedVersionsExist）。
+    std::map<std::string, std::set<std::string>> familyContentBuckets;
+    {
+        static const std::string kBucketPrefix = "DerivedData\\VersionedIndex\\";
+        static const std::string kFamiliesMarker = "\\ComponentFamilies\\";
+        for (const auto& mcpEntry : mcpValueOverride)
+        {
+            const std::size_t bar = mcpEntry.first.find('|');
+            const std::string versionPath =
+                bar == std::string::npos ? mcpEntry.first : mcpEntry.first.substr(0, bar);
+            if (versionPath.compare(0, kBucketPrefix.size(), kBucketPrefix) != 0) continue;
+            const std::size_t familyAt = versionPath.find(kFamiliesMarker, kBucketPrefix.size());
+            if (familyAt == std::string::npos) continue;
+            const std::string bucketText =
+                versionPath.substr(kBucketPrefix.size(), familyAt - kBucketPrefix.size());
+            const std::size_t familyEnd = versionPath.find("\\v!", familyAt + kFamiliesMarker.size());
+            if (familyEnd == std::string::npos) continue;
+            const std::string familyKey = versionPath.substr(familyAt + kFamiliesMarker.size(),
+                                                             familyEnd - familyAt - kFamiliesMarker.size());
+            familyContentBuckets[familyKey].insert(bucketText);
+        }
+    }
     WIN32_FIND_DATAW found{};
     HANDLE find = FindFirstFileW((manifestDir + L"\\*.manifest").c_str(), &found);
     if (find == INVALID_HANDLE_VALUE)
@@ -3716,36 +3746,80 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
         const auto overrideIt = bucketOverride.find(familyKey);
         const bool movedToOlderBucket = overrideIt != bucketOverride.end();
         if (movedToOlderBucket) bucketText = overrideIt->second;
-        const std::string familyBucket = "DerivedData\\VersionedIndex\\" + bucketText;
-        lines.insert("K\t" + familyBucket);
-        lines.insert("K\t" + familyBucket + "\\ComponentFamilies");
-        const std::string familyPath = familyBucket + "\\ComponentFamilies\\" + familyKey;
-        lines.insert("K\t" + familyPath);
         const std::string version = ToUtf8(manifest.identity.Version());
-        const std::string versionPath = familyPath + "\\v!" + version;
-        lines.insert("K\t" + versionPath);
-        const auto versionFlag = versionFlagOverride.find(versionPath);
-        if (versionFlag != versionFlagOverride.end())
+        // 被更早服务栈暂存过的家庭（`--buckets` 指定的那 100 个）在真机里**同时挂在两个桶下**：
+        // 旧桶里有完整的家庭键/版本节点/MCP/f256，当前桶里也有同样一整套内容，只是当前桶
+        // 的家庭键额外带 `SomeUnparsedVersionsExist` = 0x00（实测 100/100；例
+        // `x86_microsoft-windows-os-kernel…` 在两个桶下都有 `f256!ntoskrnl.exe` 与 `v!6.2.8061.0`）。
+        struct FamilyEntry
         {
-            lines.insert("V\t" + versionPath + "\t\t4\t" + versionFlag->second);
-        }
-        for (const auto& mcpEntry : mcpValueOverride)
+            std::string bucketPath;
+            std::string familyKey;
+            bool content;
+        };
+        // 内容桶 = `--mcp` 里出现过该家庭版本节点的桶；没有 mcp 数据时只当当前桶有内容。
+        std::set<std::string> contentBuckets;
+        const auto contentIt = familyContentBuckets.find(familyKey);
+        if (contentIt != familyContentBuckets.end())
         {
-            const std::size_t mcpBar = mcpEntry.first.find('|');
-            if (mcpBar == std::string::npos) continue;
-            if (mcpEntry.first.substr(0, mcpBar) != versionPath) continue;
-            lines.insert("V\t" + versionPath + "\tMCP_" + mcpEntry.first.substr(mcpBar + 1) +
-                         "\t3\t" + mcpEntry.second);
+            contentBuckets = contentIt->second;
         }
-        if (movedToOlderBucket)
+        else
         {
-            // 被更早服务栈暂存过的家庭在当前桶里仍有家庭键与版本节点，但只带一个
-            // `SomeUnparsedVersionsExist` = 0x00（真机 100 个家庭全部如此）。
-            const std::string currentFamilyPath = bucket + "\\ComponentFamilies\\" + familyKey;
-            lines.insert("K\t" + currentFamilyPath);
-            lines.insert("K\t" + currentFamilyPath + "\\v!" + version);
-            lines.insert("V\t" + currentFamilyPath + "\tSomeUnparsedVersionsExist\t3\t00");
+            contentBuckets.insert(bucketText);
         }
+        std::vector<FamilyEntry> families;
+        for (const std::string& contentBucket : contentBuckets)
+        {
+            families.push_back({ "DerivedData\\VersionedIndex\\" + contentBucket, familyKey, true });
+        }
+        if (movedToOlderBucket && !contentBuckets.count(defaultBucketText))
+        {
+            // 被更早服务栈暂存过的家庭：当前桶只留骨架（真机 ARM 118 个家庭全在旧桶，
+            // 当前桶仍有 118 个只带 `SomeUnparsedVersionsExist` 的家庭键）。
+            families.push_back({ bucket, familyKey, false });
+        }
+        std::vector<std::string> familyPaths;
+        std::vector<std::string> versionPaths;
+        std::string primaryFamilyPath;
+        std::string primaryVersionPath;
+        for (const FamilyEntry& entry : families)
+        {
+            lines.insert("K\t" + entry.bucketPath);
+            lines.insert("K\t" + entry.bucketPath + "\\ComponentFamilies");
+            const std::string familyPath = entry.bucketPath + "\\ComponentFamilies\\" + entry.familyKey;
+            lines.insert("K\t" + familyPath);
+            const std::string versionPath = familyPath + "\\v!" + version;
+            lines.insert("K\t" + versionPath);
+            if (entry.bucketPath == bucket && movedToOlderBucket)
+            {
+                // 当前桶的那份家庭键上多一个 `SomeUnparsedVersionsExist` = 0x00（真机 100/100）。
+                lines.insert("V\t" + familyPath + "\tSomeUnparsedVersionsExist\t3\t00");
+            }
+            if (!entry.content) continue;
+            familyPaths.push_back(familyPath);
+            versionPaths.push_back(versionPath);
+            if (primaryFamilyPath.empty())
+            {
+                primaryFamilyPath = familyPath;
+                primaryVersionPath = versionPath;
+            }
+            const auto versionFlag = versionFlagOverride.find(versionPath);
+            if (versionFlag != versionFlagOverride.end())
+            {
+                lines.insert("V\t" + versionPath + "\t\t4\t" + versionFlag->second);
+            }
+            for (const auto& mcpEntry : mcpValueOverride)
+            {
+                const std::size_t mcpBar = mcpEntry.first.find('|');
+                if (mcpBar == std::string::npos) continue;
+                if (mcpEntry.first.substr(0, mcpBar) != versionPath) continue;
+                lines.insert("V\t" + versionPath + "\tMCP_" + mcpEntry.first.substr(mcpBar + 1) +
+                             "\t3\t" + mcpEntry.second);
+            }
+        }
+        const std::string familyPath = primaryFamilyPath;
+        const std::string versionPath = primaryVersionPath;
 
         for (const FileSpec& file : manifest.files)
         {
@@ -3765,7 +3839,10 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
             segment += L"!";
             segment += FromUtf8OrAnsi(version.c_str());
             segment += L"#";
-            fileSegments[familyPath + "\t" + f256Name][version] = ToUtf8(segment);
+            // 两桶并存的家庭在**两个桶**下都有同一批 f256 值（真机 os-kernel 的
+            // `f256!ntoskrnl.exe` 在旧桶与当前桶各一份）。
+            for (const std::string& path : familyPaths)
+                fileSegments[path + "\t" + f256Name][version] = ToUtf8(segment);
         }
 
         const auto catIt = catalogByComponent.find(keyPrefix(componentKey));

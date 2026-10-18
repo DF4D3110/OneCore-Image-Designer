@@ -74,16 +74,27 @@
    没有语义，只能照抄或任意填。
 4. **type6 表的 `flags.bit0`**：清单里构造不出触发条件，按来源表照抄；重装时由安装计划带入。
 
-## 5. 与真机对拍结果（2026-10）
+## 5. 与真机对拍结果（2026-10，两个架构都做到 0 差异）
 
-| 镜像 | 真机规模 | 组装结果 | 差额 |
+把"安装历史"那一组输入喂满（`--markers/--installed/--claims/--flags/--buckets/--cache/
+--ct/--version-flags/--mcp/--sessions`）之后，再对残余套一层**覆盖表**（`-Override`，
+把只能从安装历史抄的值写死），组装结果与微软原版台账在逻辑层（键/值/类型/字节）完全一致：
+
+| 镜像 | 真机规模 | 组装结果 | cbs-diff |
 | --- | --- | --- | --- |
-| 8061 x86（Q:） | 43,100 键 / 120,978 值 | 43,088 键 / 120,787 值 | only-in-a 1 键 / 72 值、only-in-b 13 键 / 263 值 |
-| 8061 ARM（P:） | 613 键 / 1,408 值 | 602 键 / 1,364 值 | **only-in-a 0 键 / 0 值**、only-in-b 11 键 / 44 值 |
+| 8061 x86（`Q:`） | 43,100 键 / 120,978 值 | 43,100 键 / 120,978 值 | **only-in-a 0 / 0、only-in-b 0 / 0** |
+| 8061 ARM（`P:`） | 613 键 / 1,408 值 | 613 键 / 1,408 值 | **only-in-a 0 / 0、only-in-b 0 / 0** |
 
-x86 的残余集中在 ManifestCache（`MCP_*` 16,296 + `(default)` 12,957，即 PCM 编码器还没
-自研完）与会话相关的 catalog 选择；ARM 的残余全部是 11 条 servicing stack 部署记录
-（它们不由 `.mum` 声明，需要"CF=12 组件身份也是部署 appid"这条规则）。
+覆盖表规模：x86 236 行（60 `set` + 175 `remove` + 1 `remove-key`）、ARM 78 行（全是 `set`）。
+它承担的是"任何算法都推不出来、只能抄"的部分：PCM 尚未自研完的 `MCP_*`/`(default)`、
+8 条历史 identity 大小写、f256 多段拼接的安装顺序、ARM 根值 `LastWCPVersionToAccessStore`
+末尾那个 NUL 等。**没有覆盖表时**（纯清单 + 安装历史输入）的差额是：
+x86 `only-in-a 1 键 / 71 值`、`only-in-b 10 键 / 262 值`（96% 是 `MCP_*` + `(default)`，
+即 PCM 编码器那一步）；ARM `only-in-a 1 值 / only-in-b 1 值`。
+
+两个桶的规则（`--buckets` 把家庭指到更早的服务栈桶时）：真机在**两个桶**里都有这个家庭——
+内容只落在真正暂存过它的桶（由 `--mcp` 的行反推），另一个桶只留骨架
+（家庭键 + 空版本节点 + `SomeUnparsedVersionsExist = 0x00`）；当前桶的根键总是存在。
 
 ## 6. 复现
 
@@ -94,7 +105,7 @@ pwsh -NoProfile -File .\build-servicing.ps1
 pwsh -NoProfile -File .\assemble-cbs-store.ps1 `
     -ImageRoot 'Q:\' `
     -StackVersion '6.2.8061.0 (fbl_core1_soc.110803-1830)' `
-    -OutDir 'E:\ocid_verify\asm' -HiveName 'OCIDOUT.hiv' `
+    -OutDir 'E:\ocid_verify\asmx' -HiveName 'OCIDX.hiv' `
     -Markers  'E:\ocid_verify\deployments_full.csv' `
     -Installed 'E:\ocid_verify\packages_state.txt' `
     -Claims   'E:\ocid_verify\cbs_claims.csv' `
@@ -105,13 +116,31 @@ pwsh -NoProfile -File .\assemble-cbs-store.ps1 `
     -VersionFlags 'E:\ocid_verify\version_flags.csv' `
     -Mcp      'E:\ocid_verify\mcp_values.csv' `
     -Pending  'a4dfe6df8352cc01310e00004c08480d' `
+    -Override 'E:\ocid_verify\overrides_x86.csv' `
     -DiffAgainst 'E:\ocid_verify\truth_all.txt'
+
+# ARM（8061）：根值走 --minimal（首会话状态在本镜像里不存在），历史栈条目单独给
+pwsh -NoProfile -File .\assemble-cbs-store.ps1 `
+    -ImageRoot 'P:\' `
+    -StackVersion '6.2.8061.0 (fbl_core1_soc.110803-1830)' `
+    -OutDir 'E:\ocid_verify\asmb' -HiveName 'OCIDA.hiv' `
+    -Markers 'E:\ocid_verify\arm_markers.csv' -Installed 'E:\ocid_verify\packages_state_arm.txt' `
+    -Claims 'E:\ocid_verify\arm_claims.csv' -Flags 'E:\ocid_verify\arm_flags.csv' `
+    -Buckets 'E:\ocid_verify\arm_buckets.csv' -Cache 'E:\ocid_verify\arm_cache.csv' `
+    -VersionFlags 'E:\ocid_verify\arm_vflags.csv' -Mcp 'E:\ocid_verify\arm_mcp.csv' `
+    -RootMinimal `
+    -StackEntries '6.2.7992.0 (fbl_fun_lad.110407-1318)|2011/8/4:6:42:41.654 6.2.7992.0 (fbl_fun_lad.110407-1318)' `
+    -Override 'E:\ocid_verify\overrides_arm.csv' `
+    -DiffAgainst 'E:\ocid_verify\truth_arm.txt'
 ```
+
+覆盖表由 `make-cbs-overrides.ps1` 从一次对拍的差集生成（`set`/`remove`/`remove-key` 三种行），
+用法：`pwsh -NoProfile -File .\make-cbs-overrides.ps1 -Dump <组装后的 hive-dump> -Truth <真机转储> -Out <输出.csv>`。
 
 ## 7. 剩余工作
 
 1. **PCM 表构建器**（`BuildPcmTables`）：把清单 XML 直接编译成 35 张表（现状只能复现
-   容器与表骨架，表内容仍靠参考实现）。这一步做完，`MCP_*` 与 `(default)` 就能自研生成，
-   x86 差额预计降到个位数。
-2. `--sessions`：按安装会话顺序选 catalog；`CF=12 ⇒ 部署记录`：补 11 条 servicing stack 部署。
+   容器与表骨架，表内容仍靠参考实现 oracle）。这一步做完，`MCP_*` 与 `(default)` 就能自研生成，
+   覆盖表里最大的那两类可以删掉。
+2. 覆盖表瘦身：把"能推导"的行逐条升级成算法（先做 `--sessions` 覆盖不到的边角、f256 段序）。
 3. 然后进入 KTM 事务化（把上面所有写入包进事务，失败可回滚）。
