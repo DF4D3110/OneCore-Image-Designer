@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <set>
@@ -1992,7 +1993,12 @@ static void Usage()
     OutLn("  ocid_manifest cbs-dump HKLM\\OCIDCOMP <outFile>   canonical (sorted) dump of the whole store");
     OutLn("  ocid_manifest cbs-plan-components <manifestDir> <outFile> [--staged <winSxsDir>] [--limit N]");
     OutLn("  ocid_manifest cbs-plan-deployments <packagesDir> <manifestDir> <outFile> [--markers <csv>]");
+    OutLn("      [--installed <csv>] [--claims <csv>] [--flags <csv>]");
+    OutLn("      --claims: 组件键|部署键（c! 归属，安装计划输入）；--flags: 组件键|CF 十进制");
     OutLn("  ocid_manifest cbs-plan-versioned <manifestDir> <packagesDir> <stagedDir> <stackVersion> <outFile>");
+    OutLn("      [--buckets <csv>] [--cache <csv>]");
+    OutLn("      --buckets: 家庭键|桶文本（安装历史：被更早服务栈暂存的组件留在那个桶）");
+    OutLn("      --cache: 桶文本|缓存 id 8hex|已用字节（ManifestCacheIdentifier/UtilizedSpace）");
     OutLn("  ocid_manifest cbs-plan-root <x86|arm|arm64|amd64|ia64> <stackVersion> <outFile>");
     OutLn("      [--pending <32hex>] [--time <timestamp 文本>]  根键值（会话态可显式给）");
     OutLn("      --markers: key|appid|thumb|markers（真机导出的安装/启用状态，决定 p!/s!/i!）");
@@ -2513,6 +2519,8 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
                                  const std::wstring& manifestDir,
                                  const std::wstring& markersPath,
                                  const std::wstring& installedPath,
+                                 const std::wstring& claimsPath,
+                                 const std::wstring& flagsPath,
                                  const std::wstring& outPath)
 {
 #ifdef _WIN32
@@ -2890,6 +2898,75 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
         return 3;
     }
 
+    // 安装态补充输入（由"安装计划"提供，纯清单推不出来）：
+    //   --claims <csv>：`<组件键>|<部署键>`，写 `c!<部署键>`（空数据 = 该组件由该部署安装）。
+    //     真机 10,342 条 c! 里只有 1,532 条是部署组件自认领，其余来自包载荷（cab 内
+    //     的 update.mum 组件列表），8061 图像把 cab 剥掉了，只能作为安装输入。
+    //   --flags  <csv>：`<组件键>|<CF 十进制>`，写 `CF`（闭包状态位：0x1 sparsed、
+    //     0x4 清单在、0x8 文件在）。真机 2,767 条里有 491 条不是部署组件（msil
+    //     程序集的 4/5），属于安装/暂存状态。
+    long long claimValues = 0, flagValues = 0;
+    const auto readTwoColumn = [](const std::wstring& path,
+                                  const std::function<void(const std::string&, const std::string&)>& fn,
+                                  std::string& error) -> bool {
+        if (path.empty()) return true;
+        std::wstring raw;
+        std::wstring wError;
+        if (!ReadFileUtf8(path, raw, wError))
+        {
+            error = ToUtf8(wError);
+            return false;
+        }
+        const std::string utf8 = ToUtf8(raw);
+        std::size_t start = 0;
+        while (start < utf8.size())
+        {
+            std::size_t end = utf8.find('\n', start);
+            if (end == std::string::npos) end = utf8.size();
+            std::string line = utf8.substr(start, end - start);
+            start = end + 1;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const std::size_t bar = line.find('|');
+            if (bar == std::string::npos) continue;
+            fn(line.substr(0, bar), line.substr(bar + 1));
+        }
+        return true;
+    };
+    {
+        std::string readErr;
+        if (!readTwoColumn(claimsPath, [&](const std::string& componentKey, const std::string& deploymentKey) {
+                if (componentKey.empty() || deploymentKey.empty()) return;
+                const std::string componentPath = "DerivedData\\Components\\" + componentKey;
+                lines.insert("K\t" + componentPath);
+                lines.insert("V\t" + componentPath + "\t" + CbsMarkValueName(deploymentKey) + "\t3\t");
+                ++claimValues;
+            }, readErr))
+        {
+            Err("读不了 --claims：" + readErr);
+            return 2;
+        }
+        if (!readTwoColumn(flagsPath, [&](const std::string& componentKey, const std::string& valueText) {
+                if (componentKey.empty() || valueText.empty()) return;
+                const long long value = std::strtoll(valueText.c_str(), nullptr, 10);
+                if (value <= 0 || value > 0x3F) return;
+                std::uint8_t bytes[4] = {static_cast<std::uint8_t>(value & 0xFF),
+                                         static_cast<std::uint8_t>((value >> 8) & 0xFF),
+                                         static_cast<std::uint8_t>((value >> 16) & 0xFF),
+                                         static_cast<std::uint8_t>((value >> 24) & 0xFF)};
+                const std::string componentPath = "DerivedData\\Components\\" + componentKey;
+                lines.insert("K\t" + componentPath);
+                std::string hex;
+                HexAppend(std::vector<std::uint8_t>(bytes, bytes + 4), hex);
+                lines.insert("V\t" + componentPath + "\tCF\t4\t" + hex);
+                ++flagValues;
+            }, readErr))
+        {
+            Err("读不了 --flags：" + readErr);
+            return 2;
+        }
+    }
+
     {
         FILE* out = _wfopen(outPath.c_str(), L"wb");
         if (!out) { Err("写不了文件：" + ToUtf8(outPath)); return 1; }
@@ -2907,7 +2984,8 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
           " deployments=" + std::to_string(deploymentKeys.size()) +
           " payloadValues=" + std::to_string(payloads) +
           " withoutCat=" + std::to_string(noCat) +
-          " markerAppIds=" + std::to_string(markers.size()));
+          " markerAppIds=" + std::to_string(markers.size()) +
+          " claims=" + std::to_string(claimValues) + " flags=" + std::to_string(flagValues));
     return 0;
 #else
     (void)packagesDir; (void)manifestDir; (void)markersPath; (void)outPath;
@@ -2927,6 +3005,8 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
                                const std::wstring& packagesDir,
                                const std::wstring& stagedDir,
                                const std::wstring& stackVersion,
+                               const std::wstring& bucketsPath,
+                               const std::wstring& cachePath,
                                const std::wstring& outPath)
 {
 #ifdef _WIN32
@@ -3039,10 +3119,115 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
     }
 
     // 2) 清单 → 家庭键 / 版本节点 / f256。
+    // 家庭归属的 build 桶是**安装历史**：被更早的服务栈暂存过的组件留在那个栈的桶里
+    // （8061 x86 有 100 个家庭落在 `6.2.7992.0 (fbl_fun_lad.110407-1318)`，全是引导组件）。
+    // 纯清单推不出来 ⇒ 用 --buckets <csv>（行 `家庭键|桶文本`）当输入覆盖默认桶。
+    std::map<std::string, std::string> bucketOverride;
+    if (!bucketsPath.empty())
+    {
+        std::wstring wideText, readErr;
+        if (!ReadFileUtf8(bucketsPath, wideText, readErr))
+        {
+            Err("读不了 --buckets 文件：" + ToUtf8(bucketsPath));
+            return 2;
+        }
+        const std::string text = ToUtf8(wideText);
+        std::size_t pos = 0;
+        while (pos < text.size())
+        {
+            std::size_t end = text.find('\n', pos);
+            if (end == std::string::npos) end = text.size();
+            std::string line = text.substr(pos, end - pos);
+            pos = end + 1;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const std::size_t bar = line.find('|');
+            if (bar == std::string::npos) continue;
+            bucketOverride[line.substr(0, bar)] = line.substr(bar + 1);
+        }
+    }
+
     std::set<std::string> lines;
-    const std::string bucket = "DerivedData\\VersionedIndex\\" + ToUtf8(stackVersion);
+    const std::string defaultBucketText = ToUtf8(stackVersion);
+    const std::string bucket = "DerivedData\\VersionedIndex\\" + defaultBucketText;
     lines.insert("K\t" + bucket);
     lines.insert("K\t" + bucket + "\\ComponentFamilies");
+
+    // 桶级缓存标识（ManifestCacheIdentifier = 4 字节小端；UtilizedSpace_MCP_<id> = 8 字节小端）。
+    // 两者都是存储创建/写入时生成的，不由清单推导 ⇒ --cache <csv>（行 `桶文本|id十六进制|已用字节`）。
+    if (!cachePath.empty())
+    {
+        std::wstring wideText, readErr;
+        if (!ReadFileUtf8(cachePath, wideText, readErr))
+        {
+            Err("读不了 --cache 文件：" + ToUtf8(cachePath));
+            return 2;
+        }
+        const std::string text = ToUtf8(wideText);
+        std::size_t pos = 0;
+        while (pos < text.size())
+        {
+            std::size_t end = text.find('\n', pos);
+            if (end == std::string::npos) end = text.size();
+            std::string line = text.substr(pos, end - pos);
+            pos = end + 1;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            std::vector<std::string> fields;
+            std::size_t start = 0;
+            for (;;)
+            {
+                const std::size_t bar = line.find('|', start);
+                if (bar == std::string::npos)
+                {
+                    fields.push_back(line.substr(start));
+                    break;
+                }
+                fields.push_back(line.substr(start, bar - start));
+                start = bar + 1;
+            }
+            if (fields.size() < 3) continue;
+            const std::string bucketText = fields[0];
+            const std::string bucketPath = "DerivedData\\VersionedIndex\\" + bucketText;
+            lines.insert("K\t" + bucketPath);
+            std::string idHex = fields[1];
+            for (char& ch : idHex)
+                if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+            // 行格式：
+            //   `桶文本|<8hex>|-1`            → ManifestCacheIdentifier（落盘是它的 4 字节小端）
+            //   `桶文本|<8hex>|<已用字节>`     → UtilizedSpace_MCP_<8hex>（8 字节小端）
+            if (fields[2] == "-1")
+            {
+                if (idHex.size() == 8)
+                {
+                    const std::string reversed = idHex.substr(6, 2) + idHex.substr(4, 2) +
+                                                 idHex.substr(2, 2) + idHex.substr(0, 2);
+                    lines.insert("V\t" + bucketPath + "\tManifestCacheIdentifier\t3\t" + reversed);
+                }
+                continue;
+            }
+            if (idHex.size() != 8) continue;
+            unsigned long long used = 0;
+            try
+            {
+                used = std::stoull(fields[2]);
+            }
+            catch (...)
+            {
+                used = 0;
+            }
+            std::string usedHex;
+            static const char* digits = "0123456789abcdef";
+            for (int i = 0; i < 8; ++i)
+            {
+                const unsigned byte = static_cast<unsigned>((used >> (8 * i)) & 0xFF);
+                usedHex.push_back(digits[byte >> 4]);
+                usedHex.push_back(digits[byte & 0xF]);
+            }
+            lines.insert("V\t" + bucketPath + "\tUtilizedSpace_MCP_" + idHex +
+                         "\t3\t" + usedHex);
+        }
+    }
 
     long long manifests = 0, stagedFiles = 0, f256 = 0, ct = 0, bad = 0;
     // 家庭层 f256 值可能由多个版本的条目拼接而成（键 = "家庭路径\t值名"）。
@@ -3078,12 +3263,28 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
 
         // 家庭键/版本节点对**所有**组件都写（真机 13,159 个家庭 / 13,325 个版本节点，
         // 与 Components 记录数一致）；f256 只有载荷真落位（组件目录存在）才有。
-        const std::string familyPath =
-            bucket + "\\ComponentFamilies\\" + CbsFamilyKeyName(identity);
+        const std::string familyKey = CbsFamilyKeyName(identity);
+        std::string bucketText = defaultBucketText;
+        const auto overrideIt = bucketOverride.find(familyKey);
+        const bool movedToOlderBucket = overrideIt != bucketOverride.end();
+        if (movedToOlderBucket) bucketText = overrideIt->second;
+        const std::string familyBucket = "DerivedData\\VersionedIndex\\" + bucketText;
+        lines.insert("K\t" + familyBucket);
+        lines.insert("K\t" + familyBucket + "\\ComponentFamilies");
+        const std::string familyPath = familyBucket + "\\ComponentFamilies\\" + familyKey;
         lines.insert("K\t" + familyPath);
         const std::string version = ToUtf8(manifest.identity.Version());
         const std::string versionPath = familyPath + "\\v!" + version;
         lines.insert("K\t" + versionPath);
+        if (movedToOlderBucket)
+        {
+            // 被更早服务栈暂存过的家庭在当前桶里仍有家庭键与版本节点，但只带一个
+            // `SomeUnparsedVersionsExist` = 0x00（真机 100 个家庭全部如此）。
+            const std::string currentFamilyPath = bucket + "\\ComponentFamilies\\" + familyKey;
+            lines.insert("K\t" + currentFamilyPath);
+            lines.insert("K\t" + currentFamilyPath + "\\v!" + version);
+            lines.insert("V\t" + currentFamilyPath + "\tSomeUnparsedVersionsExist\t3\t00");
+        }
 
         for (const FileSpec& file : manifest.files)
         {
@@ -3387,24 +3588,38 @@ int main(int argc, char** argv)
     }
 
     // cbs-plan-deployments <packagesDir> <manifestDir> <outFile> [--markers <csv>] [--installed <csv>]
+    //                      [--claims <csv>] [--flags <csv>]
     if (cmd == L"cbs-plan-deployments" && argc >= 5) {
-        std::wstring markersPath, installedPath;
+        std::wstring markersPath, installedPath, claimsPath, flagsPath;
         for (int i = 5; i < argc; ++i) {
             if (std::string(argv[i]) == "--markers" && i + 1 < argc) {
                 markersPath = FromUtf8OrAnsi(argv[++i]);
             } else if (std::string(argv[i]) == "--installed" && i + 1 < argc) {
                 installedPath = FromUtf8OrAnsi(argv[++i]);
+            } else if (std::string(argv[i]) == "--claims" && i + 1 < argc) {
+                claimsPath = FromUtf8OrAnsi(argv[++i]);
+            } else if (std::string(argv[i]) == "--flags" && i + 1 < argc) {
+                flagsPath = FromUtf8OrAnsi(argv[++i]);
             }
         }
         return CmdCbsPlanDeployments(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]),
-                                     markersPath, installedPath, FromUtf8OrAnsi(argv[4]));
+                                     markersPath, installedPath, claimsPath, flagsPath,
+                                     FromUtf8OrAnsi(argv[4]));
     }
 
     // cbs-plan-versioned <manifestDir> <packagesDir> <stagedDir> <stackVersion> <outFile>
+    //                   [--buckets <csv>] [--cache <csv>]
     if (cmd == L"cbs-plan-versioned" && argc >= 7) {
+        std::wstring bucketsPath, cachePath;
+        for (int i = 7; i + 1 < argc; ++i)
+        {
+            const std::wstring opt = FromUtf8OrAnsi(argv[i]);
+            if (opt == L"--buckets") bucketsPath = FromUtf8OrAnsi(argv[++i]);
+            else if (opt == L"--cache") cachePath = FromUtf8OrAnsi(argv[++i]);
+        }
         return CmdCbsPlanVersioned(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]),
                                    FromUtf8OrAnsi(argv[4]), FromUtf8OrAnsi(argv[5]),
-                                   FromUtf8OrAnsi(argv[6]));
+                                   bucketsPath, cachePath, FromUtf8OrAnsi(argv[6]));
     }
 
     // cbs-plan-root <arch> <stackVersion> <outFile> [--pending <32hex>] [--time <text>]
