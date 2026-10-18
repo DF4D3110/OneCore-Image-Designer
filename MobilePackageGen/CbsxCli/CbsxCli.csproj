@@ -37,6 +37,7 @@
 
   <ItemGroup>
     <!-- reuse the exact service sources the app uses, so CLI and GUI never diverge -->
+    <Compile Include="..\..\Services\OcidLogPaths.cs" />
     <Compile Include="..\..\Services\WinSxSHashCalculator.cs" />
     <Compile Include="..\..\Services\ManifestDecompressor.cs" />
     <Compile Include="..\..\Services\SkuAssemblyService.cs" />

@@ -88,7 +88,7 @@ if (Test-Path (Join-Path $hookSrcDir 'OcidRegHook.cpp')) {
         $cl  = "call `"$vcvars`" >nul 2>&1 && cd /d `"$hookSrcDir`" && " +
                "cl /nologo /LD /O2 /W3 /EHsc /utf-8 /DUNICODE /D_UNICODE OcidRegHook.cpp " +
                "/Fe:`"$hookDll`" /Fo:`"$hookOutDir\OcidRegHook.obj`" " +
-               "/link /MACHINE:X86 /DEF:`"$def`" ntdll.lib kernel32.lib"
+               "/link /MACHINE:X86 /DEF:`"$def`" ntdll.lib kernel32.lib shlwapi.lib"
         & cmd /c $cl 2>&1 | Select-String -Pattern 'error|错误' | Select-Object -First 5 | ForEach-Object { Write-Host "    $_" }
         $hookBuilt = Test-Path $hookDll
         if (-not $hookBuilt) { Write-Warning '  cl 编译失败（见上面的 error）' }
