@@ -45,6 +45,7 @@ param(
     [switch] $RootMinimal,
     [string[]] $StackEntries = @(),
     [switch] $Transactional,
+    [switch] $SkipFileVerify,
     [string] $DiffAgainst,
     [string] $Exe
 )
@@ -195,6 +196,18 @@ if ($Override -and (Test-Path $Override)) {
 }
 [IO.File]::WriteAllLines($planMerged, $sorted, (New-Object Text.UTF8Encoding($false)))
 Write-Host ("[assemble] merged lines: {0}" -f $sorted.Count)
+
+# 文件 + 台账的原子性靠顺序约定：先把文件落进 WinSxS，再提交台账。
+# 提交前核对一遍 —— 每个 f! 值都必须在相应组件目录里找到文件；任何缺失就
+# 放弃写台账（文件多了只是孤儿，台账不会被改成半截状态）。
+if (-not $SkipFileVerify) {
+    if (-not (Test-Path $WinSxs)) { throw "missing WinSxS directory: $WinSxs" }
+    Write-Host "[assemble] verifying staged files against plan: $WinSxs"
+    & $Exe cbs-verify-files $planMerged $WinSxs
+    if ($LASTEXITCODE -ne 0) {
+        throw "cbs-verify-files failed (exit $LASTEXITCODE): refusing to write the ledger; stage the missing files first"
+    }
+}
 
 $writeArgs = @('cbs-write', $planMerged, $hive)
 if ($Transactional) { $writeArgs += '--transactional' }

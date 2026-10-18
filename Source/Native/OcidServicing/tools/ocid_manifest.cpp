@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <functional>
 #include <iterator>
 #include <map>
@@ -1610,6 +1611,160 @@ static int CmdCbsDump(const std::wstring& hiveSpec, const std::wstring& outPath)
 #endif
 }
 
+// ── 文件落位核对（cbs-verify-files）────────────────────────────────────
+//
+// 台账与文件必须同时成立：一个组件的 f! 值条数 = 它在 WinSxS 下的文件数。
+// 组装顺序约定是"先把文件落进 WinSxS，再提交台账"，这个命令在提交前核对
+// 一遍：缺组件目录、缺文件、条数不等都算失败，调用方据此放弃写台账 ——
+// 这就是"文件 + 台账"的事务边界（不用 CreateFileTransacted 也能保证不留
+// 半截状态：文件多了是孤儿，台账不会被改）。
+static int CmdCbsVerifyFiles(const std::wstring& planPath, const std::wstring& winSxsDir)
+{
+#ifdef _WIN32
+    std::wstring raw, err;
+    if (!ReadFileUtf8(planPath, raw, err)) { Err(ToUtf8(err)); return 2; }
+
+    auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    auto lowerAscii = [](std::string text) {
+        for (char& c : text)
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        return text;
+    };
+
+    std::map<std::string, std::vector<std::string>> expected; // 组件键 → 文件名（小写）
+    std::set<std::string> componentKeys;
+
+    const std::string text = ToUtf8(raw);
+    std::size_t pos = 0;
+    while (pos < text.size())
+    {
+        std::size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(pos, end - pos);
+        pos = end + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.size() < 2 || line[0] != 'V') continue;
+
+        std::vector<std::string> fields;
+        std::size_t p = 0;
+        for (;;)
+        {
+            const std::size_t tab = line.find('\t', p);
+            if (tab == std::string::npos) { fields.push_back(line.substr(p)); break; }
+            fields.push_back(line.substr(p, tab - p));
+            p = tab + 1;
+        }
+        if (fields.size() < 5) continue;
+
+        const std::string& keyPath = fields[1];
+        const std::string& valueName = fields[2];
+        static const std::string kComponents = "DerivedData\\Components\\";
+        if (keyPath.rfind(kComponents, 0) != 0) continue;
+        const std::string componentKey = keyPath.substr(kComponents.size());
+        if (componentKey.empty()) continue;
+        if (componentKey.find('\\') != std::string::npos) continue;
+        componentKeys.insert(componentKey);
+
+        if (valueName.rfind("f!", 0) != 0) continue;
+        std::vector<std::string>& names = expected[componentKey];
+
+        const std::string& hex = fields[4];
+        std::string name;
+        if (hex.empty())
+        {
+            name = valueName.substr(2); // 空数据 = 值名后缀本身就是（小写）文件名
+        }
+        else if (hex.size() % 4 == 0)
+        {
+            std::wstring wide;
+            wide.reserve(hex.size() / 4);
+            bool ok = true;
+            for (std::size_t i = 0; i < hex.size(); i += 4)
+            {
+                const int b0 = (nibble(hex[i]) << 4) | nibble(hex[i + 1]);   // 低字节
+                const int b1 = (nibble(hex[i + 2]) << 4) | nibble(hex[i + 3]); // 高字节
+                if (b0 < 0 || b1 < 0) { ok = false; break; }
+                wide.push_back(static_cast<wchar_t>(b1 * 256 + b0));
+            }
+            if (!ok) continue;
+            name = ToUtf8(wide);
+        }
+        else
+        {
+            continue;
+        }
+        names.push_back(lowerAscii(name.substr(name.find_last_of('\\') == std::string::npos
+                                              ? 0
+                                              : name.find_last_of('\\') + 1)));
+    }
+
+    namespace fs = std::filesystem;
+    const fs::path root(winSxsDir);
+    std::error_code ec;
+
+    std::size_t withFiles = 0, filesExpected = 0;
+    std::size_t dirsMissing = 0, filesMissing = 0, countMismatch = 0;
+    std::vector<std::string> samples;
+
+    for (const auto& item : expected)
+    {
+        const std::string& key = item.first;
+        ++withFiles;
+        filesExpected += item.second.size();
+
+        const fs::path dir = root / fs::path(key);
+        if (!fs::is_directory(dir, ec))
+        {
+            ++dirsMissing;
+            if (samples.size() < 20) samples.push_back("no-dir " + key);
+            continue;
+        }
+
+        std::set<std::string> actual;
+        for (const auto& e : fs::recursive_directory_iterator(dir, ec))
+        {
+            if (!e.is_regular_file(ec)) continue;
+            const std::string leaf = ToUtf8(e.path().filename().wstring());
+            if (leaf == key + ".manifest") continue; // 组件清单不算载荷
+            actual.insert(lowerAscii(leaf));
+        }
+
+        for (const std::string& want : item.second)
+        {
+            if (actual.count(want) == 0)
+            {
+                ++filesMissing;
+                if (samples.size() < 20) samples.push_back("no-file " + key + "\\" + want);
+            }
+        }
+        if (actual.size() != item.second.size())
+        {
+            ++countMismatch;
+            if (samples.size() < 20)
+                samples.push_back("count " + key + " expected=" + std::to_string(item.second.size()) +
+                                  " actual=" + std::to_string(actual.size()));
+        }
+    }
+
+    OutLn("components=" + std::to_string(componentKeys.size()) +
+          " componentsWithFiles=" + std::to_string(withFiles) +
+          " files=" + std::to_string(filesExpected) +
+          " dirsMissing=" + std::to_string(dirsMissing) +
+          " filesMissing=" + std::to_string(filesMissing) +
+          " countMismatch=" + std::to_string(countMismatch));
+    for (const std::string& s : samples) OutLn("  - " + s);
+    return (dirsMissing == 0 && filesMissing == 0 && countMismatch == 0) ? 0 : 1;
+#else
+    (void)planPath; (void)winSxsDir;
+    return 2;
+#endif
+}
+
 static int CmdCbsDiff(const std::wstring& pathA, const std::wstring& pathB, int limit)
 {
 #ifdef _WIN32
@@ -2183,6 +2338,7 @@ static void Usage()
     OutLn("      [--pending <32hex>] [--time <timestamp 文本>]  根键值（会话态可显式给）");
     OutLn("      --markers: key|appid|thumb|markers（真机导出的安装/启用状态，决定 p!/s!/i!）");
     OutLn("  ocid_manifest cbs-diff <a.txt> <b.txt> [--limit N]   compare two cbs-dump files");
+    OutLn("  ocid_manifest cbs-verify-files <plan.txt> <winSxsDir>   check every f! value has its file staged");
     OutLn("  ocid_manifest cbs-write <plan.txt> <hivePath> [--transactional]   rebuild a hive file from a cbs-dump text");
     OutLn("");
     OutLn("Data goes to stdout, diagnostics to stderr.");
@@ -4321,6 +4477,11 @@ int main(int argc, char** argv)
             if (std::string(argv[i]) == "--limit" && i + 1 < argc) { mx = atoi(argv[++i]); }
         }
         return CmdCbsDiff(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]), mx);
+    }
+
+    // cbs-verify-files <planFile> <winSxsDir>：提交台账前核对文件是否都已落位
+    if (cmd == L"cbs-verify-files" && argc >= 4) {
+        return CmdCbsVerifyFiles(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]));
     }
 
     // cbs-write <planFile> <hivePath> [--transactional]：把计划文本落成 hive 文件
