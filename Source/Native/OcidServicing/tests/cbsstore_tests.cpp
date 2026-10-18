@@ -172,6 +172,28 @@ static void StoreHeader()
     CbsStoreHeader scratch;
     std::string brokenError;
     Check(!CbsDecodeStoreHeader(broken, scratch, brokenError), "缺 StoreFormatVersion 时报错");
+
+    // 根键上的"其它值"必须原样往返（8419 镜像的 LastScavengeCookie/LastScavengeFlags）
+    std::vector<CbsValue> withExtras = values;
+    withExtras.push_back(CbsValue{"LastScavengeCookie", FromHex("1122334455667788")});
+    withExtras.push_back(CbsValue{"LastScavengeFlags", FromHex("01000000")});
+    CbsStoreHeader extraHeader;
+    std::string extraError;
+    Check(CbsDecodeStoreHeader(withExtras, extraHeader, extraError), "带额外根值的解码成功");
+    CheckInt(static_cast<long long>(extraHeader.extraValues.size()), 2, "两个未知根值被保留");
+    const std::vector<CbsValue> extraBack = CbsEncodeStoreHeader(extraHeader);
+    CheckInt(static_cast<long long>(extraBack.size()),
+             static_cast<long long>(withExtras.size()), "再编码后根值个数不变");
+    bool cookieOk = false, flagsOk = false;
+    for (const CbsValue& value : extraBack)
+    {
+        if (value.name == "LastScavengeCookie")
+            cookieOk = HexOf(value.data) == "1122334455667788";
+        else if (value.name == "LastScavengeFlags")
+            flagsOk = HexOf(value.data) == "01000000";
+    }
+    Check(cookieOk, "LastScavengeCookie 原样往返");
+    Check(flagsOk, "LastScavengeFlags 原样往返");
 }
 
 static void ComponentRecord()

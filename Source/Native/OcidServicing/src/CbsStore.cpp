@@ -657,6 +657,10 @@ bool CbsDecodeStoreHeader(const std::vector<CbsValue>& rootValues,
                 return false;
             }
             out.hasPendingXmlIdentifier = true;
+        } else {
+            // 根键上的其它值（LastScavengeCookie、LastScavengeFlags 等）不认识就原样保留，
+            // 否则 decode -> encode 会少值（8419 镜像曾因此让 cbs-scan 报"值个数不同"）。
+            out.extraValues.push_back(value);
         }
     }
     if (!hasFormat) {
@@ -683,6 +687,7 @@ std::vector<CbsValue> CbsEncodeStoreHeader(const CbsStoreHeader& header) {
         values.push_back(CbsValue{"PendingXmlIdentifier",
                                   CbsEncodeUtf16Text(header.pendingXmlIdentifier)});
     }
+    values.insert(values.end(), header.extraValues.begin(), header.extraValues.end());
     return values;
 }
 

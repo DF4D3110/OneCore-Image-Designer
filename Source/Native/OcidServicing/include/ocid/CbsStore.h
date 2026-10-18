@@ -210,6 +210,9 @@ struct CbsStoreHeader {
     std::uint32_t executionState = 0;
     bool hasPendingXmlIdentifier = false;
     std::wstring pendingXmlIdentifier;   // 32 个 hex 字符
+    // 根键上不属于上述字段的值（例如 8419 镜像的 LastScavengeCookie/LastScavengeFlags）。
+    // 解码时原样收进来、编码时原样写回，保证 decode -> encode 无损。
+    std::vector<CbsValue> extraValues;
 };
 
 bool CbsDecodeStoreHeader(const std::vector<CbsValue>& rootValues,
