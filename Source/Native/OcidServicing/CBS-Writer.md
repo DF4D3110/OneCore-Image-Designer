@@ -197,6 +197,36 @@ ocid_manifest cbs-write plan-bad.txt rollback.hiv --transactional
 这条核对同时是"计划正确性"的第二把尺子：`f!` 集合与磁盘文件集合必须一一对应，
 任何清单解析偏差（多一条 f!、少一条、名字大小写错）都会在这里暴露，而不用等挂载 hive 后对拍。
 
+### 6.3 台账自洽性核对（cbs-verify-store，不需要任何参照样本）
+
+`ocid_manifest cbs-verify-store <hiveSpec>` 在**没有微软原版可对拍**时也能证明一份
+COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一关即可：
+
+| 检查 | 规则 |
+|---|---|
+| 组件键名 | `键名 == CbsComponentKeyName(记录里的 identity)` |
+| `f!` 值名 | `值名 == CbsFileValueName(原始大小写文件名)` |
+| 部署键名 | `键名 == CbsDeploymentKeyName(appid)` |
+| `p!/s!/i!` 值名 | `值名 == CbsPayloadValueName(前缀, 载荷身份)` |
+| `c!` 引用闭合 | 每个 `c!<部署键>` 指向的部署键必须存在 |
+| 部署 → 组件 | 每个部署的 appid 身份都有一条同名（同 pseudo-key）组件记录 |
+| Catalogs | 键都是 64 个小写 hex |
+| VersionedIndex | 每个家庭键都能由某个组件的 identity 折叠出来 |
+
+实测（我方产物与真机都跑）：
+
+```
+我方 x86  OCIDX11.hiv ：components=13325 deployments=2283 catalogs=792 families=13259 result=OK
+真机 x86  OCIDCOMP    ：components=13325 deployments=2283 catalogs=792 families=13259 result=OK
+真机 ARM  OCIDCOMPP   ：components=118   deployments=12   catalogs=0   families=235   result=OK
+反例（给真实组件加一条指向不存在部署的 c!）→ missing-mark-target=2，exit 1
+```
+
+`assemble-cbs-store.ps1` 默认在 `cbs-write` 之后挂载新 hive 跑这一步（`-SkipStoreVerify`
+可跳过），不通过就 `throw`。注意：两个桶里一共 13,259 个家庭键（当前桶 + 被更早服务栈暂存
+的第二个桶，见第 3 节 `--buckets`），它们全部都能由组件身份折叠出来（`orphan-family=0`），
+所以这一关不受"同一家庭挂在两个桶下"影响。
+
 ## 7. 剩余工作
 
 1. **PCM 表构建器**（`BuildPcmTables`）：把清单 XML 直接编译成 35 张表。容器、TOC、槽位、
