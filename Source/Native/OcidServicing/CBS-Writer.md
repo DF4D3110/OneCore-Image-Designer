@@ -170,6 +170,33 @@ ocid_manifest cbs-write plan-bad.txt rollback.hiv --transactional
 
 需要 Win8+ 的 KTM 服务（桌面版/Server 默认运行）；`--transactional` 不加则退回普通写入。`assemble-cbs-store.ps1 -Transactional` 会把开关透传下来（ARM 8061 走事务提交后对真机仍 0/0）。
 
+### 6.2 文件 + 台账的原子性（顺序约定 + 提交前核对）
+
+台账只描述"WinSxS 里应该有什么文件"。如果先写台账、文件却没落成，镜像就是坏的；
+反过来文件多落了一些只是孤儿（台账没引用，不破坏任何组件）。所以原子性靠**顺序约定**：
+
+```
+1. 把载荷落进 <ImageRoot>\Windows\WinSxS\<组件键>\   （CSI 落位；失败就中止，此时台账还没动）
+2. ocid_manifest cbs-verify-files plan-all.txt <WinSxS>  （提交前核对）
+3. ocid_manifest cbs-write plan-all.txt COMPONENTS.hiv --transactional  （KTM 提交台账）
+```
+
+`cbs-verify-files` 逐个组件核对：`f!` 值条数 = 该组件目录里的文件数（清单文件
+`<组件键>.manifest` 不计），缺目录 / 缺文件 / 条数不等都返回 1。`assemble-cbs-store.ps1`
+默认在 `cbs-write` 之前跑这一步，不过就 `throw`（不写台账）；`-SkipFileVerify` 可跳过。
+
+实测（两个镜像的"已落位"镜像）：
+
+```
+8061 x86  Q:\Windows\WinSxS ：components=13325 componentsWithFiles=9492 files=19006 dirsMissing=0 filesMissing=0 countMismatch=0
+8061 ARM  P:\Windows\WinSxS ：components=118   componentsWithFiles=79   files=316   dirsMissing=0 filesMissing=0 countMismatch=0
+反例（计划的组件目录不存在）           → dirsMissing=1，exit 1
+反例（真实组件目录里换成不存在的文件名）→ filesMissing=1 + countMismatch=1，exit 1
+```
+
+这条核对同时是"计划正确性"的第二把尺子：`f!` 集合与磁盘文件集合必须一一对应，
+任何清单解析偏差（多一条 f!、少一条、名字大小写错）都会在这里暴露，而不用等挂载 hive 后对拍。
+
 ## 7. 剩余工作
 
 1. **PCM 表构建器**（`BuildPcmTables`）：把清单 XML 直接编译成 35 张表。容器、TOC、槽位、
@@ -195,5 +222,6 @@ ocid_manifest cbs-write plan-bad.txt rollback.hiv --transactional
 2. 覆盖表瘦身：第 4 节剩下的行已逐条试过推导（f256 段序试了架构/文化/CF/组件键哈希序，
    只能解释 56/60 的顺序且方向不定；CT 的归属包不在 `.mum` 声明集合里）⇒ 保留为输入。
 3. KTM 事务化：**注册表写入侧已完成**（`cbs-write --transactional`，见 6.1，提交/回滚都实测过）。
-   还没做的是"文件 + 注册表同一个事务"：CSI 落位用的是普通文件 API，若要做到"落位失败台账也不变"，
-   需要把载荷复制/建链接也包进 KTM 事务（`CreateFileTransacted` 或"先落文件、后提台账"的顺序约定）。
+   "文件 + 注册表"的原子性已用顺序约定 + 提交前核对解决（见 6.2，`cbs-verify-files` 已接进
+   `assemble-cbs-store.ps1`）；真正把文件复制也包进 KTM（`CreateFileTransacted`）没有做，
+   因为顺序约定已经满足"落位失败则台账不变"，而事务化文件 API 对 WinSxS 的 TI ACL 不友好。
