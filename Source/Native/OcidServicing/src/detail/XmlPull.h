@@ -207,11 +207,22 @@ namespace detail {
         }
 
         /// 解析整篇文档，返回根元素。
+        ///
+        /// 真机清单里 `<?…?>` 常不止一个：`<?xml …?>` 之后还有
+        /// `<?Copyright (c) Microsoft Corporation. All rights reserved.?>`
+        /// （如 `x86_microsoft-windows-foundation_…manifest`）。所以开头要**反复**
+        /// 跳过处理指令/注释/DOCTYPE，直到真正的根元素。
         bool ParseDocument(XmlNode& root)
         {
-            SkipWs();
-            if (StartsWith(L"<?")) { SkipCommentOrPi(); SkipWs(); }
-            while (StartsWith(L"<!--") || StartsWith(L"<!")) { SkipCommentOrPi(); SkipWs(); }
+            for (;;)
+            {
+                SkipWs();
+                if (StartsWith(L"<!--") || StartsWith(L"<?") || StartsWith(L"<!")) {
+                    SkipCommentOrPi();
+                    continue;
+                }
+                break;
+            }
             if (Cur() != L'<') { error = L"文档里没有根元素"; return false; }
             return ParseElement(root);
         }

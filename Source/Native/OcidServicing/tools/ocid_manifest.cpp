@@ -21,6 +21,7 @@
 #include "ocid/MacroExpander.h"
 #include "ocid/Manifest.h"
 #include "ocid/RegistryValue.h"
+#include "ocid/Sha256.h"
 #include "ocid/WcmSchema.h"
 
 #include <algorithm>
@@ -1868,6 +1869,253 @@ int CmdCbsKeyCheck(const std::wstring& path, const std::wstring& namesMode)
     return (bad == 0 && unparsable == 0) ? 0 : 1;
 }
 
+// ── cbs-plan-components：从 WinSxS 清单生成 DerivedData\Components 计划 ──────
+//
+// “逐字节一致”的验收方式：先只复刻**能由清单文件确定性算出**的那部分，再用
+// `cbs-dump` 的真机导出做 diff。计划行格式与 cbs-dump 相同：
+//   K\tDerivedData\Components\<组件键>
+//   V\t…\<键>\tidentity\t3\t<hex ASCII 身份文本>
+//   V\t…\<键>\tS256H\t3\t<hex SHA-256（清单文件整份字节）>
+//   V\t…\<键>\tf!<文件名>\t3\t<hex UTF-16LE 原始大小写文件名>
+// 还差的部分（c! / CF / 部署记录 / 版本索引）会以“真机有、计划无”的形式出现，
+// 正好就是待办清单。
+
+namespace {
+
+#ifdef _WIN32
+bool ReadFileBytes(const std::wstring& path,
+                   std::vector<std::uint8_t>& out,
+                   std::wstring& err)
+{
+    HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE)
+    {
+        err = L"打不开文件：" + path;
+        return false;
+    }
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(handle, &size))
+    {
+        CloseHandle(handle);
+        err = L"取文件大小失败：" + path;
+        return false;
+    }
+    out.resize(static_cast<std::size_t>(size.QuadPart));
+    std::size_t done = 0;
+    while (done < out.size())
+    {
+        DWORD read = 0;
+        const DWORD want = static_cast<DWORD>(
+            std::min<std::size_t>(out.size() - done, 1u << 20));
+        if (!ReadFile(handle, out.data() + done, want, &read, nullptr) || read == 0)
+        {
+            CloseHandle(handle);
+            err = L"读文件失败：" + path;
+            return false;
+        }
+        done += read;
+    }
+    CloseHandle(handle);
+    return true;
+}
+#endif
+
+// UTF-16LE 字节的十六进制（小端：低字节先）。
+std::string Utf16LeHex(const std::wstring& text)
+{
+    static const char* digits = "0123456789abcdef";
+    std::string out;
+    out.reserve(text.size() * 4);
+    for (wchar_t ch : text)
+    {
+        const std::uint16_t unit = static_cast<std::uint16_t>(ch);
+        out.push_back(digits[(unit >> 4) & 0xF]);
+        out.push_back(digits[unit & 0xF]);
+        out.push_back(digits[(unit >> 12) & 0xF]);
+        out.push_back(digits[(unit >> 8) & 0xF]);
+    }
+    return out;
+}
+
+// 清单的 <assemblyIdentity> → 真机 identity 值的文本形态（属性顺序固定）：
+//   name, Culture=…, [Type=…,] Version=…, PublicKeyToken=…, ProcessorArchitecture=…[, versionScope=NonSxS]
+// 真机样例： `Microsoft-Windows-ServicingStack, Culture=neutral, Version=6.2.8061.0,
+//            PublicKeyToken=31bf3856ad364e35, ProcessorArchitecture=x86, versionScope=NonSxS`
+std::string IdentityTextFromManifest(const AssemblyIdentity& identity)
+{
+    std::string out = ToUtf8(identity.Name());
+    auto add = [&out](const char* key, const std::string& value) {
+        out += ", ";
+        out += key;
+        out += "=";
+        out += value;
+    };
+    std::string language = ToUtf8(identity.Language());
+    // 真机 13,325 条 identity 值逐条对拍得到的规则：
+    //   * 清单 `language=""` 或 `language="*"`（.NET 中性程序集）→ `neutral`；
+    //   * 英语文化（`en-*`，大小写任意）**照抄清单**——台账里两种写法都真实存在：
+    //     `en-US`（x86 驱动语言包/资源组件）与 `en-us`（msil 组件）；
+    //   * 其他文化一律小写——`cs-CZ`→`cs-cz`、`sr-Latn-CS`→`sr-latn-cs`、
+    //     `qps-ploc` 保持原样。
+    if (language.empty() || language == "*")
+        language = "neutral";
+    else
+    {
+        const bool english = language.size() >= 3 &&
+                             (language[0] == 'e' || language[0] == 'E') &&
+                             (language[1] == 'n' || language[1] == 'N') && language[2] == '-';
+        if (!english)
+            for (char& c : language)
+                if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    add("Culture", language);
+    const std::string type = ToUtf8(identity.Type());
+    if (!type.empty()) add("Type", type);
+    add("Version", ToUtf8(identity.Version()));
+    add("PublicKeyToken", ToUtf8(identity.PublicKeyToken()));
+    const std::string architecture = ToUtf8(identity.Architecture());
+    if (!architecture.empty()) add("ProcessorArchitecture", architecture);
+    std::string scope = ToUtf8(identity.ScopeString());
+    if (!scope.empty())
+    {
+        std::string lower = scope;
+        for (char& c : lower)
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        add("versionScope", lower == "nonsxs" ? "NonSxS" : scope);
+    }
+    return out;
+}
+
+}  // namespace
+
+static int CmdCbsPlanComponents(const std::wstring& manifestDir,
+                                const std::wstring& outPath,
+                                const std::wstring& winSxsDir,
+                                int limit)
+{
+#ifdef _WIN32
+    WIN32_FIND_DATAW found{};
+    const std::wstring pattern = manifestDir + L"\\*.manifest";
+    HANDLE find = FindFirstFileW(pattern.c_str(), &found);
+    if (find == INVALID_HANDLE_VALUE)
+    {
+        Err("目录里没有 .manifest：" + ToUtf8(manifestDir));
+        return 2;
+    }
+
+    std::vector<std::string> lines;
+    std::vector<std::wstring> skipped;
+    long long manifests = 0, components = 0, staged = 0, files = 0, bad = 0, identityBad = 0;
+    do
+    {
+        if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+        if (limit > 0 && manifests >= limit) break;
+        const std::wstring path = manifestDir + L"\\" + found.cFileName;
+
+        std::vector<std::uint8_t> bytes;
+        std::wstring readErr;
+        if (!ReadFileBytes(path, bytes, readErr))
+        {
+            ++bad;
+            if (skipped.size() < 10) skipped.push_back(found.cFileName);
+            continue;
+        }
+        std::wstring text;
+        if (!ReadFileUtf8(path, text, readErr))
+        {
+            ++bad;
+            if (skipped.size() < 10) skipped.push_back(found.cFileName);
+            continue;
+        }
+        ComponentManifest manifest;
+        const ManifestParseResult parsed = ParseComponentManifest(text, manifest);
+        if (!parsed.ok)
+        {
+            ++bad;
+            Err("清单解析失败 " + ToUtf8(found.cFileName) + "：" + ToUtf8(parsed.error));
+            if (skipped.size() < 10) skipped.push_back(found.cFileName);
+            continue;
+        }
+        ++manifests;
+
+        const std::string identityText = IdentityTextFromManifest(manifest.identity);
+        CbsIdentity identity;
+        std::string parseErr;
+        if (!CbsParseIdentity(identityText, identity, parseErr))
+        {
+            ++identityBad;
+            Err("身份解析失败 " + ToUtf8(found.cFileName) + "：" + parseErr);
+            continue;
+        }
+
+        // 组件键就是 WinSxS 里的组件目录名；目录存在 ⇒ 载荷已落位 ⇒ 才有 f! 值。
+        const std::string key = CbsComponentKeyName(identity);
+        bool isStaged = true;
+        if (!winSxsDir.empty())
+        {
+            const std::wstring componentDir =
+                winSxsDir + L"\\" + FromUtf8OrAnsi(key.c_str());
+            const DWORD attrs = GetFileAttributesW(componentDir.c_str());
+            isStaged = attrs != INVALID_FILE_ATTRIBUTES &&
+                       (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        }
+        if (isStaged) ++staged;
+
+        const std::string keyPath = "DerivedData\\Components\\" + key;
+        lines.push_back("K\t" + keyPath);
+
+        std::string identityHex;
+        HexAppend(std::vector<std::uint8_t>(identityText.begin(), identityText.end()),
+                  identityHex);
+        lines.push_back("V\t" + keyPath + "\tidentity\t3\t" + identityHex);
+
+        std::string shaHex;
+        HexAppend(Sha256(bytes), shaHex);
+        lines.push_back("V\t" + keyPath + "\tS256H\t3\t" + shaHex);
+
+        if (!isStaged) continue;
+
+        for (const FileSpec& file : manifest.files)
+        {
+            if (file.name.empty()) continue;
+            // 值的名字是文件名的小写；值数据只在“名字无法由值名还原”时写
+            // （即值名后缀 != 原始文件名）——真机 19,006 条 f! 值一条不差：
+            //   c2wtshost.exe（本来就全小写）=> 数据为空
+            //   Accessibility.dll / 超 25 字符被截断 => 数据是原始大小写的 UTF-16
+            const std::string valueName = CbsFileValueName(file.name);
+            const std::string suffix =
+                valueName.size() > 2 ? valueName.substr(2) : std::string();
+            const std::string nameUtf8 = ToUtf8(file.name);
+            lines.push_back("V\t" + keyPath + "\t" + valueName + "\t3\t" +
+                            (suffix == nameUtf8 ? std::string() : Utf16LeHex(file.name)));
+            ++files;
+        }
+        ++components;
+    } while (FindNextFileW(find, &found) != 0);
+    FindClose(find);
+
+    std::sort(lines.begin(), lines.end());
+    std::wstring writeErr;
+    if (!WriteLinesUtf8(outPath, lines, writeErr))
+    {
+        Err(ToUtf8(writeErr));
+        return 1;
+    }
+
+    for (const std::wstring& name : skipped) Err("跳过（读/解析失败）：" + ToUtf8(name));
+    OutLn("manifests=" + std::to_string(manifests) + " staged=" + std::to_string(staged) +
+          " componentsWithFiles=" + std::to_string(components) +
+          " files=" + std::to_string(files) + " bad=" + std::to_string(bad) +
+          " identityBad=" + std::to_string(identityBad));
+    return 0;
+#else
+    (void)manifestDir; (void)outPath; (void)winSxsDir; (void)limit;
+    return 2;
+#endif
+}
+
 int main(int argc, char** argv)
 {
     SetupConsole();
@@ -1994,12 +2242,36 @@ int main(int argc, char** argv)
         return CmdCbsDump(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]));
     }
 
+    if (cmd == L"cbs-plan-components" && argc >= 4) {
+        std::wstring winSxs;
+        int mx = 0;
+        for (int i = 4; i < argc; ++i) {
+            const std::string a = argv[i];
+            if (a == "--staged" && i + 1 < argc) { winSxs = FromUtf8OrAnsi(argv[++i]); }
+            else if (a == "--limit" && i + 1 < argc) { mx = atoi(argv[++i]); }
+        }
+        return CmdCbsPlanComponents(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]), winSxs, mx);
+    }
+
     if (cmd == L"cbs-diff" && argc >= 4) {
         int mx = 0;
         for (int i = 4; i < argc; ++i) {
             if (std::string(argv[i]) == "--limit" && i + 1 < argc) { mx = atoi(argv[++i]); }
         }
         return CmdCbsDiff(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]), mx);
+    }
+
+    // cbs-hash：算身份折叠 / 值名后缀用的 H39 文本哈希（调试用）。
+    if (cmd == L"cbs-hash" && argc >= 3) {
+        for (int i = 2; i < argc; ++i) {
+            const std::wstring text = FromUtf8OrAnsi(argv[i]);
+            const std::uint64_t value = CbsHashEncodedText(ToUtf8(text));
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%016llx",
+                static_cast<unsigned long long>(value));
+            std::printf("%s -> %s\n", argv[i], buf);
+        }
+        return 0;
     }
 
     if (cmd == L"macros")

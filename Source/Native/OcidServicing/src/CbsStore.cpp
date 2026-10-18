@@ -122,15 +122,41 @@ std::string CbsPayloadValueName(const std::string& prefix, const std::string& id
     return prefix + description + "_" + Hex16(CbsHashEncodedText(identity));
 }
 
-std::string CbsFileValueName(const std::wstring& fileName) {
-    // 真机实测：值名是文件名的小写，值数据才是原始大小写；名字超过 25 字符时改成
-    // `前 25 字符_16 个 hex`（哈希输入是原始大小写的完整文件名）。
-    const std::string utf8 = ToUtf8(fileName);
-    const std::string lower = LowerAscii(utf8);
-    if (lower.size() <= 25) {
-        return "f!" + lower;
+// f! 值名的"名字形态"：只保留 [a-z0-9._-]，其余字符（空格、反斜杠、括号…）先转成
+// `_`，再把连续的 `_` 合并成一个。真机 19,006 条 f! 值全部符合：
+//   `I386\PS_SCHM.GDL`        → `i386_ps_schm.gdl`
+//   `grid_(cm).wmf`           → `grid_cm_.wmf`
+//   `__AssemblyInfo__.ini`    → `_assemblyinfo_.ini`
+//   `Scan Management.lnk`     → `scan_management.lnk`
+std::string CbsFileValueShape(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    for (char raw : LowerAscii(text)) {
+        const bool keep = (raw >= 'a' && raw <= 'z') || (raw >= '0' && raw <= '9') ||
+                          raw == '.' || raw == '_' || raw == '-';
+        const char c = keep ? raw : '_';
+        if (c == '_' && !out.empty() && out.back() == '_') {
+            continue;
+        }
+        out.push_back(c);
     }
-    return "f!" + lower.substr(0, 25) + "_" + Hex16(CbsHashEncodedText(utf8));
+    return out;
+}
+
+std::string CbsFileValueName(const std::wstring& fileName) {
+    // 真机实测：值名是文件名的"值名形态"（见 CbsFileValueShape）。形态里只要带 `_`
+    // 或长度超过 25 字符，就必须改写成 `前 25 字符_16 个 hex`——因为 `_` 是名字与哈希
+    // 的分隔符，直接留着会产生歧义。哈希输入是原始大小写的完整文件名。
+    //   `HdAudio.sys.mui`           → `f!hdaudio.sys.mui`（无 `_`，短）
+    //   `3ware.inf_loc`            → `f!3ware.inf_loc_0228dc204749abc0`
+    //   `I386\PS_SCHM.GDL`         → `f!i386_ps_schm.gdl_98233503d2fb478c`
+    //   `PrintAdvancedInstaller.dll` → `f!printadvancedinstaller.dl_b7ff1ded0fdd6573`
+    const std::string utf8 = ToUtf8(fileName);
+    const std::string shape = CbsFileValueShape(utf8);
+    if (shape.size() <= 25 && shape.find('_') == std::string::npos) {
+        return "f!" + shape;
+    }
+    return "f!" + shape.substr(0, 25) + "_" + Hex16(CbsHashEncodedText(utf8));
 }
 
 std::string CbsMarkValueName(const std::string& deploymentName) {

@@ -269,8 +269,20 @@ static void ComponentRecord()
         CheckAscii(CbsFileValueName(L"ConfigureIEOptionalComponentsAI.dll"),
                    "f!configureieoptionalcompon_1d4e2ab98ae3320c",
                    "更长的文件名同样按 25 字符截断");
-        CheckAscii(CbsFileValueName(L"no_i.cur"), "f!no_i.cur",
-                   "短文件名保持 f!<小写全名>");
+        CheckAscii(CbsFileValueName(L"no_i.cur"), "f!no_i.cur_c22605dae6ad6e77",
+                   "短名里带 `_` 也必须加哈希后缀（与哈希分隔符歧义）");
+        CheckAscii(CbsFileValueName(L"3ware.inf_loc"),
+                   "f!3ware.inf_loc_0228dc204749abc0",
+                   "短名带 `_`（驱动 INF 本地化文件）同样加哈希后缀");
+        CheckAscii(CbsFileValueName(L"I386\\PS_SCHM.GDL"),
+                   "f!i386_ps_schm.gdl_98233503d2fb478c",
+                   "路径/大写文件名 => 非法字符转 `_` 后仍带哈希");
+        CheckAscii(CbsFileValueName(L"grid_(cm).wmf"),
+                   "f!grid_cm_.wmf_607506b5d856570a",
+                   "括号转 `_` 并合并连续 `_`");
+        CheckAscii(CbsFileValueName(L"__AssemblyInfo__.ini"),
+                   "f!_assemblyinfo_.ini_53e94e180d1db69a",
+                   "连续前导 `_` 合并成一个");
     }
 
     // 错形态必须报错（这些错法在真机上不会出现，但写坏了会静默糟蹋台账）
