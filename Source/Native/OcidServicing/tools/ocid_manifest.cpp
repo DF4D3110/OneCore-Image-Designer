@@ -1685,6 +1685,7 @@ static void Usage()
     OutLn("  ocid_manifest cbs-dump HKLM\\OCIDCOMP <outFile>   canonical (sorted) dump of the whole store");
     OutLn("  ocid_manifest cbs-plan-components <manifestDir> <outFile> [--staged <winSxsDir>] [--limit N]");
     OutLn("  ocid_manifest cbs-plan-deployments <packagesDir> <manifestDir> <outFile> [--markers <csv>]");
+    OutLn("  ocid_manifest cbs-plan-versioned <manifestDir> <packagesDir> <stagedDir> <stackVersion> <outFile>");
     OutLn("      --markers: key|appid|thumb|markers（真机导出的安装/启用状态，决定 p!/s!/i!）");
     OutLn("  ocid_manifest cbs-diff <a.txt> <b.txt> [--limit N]   compare two cbs-dump files");
     OutLn("");
@@ -2583,6 +2584,257 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
 #endif
 }
 
+// ── cbs-plan-versioned：清单 + 已落位文件 + 包目录 → DerivedData\VersionedIndex ──
+// 真机实测（8061 x86：13,159 家庭 / 13,325 版本节点）：
+//   * 家庭键 = 去掉 version 属性的身份折叠（CbsFamilyKeyName），挂在 ComponentFamilies 下；
+//   * 家庭层的 `f256!<文件值名>` 值 = UTF-16 "<base64(SHA-256(已落位文件字节))>!<组件版本>#"，
+//     例 1394.inf → "Zv8Bza1RLHEQQI6LLjKzIWML8sDNutSfKNWECxSLiaw=!6.2.8061.0#"；
+//   * 版本节点 `v!<version>` 的 `CT` = 该组件所属包的 .cat 的 SHA-256（UTF-16 的 64 hex 文本）；
+//   * `MCP_<8hex>`（12 字节 {0,offset,length}）与版本节点 `(default)` 是 ManifestCache 的
+//     CDF 打包偏移与闭包状态位图，依赖本图已被剥掉的 blob，尚未复刻（故意不发射）。
+static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
+                               const std::wstring& packagesDir,
+                               const std::wstring& stagedDir,
+                               const std::wstring& stackVersion,
+                               const std::wstring& outPath)
+{
+#ifdef _WIN32
+    // 1) .mum → 组件键 → 所属包的 .cat 的 SHA-256（CT 值的来源）。
+    // 组件键前缀 → (包语言小写 → 该包的 .cat SHA-256)。同一个语言包组件常被
+    // 中性包 + 各语言包同时声明（Common-Drivers 的 `~~`/`~en-US~`/`~qps-PLOC~`），
+    // 真机 CT 取的是**语言与组件文化一致**的那个包（3ware.inf-LanguagePack en-us
+    // ⇒ Common-Drivers ~en-US~ 的 cat），所以按文化分桶再选。
+    std::map<std::string, std::map<std::string, std::string>> catalogByComponent;
+    // 组件键尾 `_<16hex>` 是属性折叠；.mum 声明里的属性集合（缺 versionScope 等）
+    // 与清单不一定相同，所以用"去掉尾哈希的键前缀"当匹配键。
+    const auto keyPrefix = [](const std::string& key) {
+        return key.size() > 17 ? key.substr(0, key.size() - 17) : key;
+    };
+    long long mums = 0, declared = 0, catalogComponents = 0;
+    {
+        WIN32_FIND_DATAW found{};
+        HANDLE find = FindFirstFileW((packagesDir + L"\\*.mum").c_str(), &found);
+        if (find != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+                ++mums;
+                const std::wstring mumPath = packagesDir + L"\\" + found.cFileName;
+                std::wstring xml, readErr;
+                if (!ReadFileUtf8(mumPath, xml, readErr)) continue;
+
+                detail::XmlParser parser(xml);
+                detail::XmlNode root;
+                if (!parser.ParseDocument(root)) continue;
+
+                // 包语言（根 assemblyIdentity 的 language；neutral/* ⇒ 空）
+                std::string packageCulture;
+                {
+                    std::vector<const detail::XmlNode*> packageIds;
+                    CollectXmlByLocalName(root, L"assemblyIdentity", packageIds);
+                    if (!packageIds.empty())
+                    {
+                        packageCulture = MumAttr(*packageIds.front(), L"language");
+                        for (char& ch : packageCulture)
+                            if (ch >= 'A' && ch <= 'Z')
+                                ch = static_cast<char>(ch - 'A' + 'a');
+                        if (packageCulture == "neutral" || packageCulture == "*")
+                            packageCulture.clear();
+                    }
+                }
+
+                std::string catalogHex;
+                {
+                    std::wstring stem = mumPath;
+                    if (stem.size() > 4 &&
+                        _wcsicmp(stem.c_str() + stem.size() - 4, L".mum") == 0)
+                        stem.resize(stem.size() - 4);
+                    std::vector<std::uint8_t> catBytes;
+                    std::wstring catErr;
+                    if (ReadFileBytes(stem + L".cat", catBytes, catErr))
+                        catalogHex = Sha256Hex(catBytes);
+                }
+                if (catalogHex.empty()) continue;
+
+                std::vector<const detail::XmlNode*> updateNodes;
+                CollectXmlByLocalName(root, L"update", updateNodes);
+                for (const detail::XmlNode* update : updateNodes)
+                {
+                    std::vector<const detail::XmlNode*> declaredNodes;
+                    CollectXmlByLocalName(*update, L"component", declaredNodes);
+                    CollectXmlByLocalName(*update, L"driver", declaredNodes);
+                    for (const detail::XmlNode* node : declaredNodes)
+                    {
+                        std::vector<const detail::XmlNode*> ids;
+                        CollectXmlByLocalName(*node, L"assemblyIdentity", ids);
+                        if (ids.empty()) continue;
+                        ++declared;
+                        CbsIdentity declaredIdentity;
+                        std::string parseErr;
+                        if (!CbsParseIdentity(MumIdentityText(*ids.front()), declaredIdentity,
+                                              parseErr))
+                            continue;
+                        // 键名把 name/culture 段统一小写，所以 .mum 的写法能和
+                        // 清单算出来的组件键对上（plan-deployments 里已验证）。
+                        // 同一个语言包常被多个包声明（Anytime-Upgrade 与
+                        // Client-LanguagePack 都声明 Anytime-Upgrade-Deployment-LanguagePack），
+                        // 真机对这两种情况的取舍不一致（驱动语言包按文化取、功能语言包
+                        // 有时取"名字更小"的包），没有单一规则 ⇒ 这里取常见的那条：
+                        // 同文化里**最后声明**者（实测 1,330/1,697 命中，其余记为偏差）。
+                        catalogByComponent[keyPrefix(CbsComponentKeyName(declaredIdentity))]
+                                          [packageCulture] = catalogHex;
+                        ++catalogComponents;
+                    }
+                }
+            } while (FindNextFileW(find, &found) != 0);
+            FindClose(find);
+        }
+    }
+
+    // 2) 清单 → 家庭键 / 版本节点 / f256。
+    std::set<std::string> lines;
+    const std::string bucket = "DerivedData\\VersionedIndex\\" + ToUtf8(stackVersion);
+    lines.insert("K\t" + bucket);
+    lines.insert("K\t" + bucket + "\\ComponentFamilies");
+
+    long long manifests = 0, stagedFiles = 0, f256 = 0, ct = 0, bad = 0;
+    // 家庭层 f256 值可能由多个版本的条目拼接而成（键 = "家庭路径\t值名"）。
+    std::map<std::string, std::map<std::string, std::string>> fileSegments;
+    WIN32_FIND_DATAW found{};
+    HANDLE find = FindFirstFileW((manifestDir + L"\\*.manifest").c_str(), &found);
+    if (find == INVALID_HANDLE_VALUE)
+    {
+        Err("目录里没有 .manifest：" + ToUtf8(manifestDir));
+        return 2;
+    }
+    do
+    {
+        if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+        const std::wstring path = manifestDir + L"\\" + found.cFileName;
+        std::wstring text, readErr;
+        if (!ReadFileUtf8(path, text, readErr)) { ++bad; continue; }
+        ComponentManifest manifest;
+        const ManifestParseResult parsed = ParseComponentManifest(text, manifest);
+        if (!parsed.ok) { ++bad; continue; }
+        ++manifests;
+
+        CbsIdentity identity;
+        std::string parseErr;
+        if (!CbsParseIdentity(IdentityTextFromManifest(manifest.identity), identity, parseErr))
+        {
+            ++bad;
+            continue;
+        }
+        const std::string componentKey = CbsComponentKeyName(identity);
+        const std::wstring componentDir = stagedDir + L"\\" +
+                                          FromUtf8OrAnsi(componentKey.c_str());
+
+        // 家庭键/版本节点对**所有**组件都写（真机 13,159 个家庭 / 13,325 个版本节点，
+        // 与 Components 记录数一致）；f256 只有载荷真落位（组件目录存在）才有。
+        const std::string familyPath =
+            bucket + "\\ComponentFamilies\\" + CbsFamilyKeyName(identity);
+        lines.insert("K\t" + familyPath);
+        const std::string version = ToUtf8(manifest.identity.Version());
+        const std::string versionPath = familyPath + "\\v!" + version;
+        lines.insert("K\t" + versionPath);
+
+        for (const FileSpec& file : manifest.files)
+        {
+            if (file.name.empty()) continue;
+            std::vector<std::uint8_t> bytes;
+            std::wstring fileErr;
+            if (!ReadFileBytes(componentDir + L"\\" + file.name, bytes, fileErr)) continue;
+            ++stagedFiles;
+            // 值名是 `f256!<文件值名去掉 f! 前缀>`（f!1394.inf ⇒ f256!1394.inf）；
+            // 同一家庭里同名文件可能存在多个版本 ⇒ 条目按版本从高到低**拼接**：
+            // 实测 msil_comsvcconfig 的 f256!comsvcconfig.exe =
+            //   "<hash6.2>!6.2.8061.0#<hash4.0>!4.0.8061.0#"
+            const std::string fileValueName = CbsFileValueName(file.name);
+            const std::string f256Name =
+                "f256" + (fileValueName.size() > 1 ? fileValueName.substr(1) : std::string());
+            std::wstring segment = FromUtf8OrAnsi(Base64Encode(Sha256(bytes)).c_str());
+            segment += L"!";
+            segment += FromUtf8OrAnsi(version.c_str());
+            segment += L"#";
+            fileSegments[familyPath + "\t" + f256Name][version] = ToUtf8(segment);
+        }
+
+        const auto catIt = catalogByComponent.find(keyPrefix(componentKey));
+        if (catIt != catalogByComponent.end() && !catIt->second.empty())
+        {
+            // 真机 1,697 条 CT 全部落在 `*-languagepack` 组件上（驱动/功能语言包，
+            // 由包声明），类型是 3（REG_BINARY），数据是 UTF-16 的 64 hex 文本。
+            std::string lowered = ToUtf8(manifest.identity.Name());
+            for (char& ch : lowered)
+                if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+            static const std::string suffix = "-languagepack";
+            const bool isLanguagePack =
+                lowered.size() >= suffix.size() &&
+                lowered.compare(lowered.size() - suffix.size(), suffix.size(), suffix) == 0;
+            if (isLanguagePack)
+            {
+                // 先按组件文化选包；没有同文化的包时退回中性包（空文化），再退回任意一个。
+                std::string culture = ToUtf8(manifest.identity.Language());
+                for (char& ch : culture)
+                    if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+                if (culture == "neutral" || culture == "*") culture.clear();
+                std::string catalogHex;
+                const auto exact = catIt->second.find(culture);
+                if (exact != catIt->second.end()) catalogHex = exact->second;
+                if (catalogHex.empty())
+                {
+                    const auto neutral = catIt->second.find(std::string());
+                    if (neutral != catIt->second.end()) catalogHex = neutral->second;
+                }
+                if (catalogHex.empty()) catalogHex = catIt->second.begin()->second;
+                lines.insert("V\t" + versionPath + "\tCT\t3\t" +
+                             Utf16LeHex(FromUtf8OrAnsi(catalogHex.c_str())));
+                ++ct;
+            }
+        }
+    } while (FindNextFileW(find, &found) != 0);
+    FindClose(find);
+
+    // 把按版本收集的 f256 条目拼接进 lines（版本从高到低）。
+    for (const auto& entry : fileSegments)
+    {
+        const std::size_t tab = entry.first.find('\t');
+        if (tab == std::string::npos) continue;
+        const std::string familyPath = entry.first.substr(0, tab);
+        const std::string valueName = entry.first.substr(tab + 1);
+        std::string joined;
+        for (auto it = entry.second.rbegin(); it != entry.second.rend(); ++it)
+            joined += it->second;
+        lines.insert("V\t" + familyPath + "\t" + valueName + "\t3\t" +
+                     Utf16LeHex(FromUtf8OrAnsi(joined.c_str())));
+        ++f256;
+    }
+
+    // 直接逐行写 std::set（别先拷进 vector：全量 864 个 .mum 时那一步曾 0xC0000409）。
+    {
+        FILE* out = _wfopen(outPath.c_str(), L"wb");
+        if (!out) { Err("写不了文件：" + ToUtf8(outPath)); return 1; }
+        for (const std::string& line : lines)
+        {
+            std::fwrite(line.data(), 1, line.size(), out);
+            std::fputc('\n', out);
+        }
+        std::fclose(out);
+    }
+
+    OutLn("manifests=" + std::to_string(manifests) + " mums=" + std::to_string(mums) +
+          " declared=" + std::to_string(declared) +
+          " catalogComponents=" + std::to_string(catalogComponents) +
+          " stagedFiles=" + std::to_string(stagedFiles) + " f256=" + std::to_string(f256) +
+          " ct=" + std::to_string(ct) + " bad=" + std::to_string(bad));
+    return 0;
+#else
+    (void)manifestDir; (void)packagesDir; (void)stagedDir; (void)stackVersion; (void)outPath;
+    return 2;
+#endif
+}
+
 int main(int argc, char** argv)
 {
     SetupConsole();
@@ -2732,6 +2984,13 @@ int main(int argc, char** argv)
         }
         return CmdCbsPlanDeployments(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]),
                                      markersPath, installedPath, FromUtf8OrAnsi(argv[4]));
+    }
+
+    // cbs-plan-versioned <manifestDir> <packagesDir> <stagedDir> <stackVersion> <outFile>
+    if (cmd == L"cbs-plan-versioned" && argc >= 7) {
+        return CmdCbsPlanVersioned(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]),
+                                   FromUtf8OrAnsi(argv[4]), FromUtf8OrAnsi(argv[5]),
+                                   FromUtf8OrAnsi(argv[6]));
     }
 
     if (cmd == L"cbs-diff" && argc >= 4) {
