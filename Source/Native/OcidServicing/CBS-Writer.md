@@ -154,11 +154,13 @@ pwsh -NoProfile -File .\assemble-cbs-store.ps1 `
     -Ct 'E:\ocid_verify\inputs8061\ct.csv' `
     -VersionFlags 'E:\ocid_verify\inputs8061\version_flags.csv' `
     -Mcp 'E:\ocid_verify\inputs8061\mcp.csv' `
-    -SkeletonFamilies 'E:\ocid_verify\inputs8061\skeleton_families.csv' `
     -RootInfo 'E:\ocid_verify\inputs8061\root_info.json' `
     -Override 'E:\ocid_verify\overrides_x86.csv' `
     -DiffAgainst 'E:\ocid_verify\inputs8061\truth.txt'
 #    → written keys=43097 values=120978、对 truth.txt 0/0
+#    注意：**不要**传 -SkeletonFamilies。该开关只给"旧桶内容已被裁剪、只剩骨架"的镜像
+#    （8419 ARM）；8061 x86/ARM 的旧桶有真实内容，传了会把内容家庭误判成骨架
+#    （实测：x86 传了以后 201 键/562 值丢失、0/0 退化为差额）。
 
 # 2) ARM（8061）：DefaultBucket 必须给"当前栈桶"（否则 118 个内容家庭会全被当成外移）
 pwsh -NoProfile -File .\Extract-CbsInputs.ps1 `
