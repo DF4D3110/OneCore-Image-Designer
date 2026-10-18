@@ -3682,7 +3682,8 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
 // 用 --pending/--time 显式给（否则用零/固定时间）。
 static int CmdCbsPlanRoot(const std::wstring& archText, const std::wstring& stackVersion,
                           const std::wstring& outPath, const std::wstring& pendingHex,
-                          const std::wstring& stackTime)
+                          const std::wstring& stackTime, bool minimal,
+                          const std::vector<std::string>& stackEntries)
 {
     const std::string arch = ToUtf8(archText);
     std::uint32_t archCode = 0;
@@ -3717,17 +3718,40 @@ static int CmdCbsPlanRoot(const std::wstring& archText, const std::wstring& stac
     addK("");
     addV("", "StoreFormatVersion", "3", Utf16LeHex(L"0.0.0.6"));
     addV("", "StoreArchitecture", "3", archHex);
-    addV("", "ExecutionState", "4", "06000000");
-    addV("", "PendingXmlIdentifier", "3", Utf16LeHex(FromUtf8OrAnsi(pending.c_str())));
+    // 真机 ARM 8061 的根只有 StoreFormatVersion / StoreArchitecture /
+    // ServicingStackVersions（没有 ExecutionState/PendingXmlIdentifier/Installers/
+    // ccpinterface）——那些是"第一次会话"才写进去的会话态。--minimal 用于在
+    // 与这类镜像对拍时只发确实存在的根值。
+    if (!minimal)
+    {
+        addV("", "ExecutionState", "4", "06000000");
+        addV("", "PendingXmlIdentifier", "3", Utf16LeHex(FromUtf8OrAnsi(pending.c_str())));
+    }
     addK("ServicingStackVersions");
     addV("ServicingStackVersions", stack, "1", Utf16LeHex(FromUtf8OrAnsi(stackLine.c_str())));
     addV("ServicingStackVersions", "LastWCPVersionToAccessStore", "1",
          Utf16LeHex(FromUtf8OrAnsi(stack.c_str())));
-    addK("Installers");
-    addK("Installers\\Ngen");
-    addV("Installers\\Ngen", "TicklerArchWoW", "4", "01000000");
+    // `--stack-entry <名字>|<时间 版本>`：真机可能记录过多个服务栈（旧栈暂存的
+    // 家庭挂在旧桶下，栈版本表里也留着它），这些历史条目只能由输入给出。
+    for (const std::string& entry : stackEntries)
+    {
+        const std::size_t bar = entry.find('|');
+        if (bar == std::string::npos) continue;
+        const std::string entryName = entry.substr(0, bar);
+        const std::string entryText = entry.substr(bar + 1);
+        if (entryName.empty() || entryText.empty()) continue;
+        addV("ServicingStackVersions", entryName, "1",
+             Utf16LeHex(FromUtf8OrAnsi(entryText.c_str())));
+    }
+    if (!minimal)
+    {
+        addK("Installers");
+        addK("Installers\\Ngen");
+        addV("Installers\\Ngen", "TicklerArchWoW", "4", "01000000");
+        addK("ccpinterface");
+    }
+    // `Configuration` 两个真机镜像都有（空的策略键），与 --minimal 无关。
     addK("Configuration");
-    addK("ccpinterface");
 
     std::sort(lines.begin(), lines.end());
     std::wstring writeErr;
@@ -3914,15 +3938,20 @@ int main(int argc, char** argv)
     }
 
     // cbs-plan-root <arch> <stackVersion> <outFile> [--pending <32hex>] [--time <text>]
+    //                [--minimal] [--stack-entry <name>|<text>]...
     if (cmd == L"cbs-plan-root" && argc >= 5) {
         std::wstring pending, when;
-        for (int i = 5; i + 1 < argc; ++i) {
+        bool minimal = false;
+        std::vector<std::string> stackEntries;
+        for (int i = 5; i < argc; ++i) {
             const std::wstring opt = FromUtf8OrAnsi(argv[i]);
-            if (opt == L"--pending") pending = FromUtf8OrAnsi(argv[++i]);
-            else if (opt == L"--time") when = FromUtf8OrAnsi(argv[++i]);
+            if (opt == L"--minimal") { minimal = true; }
+            else if (opt == L"--pending" && i + 1 < argc) pending = FromUtf8OrAnsi(argv[++i]);
+            else if (opt == L"--time" && i + 1 < argc) when = FromUtf8OrAnsi(argv[++i]);
+            else if (opt == L"--stack-entry" && i + 1 < argc) stackEntries.push_back(argv[++i]);
         }
         return CmdCbsPlanRoot(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]),
-                              FromUtf8OrAnsi(argv[4]), pending, when);
+                              FromUtf8OrAnsi(argv[4]), pending, when, minimal, stackEntries);
     }
 
     if (cmd == L"cbs-diff" && argc >= 4) {
