@@ -3007,6 +3007,7 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
                                const std::wstring& stackVersion,
                                const std::wstring& bucketsPath,
                                const std::wstring& cachePath,
+                               const std::wstring& ctPath,
                                const std::wstring& outPath)
 {
 #ifdef _WIN32
@@ -3229,6 +3230,35 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
         }
     }
 
+    // --ct <csv>：行 `家庭键|版本|64hex`（安装历史里真机记录的 CT，纯清单推不出那 912 条）。
+    std::map<std::string, std::string> ctOverride;
+    if (!ctPath.empty())
+    {
+        std::wstring wideText, readErr;
+        if (!ReadFileUtf8(ctPath, wideText, readErr))
+        {
+            Err("读不了 --ct 文件：" + ToUtf8(ctPath));
+            return 2;
+        }
+        const std::string text = ToUtf8(wideText);
+        std::size_t pos = 0;
+        while (pos < text.size())
+        {
+            std::size_t end = text.find('\n', pos);
+            if (end == std::string::npos) end = text.size();
+            std::string line = text.substr(pos, end - pos);
+            pos = end + 1;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const std::size_t bar1 = line.find('|');
+            if (bar1 == std::string::npos) continue;
+            const std::size_t bar2 = line.find('|', bar1 + 1);
+            if (bar2 == std::string::npos) continue;
+            ctOverride[line.substr(0, bar1) + "|" + line.substr(bar1 + 1, bar2 - bar1 - 1)] =
+                line.substr(bar2 + 1);
+        }
+    }
+
     long long manifests = 0, stagedFiles = 0, f256 = 0, ct = 0, bad = 0;
     // 家庭层 f256 值可能由多个版本的条目拼接而成（键 = "家庭路径\t值名"）。
     std::map<std::string, std::map<std::string, std::string>> fileSegments;
@@ -3308,7 +3338,15 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
         }
 
         const auto catIt = catalogByComponent.find(keyPrefix(componentKey));
-        if (catIt != catalogByComponent.end() && !catIt->second.empty())
+        const auto ctOverrideIt = ctOverride.find(familyKey + "|" + version);
+        if (ctOverrideIt != ctOverride.end())
+        {
+            // --ct 显式给出的 CT（安装历史：真机 912 条 CT 的归属包不在清单声明集合里）。
+            lines.insert("V\t" + versionPath + "\tCT\t3\t" +
+                         Utf16LeHex(FromUtf8OrAnsi(ctOverrideIt->second.c_str())));
+            ++ct;
+        }
+        else if (catIt != catalogByComponent.end() && !catIt->second.empty())
         {
             // 真机 1,697 条 CT 全部落在 `*-languagepack` 组件上（驱动/功能语言包，
             // 由包声明），类型是 3（REG_BINARY），数据是 UTF-16 的 64 hex 文本。
@@ -3610,16 +3648,18 @@ int main(int argc, char** argv)
     // cbs-plan-versioned <manifestDir> <packagesDir> <stagedDir> <stackVersion> <outFile>
     //                   [--buckets <csv>] [--cache <csv>]
     if (cmd == L"cbs-plan-versioned" && argc >= 7) {
-        std::wstring bucketsPath, cachePath;
+        std::wstring bucketsPath, cachePath, ctPath;
         for (int i = 7; i + 1 < argc; ++i)
         {
             const std::wstring opt = FromUtf8OrAnsi(argv[i]);
             if (opt == L"--buckets") bucketsPath = FromUtf8OrAnsi(argv[++i]);
             else if (opt == L"--cache") cachePath = FromUtf8OrAnsi(argv[++i]);
+            else if (opt == L"--ct") ctPath = FromUtf8OrAnsi(argv[++i]);
         }
         return CmdCbsPlanVersioned(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]),
                                    FromUtf8OrAnsi(argv[4]), FromUtf8OrAnsi(argv[5]),
-                                   bucketsPath, cachePath, FromUtf8OrAnsi(argv[6]));
+                                   bucketsPath, cachePath, ctPath,
+                                   FromUtf8OrAnsi(argv[6]));
     }
 
     // cbs-plan-root <arch> <stackVersion> <outFile> [--pending <32hex>] [--time <text>]
