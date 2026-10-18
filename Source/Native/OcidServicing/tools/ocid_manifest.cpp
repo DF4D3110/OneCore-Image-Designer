@@ -20,6 +20,7 @@
 #include "ocid/FilePlacement.h"
 #include "ocid/MacroExpander.h"
 #include "ocid/Manifest.h"
+#include "ocid/Pcm.h"
 #include "ocid/RegistryValue.h"
 #include "ocid/Sha256.h"
 #include "ocid/WcmSchema.h"
@@ -1877,6 +1878,98 @@ static int CmdCbsWrite(const std::wstring& planPath, const std::wstring& hivePat
 #endif
 }
 
+// 把一段已解压的 `PcmH` 流拆成 TOC 里的表载荷，再按真机容器语义重编码。
+// 用途：用真机样本自证 `ocid::PcmEncode` 能逐字节重建（cbs-pcm-reencode）。
+static int CmdCbsPcmReencode(const std::wstring& pcmPath, const std::wstring& outPath)
+{
+    std::vector<std::uint8_t> pcm;
+    {
+        FILE* in = nullptr;
+        if (_wfopen_s(&in, pcmPath.c_str(), L"rb") != 0 || in == nullptr)
+        {
+            OutLn("打不开文件：" + ToUtf8(pcmPath));
+            return 1;
+        }
+        std::fseek(in, 0, SEEK_END);
+        const long size = std::ftell(in);
+        std::fseek(in, 0, SEEK_SET);
+        if (size < 0)
+        {
+            std::fclose(in);
+            OutLn("取文件大小失败：" + ToUtf8(pcmPath));
+            return 1;
+        }
+        pcm.resize(static_cast<std::size_t>(size));
+        const std::size_t read = pcm.empty() ? 0 : std::fread(pcm.data(), 1, pcm.size(), in);
+        std::fclose(in);
+        if (read != pcm.size())
+        {
+            OutLn("读文件失败：" + ToUtf8(pcmPath));
+            return 1;
+        }
+    }
+    std::uint32_t tableCount = 0;
+    std::uint32_t tocOffset = 0;
+    std::string error;
+    if (!ocid::PcmReadHeader(pcm, tableCount, tocOffset, error))
+    {
+        OutLn("PcmH 头解析失败：" + error);
+        return 1;
+    }
+
+    const auto readU32 = [&pcm](std::size_t offset) {
+        return static_cast<std::uint32_t>(pcm[offset]) |
+               (static_cast<std::uint32_t>(pcm[offset + 1]) << 8) |
+               (static_cast<std::uint32_t>(pcm[offset + 2]) << 16) |
+               (static_cast<std::uint32_t>(pcm[offset + 3]) << 24);
+    };
+
+    std::vector<ocid::PcmTable> tables;
+    tables.reserve(tableCount);
+    for (std::uint32_t i = 0; i < tableCount; ++i)
+    {
+        const std::uint32_t header = readU32(tocOffset + 8ull * i);
+        const std::uint32_t offset = readU32(tocOffset + 8ull * i + 4);
+        const std::uint32_t length = header & 0xFFFFFFu;
+        if (offset > pcm.size() || length > pcm.size() - offset)
+        {
+            char buffer[64] = {};
+            std::snprintf(buffer, sizeof(buffer), "TOC 项 %u 越界", i);
+            OutLn(buffer);
+            return 1;
+        }
+        ocid::PcmTable table;
+        table.type = static_cast<std::uint8_t>(header >> 24);
+        table.payload.assign(pcm.begin() + offset, pcm.begin() + offset + length);
+        tables.push_back(std::move(table));
+    }
+
+    const std::vector<std::uint8_t> headerPrefix(pcm.begin(), pcm.begin() + tocOffset);
+    const std::vector<std::uint8_t> encoded = ocid::PcmEncode(headerPrefix, tables, error);
+    if (encoded.empty())
+    {
+        OutLn("重编码失败：" + error);
+        return 1;
+    }
+
+    const bool identical = encoded == pcm;
+    FILE* stream = nullptr;
+    if (_wfopen_s(&stream, outPath.c_str(), L"wb") != 0 || stream == nullptr)
+    {
+        OutLn("写文件失败：" + ToUtf8(outPath));
+        return 1;
+    }
+    std::fwrite(encoded.data(), 1, encoded.size(), stream);
+    std::fclose(stream);
+    char summary[160] = {};
+    std::snprintf(summary, sizeof(summary),
+                  "tables=%u toc=0x%X original=%zu reencoded=%zu identical=%s",
+                  tableCount, tocOffset, pcm.size(), encoded.size(),
+                  identical ? "yes" : "no");
+    OutLn(summary);
+    return identical ? 0 : 2;
+}
+
 static void Usage()
 {
     OutLn("OCID servicing console");
@@ -3350,6 +3443,11 @@ int main(int argc, char** argv)
             std::printf("%s -> %s\n", argv[i], buf);
         }
         return 0;
+    }
+
+    // cbs-pcm-reencode：拆 PcmH 的 TOC，再按真机容器语义重编码，报 identical。
+    if (cmd == L"cbs-pcm-reencode" && argc >= 4) {
+        return CmdCbsPcmReencode(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]));
     }
 
     if (cmd == L"macros")

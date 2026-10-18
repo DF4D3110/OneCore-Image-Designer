@@ -2,6 +2,7 @@
 #include "ocid/ConsoleUtf8.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <sstream>
 
@@ -282,6 +283,22 @@ std::string CbsDeploymentKeyName(const CbsIdentity& identity) {
            CbsSanitizeSegment(token != nullptr ? *token : std::string()) + "_" +
            CbsSanitizeSegment(version != nullptr ? *version : std::string()) + "_" +
            Hex16(CbsPseudoKeySuffix(identity));
+}
+
+std::string CbsManifestCacheFileName(const std::string& stackVersionText) {
+    return Hex16(CbsHashEncodedText(stackVersionText)) + "_blobs.bin";
+}
+
+std::string CbsManifestCachePointerName(std::uint32_t identifier) {
+    char buffer[16] = {};
+    std::snprintf(buffer, sizeof(buffer), "MCP_%08x", identifier);
+    return buffer;
+}
+
+std::string CbsManifestCacheUtilizedSpaceName(std::uint32_t identifier) {
+    char buffer[32] = {};
+    std::snprintf(buffer, sizeof(buffer), "UtilizedSpace_MCP_%08x", identifier);
+    return buffer;
 }
 
 std::vector<std::uint8_t> CbsEncodeAsciiText(const std::string& text) {

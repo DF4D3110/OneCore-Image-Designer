@@ -14,6 +14,7 @@
 
 #include "ocid/CbsStore.h"
 #include "ocid/ConsoleUtf8.h"
+#include "ocid/Pcm.h"
 
 #include <cstdio>
 #include <string>
@@ -566,6 +567,85 @@ static void FamilyKeyNames()
     }
 }
 
+namespace {
+// ManifestCache 文件名 = H39(构建栈版本文本) + "_blobs.bin"；MCP 值名带 8 hex id。
+void ManifestCacheNames()
+{
+    printf("\n-- ManifestCache 值名 --\n");
+    CheckAscii(CbsManifestCacheFileName("6.2.8061.0 (fbl_core1_soc.110803-1830)"),
+               "84ccf215ad542233_blobs.bin", "ARM 8061 桶的 _blobs.bin 文件名");
+    CheckAscii(CbsManifestCacheFileName("6.2.7992.0 (fbl_fun_lad.110407-1318)"),
+               "5fae0986fe7f7995_blobs.bin", "ARM 7992 桶的 _blobs.bin 文件名");
+    CheckAscii(CbsManifestCachePointerName(0x2E152B8Eu), "MCP_2e152b8e",
+               "MCP 指针值名用桶的 ManifestCacheIdentifier");
+    CheckAscii(CbsManifestCacheUtilizedSpaceName(0x2E152B8Eu), "UtilizedSpace_MCP_2e152b8e",
+               "桶已用空间值名");
+}
+
+// PcmH 容器层：fold 语义 + 载荷序/TOC/头部哈希。
+void PcmContainer()
+{
+    printf("\n-- PcmH 容器 --\n");
+    const std::uint8_t word[4] = {0x61, 0x62, 0x63, 0x64};
+    CheckInt(static_cast<long long>(PcmFold64(nullptr, 0)), 0, "空输入 fold 为 0");
+    CheckInt(static_cast<long long>(PcmFold64(word, 4)), 0x64636261,
+             "4 字节输入按小端 u32 折叠");
+
+    std::vector<std::uint8_t> prefix(0xA0, 0);
+    prefix[0] = 'P';
+    prefix[1] = 'c';
+    prefix[2] = 'm';
+    prefix[3] = 'H';
+    prefix[0x04] = 1;
+    prefix[0x18] = 0xA0;
+
+    std::vector<ocid::PcmTable> tables;
+    for (int i = 0; i < 3; ++i)
+    {
+        ocid::PcmTable table;
+        table.type = static_cast<std::uint8_t>(i == 0 ? 1 : 2);
+        table.payload.assign(static_cast<std::size_t>(5 + i), static_cast<std::uint8_t>('a' + i));
+        tables.push_back(table);
+    }
+
+    std::string error;
+    const std::vector<std::uint8_t> encoded = ocid::PcmEncode(prefix, tables, error);
+    Check(error.empty() && !encoded.empty(), "PcmEncode 成功");
+    if (encoded.empty())
+    {
+        return;
+    }
+
+    std::uint32_t tableCount = 0;
+    std::uint32_t tocOffset = 0;
+    Check(ocid::PcmReadHeader(encoded, tableCount, tocOffset, error), "重编码结果可被读回");
+    CheckInt(static_cast<long long>(tableCount), 3, "表数量写回头部");
+    CheckInt(static_cast<long long>(tocOffset), 0xA0, "TOC 偏移保持");
+
+    const auto readU32 = [&encoded](std::size_t offset) {
+        return static_cast<std::uint32_t>(encoded[offset]) |
+               (static_cast<std::uint32_t>(encoded[offset + 1]) << 8) |
+               (static_cast<std::uint32_t>(encoded[offset + 2]) << 16) |
+               (static_cast<std::uint32_t>(encoded[offset + 3]) << 24);
+    };
+    CheckInt(static_cast<long long>(readU32(0xA0) >> 24), 1, "TOC 项高 8 位是类型");
+    CheckInt(static_cast<long long>(readU32(0xA0) & 0xFFFFFF), 5, "TOC 项低 24 位是长度");
+    const std::uint32_t firstOffset = readU32(0xA4);
+    CheckInt(static_cast<long long>(firstOffset % 4), 0, "载荷 4 字节对齐");
+    CheckInt(static_cast<long long>(encoded[firstOffset]), static_cast<long long>('a'),
+             "首段载荷内容");
+
+    std::vector<std::uint8_t> zeroed = encoded;
+    for (int i = 0; i < 8; ++i)
+    {
+        zeroed[0x0C + i] = 0;
+    }
+    const std::uint64_t expected = ocid::PcmFold64(zeroed.data(), zeroed.size());
+    CheckInt(static_cast<long long>(readU32(0x0C) | (static_cast<std::uint64_t>(readU32(0x10)) << 32)),
+             static_cast<long long>(expected), "头部哈希 = 清零 0x0C..0x13 后的整块 fold");
+}
+}  // namespace
+
 int main()
 {
     SetupConsoleUtf8();
@@ -579,6 +659,8 @@ int main()
     PseudoKeySuffix();
     KeyNames();
     FamilyKeyNames();
+    ManifestCacheNames();
+    PcmContainer();
 
     printf("\n== 结果 ==\n  通过 %d / 失败 %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

@@ -147,6 +147,26 @@ std::string CbsFamilyKeyName(const CbsIdentity& identity);
 //   100% 可复原）。
 std::string CbsDeploymentKeyName(const CbsIdentity& identity);
 
+// ---- ManifestCache（DerivedData\VersionedIndex 的 MCP 指针）----
+//
+// 一个 ManifestCache 文件（`<WinSxS>\ManifestCache\<16hex>_blobs.bin`）是若干
+// "独立 LZNT1 压缩块"的顺序拼接：每块 = 28 字节包装头（+0x14 解压后大小、
+// +0x18 算法号 2 = LZNT1、+0x1C 起压缩流）+ 压缩数据；解压后是 `PcmH` 容器。
+//
+// 文件名里的 16 hex = H39（CbsHashEncodedText）作用于**构建栈版本文本**：
+//   H39("6.2.8061.0 (fbl_core1_soc.110803-1830)") = 0x84ccf215ad542233
+//   H39("6.2.7992.0 (fbl_fun_lad.110407-1318)")   = 0x5fae0986fe7f7995
+// 两例都是 8061 ARM 镜像 WinSxS\ManifestCache 下真实存在的文件名。
+std::string CbsManifestCacheFileName(const std::string& stackVersionText);
+
+// `MCP_<8hex>`：每个版本节点的块指针值名。8 hex 来自该 build 桶的
+// `ManifestCacheIdentifier`（REG_BINARY 4 字节，小端；ARM 8061 桶实测 0x2E152B8E
+// ⇒ `MCP_2e152b8e`）。该 id 的来源不可由清单推导，按输入参数处理。
+std::string CbsManifestCachePointerName(std::uint32_t identifier);
+
+// `UtilizedSpace_MCP_<8hex>`：该桶已用字节数（8 字节小端，= 各块长度之和）。
+std::string CbsManifestCacheUtilizedSpaceName(std::uint32_t identifier);
+
 // 失败时返回 false 并给出可读原因；成功时 extraValues 收下所有不认识的值。
 bool CbsDecodeComponentRecord(const std::wstring& name,
                               const std::vector<CbsValue>& values,
