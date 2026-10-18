@@ -646,6 +646,31 @@ void PcmContainer()
 }
 }  // namespace
 
+// 通用表骨架（type 6/8/9/A/B）：真机小样本里两张表的 payload 必须解码后按 canonical
+// 规则重编码回原字节（语料回归见 `ocid_manifest cbs-pcm-tables <dir>`，3,041 份
+// PCM、23,729 张表全 byte-exact）。
+static void PcmRecordTables()
+{
+    const auto run = [](std::uint8_t type, const std::string& hex) {
+        std::vector<std::uint8_t> bytes;
+        for (std::size_t i = 0; i + 1 < hex.size(); i += 2)
+        {
+            bytes.push_back(static_cast<std::uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16)));
+        }
+        ocid::PcmTable table;
+        table.type = type;
+        table.payload = bytes;
+        ocid::PcmRecordTable record;
+        std::string error;
+        Check(ocid::PcmDecodeRecordTable(table, record, error), "解码通用表失败");
+        const std::vector<std::uint8_t> reencoded = ocid::PcmEncodeRecordTable(record, error);
+        Check(reencoded == bytes, "通用表重编码不一致");
+    };
+
+    // 真机 4,300 字节 PcmH 里的两张表（type 9 与 type 6）。
+    run(9, "30010000000000000300");
+    run(6, "710200000200000009000500");
+}
 int main()
 {
     SetupConsoleUtf8();
@@ -661,7 +686,10 @@ int main()
     FamilyKeyNames();
     ManifestCacheNames();
     PcmContainer();
+    PcmRecordTables();
 
     printf("\n== 结果 ==\n  通过 %d / 失败 %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
+
+

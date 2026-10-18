@@ -1918,6 +1918,84 @@ static int CmdCbsMicrodom(const std::wstring& manifestPath, const std::wstring& 
     return 0;
 }
 
+// cbs-pcm-tables <dir>：对整个语料目录里的 *.pcm 做"通用表骨架"解码→按 canonical
+// 规则重编码，统计每类型 byte-exact 命中率（真机 20,000 张表应为 100%，
+// type6 的 bit0 是子变体位、由解码值原样带回，所以也应 100%）。
+static int CmdCbsPcmTables(const std::wstring& dirPath)
+{
+#ifdef _WIN32
+    std::map<std::uint8_t, long long> totals;  // type → 表数
+    std::map<std::uint8_t, long long> exact;   // type → byte-exact 表数
+    WIN32_FIND_DATAW found{};
+    HANDLE find = FindFirstFileW((dirPath + L"\\*.pcm").c_str(), &found);
+    if (find == INVALID_HANDLE_VALUE)
+    {
+        OutLn("目录里没有 .pcm：" + ToUtf8(dirPath));
+        return 1;
+    }
+    long long files = 0;
+    do
+    {
+        if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+        ++files;
+        std::vector<std::uint8_t> pcm;
+        {
+            FILE* in = nullptr;
+            const std::wstring path = dirPath + L"\\" + found.cFileName;
+            if (_wfopen_s(&in, path.c_str(), L"rb") != 0 || in == nullptr) continue;
+            std::fseek(in, 0, SEEK_END);
+            const long size = std::ftell(in);
+            std::fseek(in, 0, SEEK_SET);
+            if (size > 0)
+            {
+                pcm.resize(static_cast<std::size_t>(size));
+                if (std::fread(pcm.data(), 1, pcm.size(), in) != pcm.size()) pcm.clear();
+            }
+            std::fclose(in);
+        }
+        std::uint32_t tableCount = 0, tocOffset = 0;
+        std::string error;
+        if (!ocid::PcmReadHeader(pcm, tableCount, tocOffset, error)) continue;
+        const auto readU32 = [&pcm](std::size_t offset) {
+            return static_cast<std::uint32_t>(pcm[offset]) |
+                   (static_cast<std::uint32_t>(pcm[offset + 1]) << 8) |
+                   (static_cast<std::uint32_t>(pcm[offset + 2]) << 16) |
+                   (static_cast<std::uint32_t>(pcm[offset + 3]) << 24);
+        };
+        for (std::uint32_t i = 0; i < tableCount; ++i)
+        {
+            const std::uint32_t header = readU32(tocOffset + 8ull * i);
+            const std::uint32_t offset = readU32(tocOffset + 8ull * i + 4);
+            ocid::PcmTable table;
+            table.type = static_cast<std::uint8_t>(header >> 24);
+            const std::size_t length = header & 0xFFFFFFu;
+            if (offset + length > pcm.size()) continue;
+            table.payload.assign(pcm.begin() + offset, pcm.begin() + offset + length);
+            if (table.type != 6 && table.type != 8 && table.type != 9 && table.type != 0xA &&
+                table.type != 0xB)
+            {
+                continue;
+            }
+            ocid::PcmRecordTable record;
+            if (!ocid::PcmDecodeRecordTable(table, record, error)) continue;
+            ++totals[table.type];
+            const std::vector<std::uint8_t> reencoded = ocid::PcmEncodeRecordTable(record, error);
+            if (reencoded == table.payload) ++exact[table.type];
+        }
+    } while (FindNextFileW(find, &found) != 0);
+    FindClose(find);
+    OutLn("files=" + std::to_string(files));
+    for (const auto& entry : totals)
+    {
+        OutLn("type " + std::to_string(entry.first) + ": total=" + std::to_string(entry.second) +
+              " byteexact=" + std::to_string(exact[entry.first]));
+    }
+    return 0;
+#else
+    (void)dirPath;
+    return 1;
+#endif
+}
 static int CmdCbsPcmReencode(const std::wstring& pcmPath, const std::wstring& outPath)
 {
     std::vector<std::uint8_t> pcm;
@@ -3874,6 +3952,10 @@ int main(int argc, char** argv)
     }
 
     // cbs-pcm-reencode：拆 PcmH 的 TOC，再按真机容器语义重编码，报 identical。
+    if (cmd == L"cbs-pcm-tables" && argc >= 3) {
+        return CmdCbsPcmTables(FromUtf8OrAnsi(argv[2]));
+    }
+
     if (cmd == L"cbs-pcm-reencode" && argc >= 4) {
         return CmdCbsPcmReencode(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]));
     }
@@ -3889,6 +3971,8 @@ int main(int argc, char** argv)
     Usage();
     return 1;
 }
+
+
 
 
 

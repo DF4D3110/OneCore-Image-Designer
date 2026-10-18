@@ -158,4 +158,133 @@ std::vector<std::uint8_t> PcmEncode(const std::vector<std::uint8_t>& headerPrefi
     return out;
 }
 
+
+// ---------------------------------------------------------------------------
+// 通用表骨架（type 6/8/9/A/B）
+// ---------------------------------------------------------------------------
+namespace {
+
+bool IsRecordTableType(std::uint8_t type) {
+    return type == 6 || type == 8 || type == 9 || type == 0xA || type == 0xB;
+}
+
+}  // namespace
+
+bool PcmDecodeRecordTable(const PcmTable& table, PcmRecordTable& out, std::string& error) {
+    error.clear();
+    out = PcmRecordTable{};
+    if (!IsRecordTableType(table.type)) {
+        error = "不是通用记录表（type " + std::to_string(table.type) + "）";
+        return false;
+    }
+    const auto& p = table.payload;
+    if (p.size() < 4) {
+        error = "表载荷不足 4 字节";
+        return false;
+    }
+    const std::uint32_t header = ReadU32(p.data(), 0);
+    const std::uint32_t count = header >> 8;
+    const std::uint32_t flags = header & 0xFFu;
+    const std::size_t width1 = (flags & 0x10u) != 0 ? 2 : 4;
+    const std::size_t width2 = (flags & 0x20u) != 0 ? 2 : 4;
+    const bool hasF0 = count >= 7 && table.type != 9;
+    std::size_t offset = 4;
+    if (hasF0) {
+        if (offset + 4ull * count > p.size()) {
+            error = "f0 数组越界";
+            return false;
+        }
+        out.f0.resize(count);
+        for (std::uint32_t i = 0; i < count; ++i) out.f0[i] = ReadU32(p.data(), offset + 4ull * i);
+        offset += 4ull * count;
+    }
+    if (offset + width1 * count > p.size()) {
+        error = "f1 数组越界";
+        return false;
+    }
+    out.f1.resize(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        if (width1 == 2) {
+            const std::size_t at = offset + 2ull * i;
+            out.f1[i] = static_cast<std::uint32_t>(p[at]) | (static_cast<std::uint32_t>(p[at + 1]) << 8);
+        } else {
+            out.f1[i] = ReadU32(p.data(), offset + 4ull * i);
+        }
+    }
+    offset = Align4(offset + width1 * count);
+    if (offset + width2 * count > p.size()) {
+        error = "f2 数组越界";
+        return false;
+    }
+    out.f2.resize(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        if (width2 == 2) {
+            const std::size_t at = offset + 2ull * i;
+            out.f2[i] = static_cast<std::uint32_t>(p[at]) | (static_cast<std::uint32_t>(p[at + 1]) << 8);
+        } else {
+            out.f2[i] = ReadU32(p.data(), offset + 4ull * i);
+        }
+    }
+    out.type = table.type;
+    out.bit0 = (flags & 0x01u) != 0;
+    return true;
+}
+
+std::vector<std::uint8_t> PcmEncodeRecordTable(const PcmRecordTable& table, std::string& error) {
+    error.clear();
+    if (!IsRecordTableType(table.type)) {
+        error = "不是通用记录表（type " + std::to_string(table.type) + "）";
+        return {};
+    }
+    const std::uint32_t count = static_cast<std::uint32_t>(table.f1.size());
+    if (table.f2.size() != table.f1.size()) {
+        error = "f1/f2 长度不一致";
+        return {};
+    }
+    const bool hasF0 = count >= 7 && table.type != 9;
+    if (hasF0 && table.f0.size() != count) {
+        error = "f0 长度与 count 不一致";
+        return {};
+    }
+    std::uint32_t maxF1 = 0, maxF2 = 0;
+    for (std::uint32_t v : table.f1) maxF1 = v > maxF1 ? v : maxF1;
+    for (std::uint32_t v : table.f2) maxF2 = v > maxF2 ? v : maxF2;
+    const bool narrow1 = count > 0 && maxF1 <= 0xFFFFu;
+    const bool narrow2 = count > 0 && maxF2 <= 0xFFFFu;
+    std::uint32_t flags = 0;
+    if (table.type == 6 && table.bit0) flags |= 0x01u;
+    if (narrow1) flags |= 0x10u;
+    if (narrow2) flags |= 0x20u;
+    if (count < 7 && table.type != 9) flags |= 0x40u;
+    std::vector<std::uint8_t> out(4);
+    WriteU32(out.data(), 0, (count << 8) | flags);
+    const auto appendU32 = [&out](std::uint32_t value) {
+        const std::size_t at = out.size();
+        out.resize(at + 4);
+        WriteU32(out.data(), at, value);
+    };
+    if (hasF0) {
+        for (std::uint32_t v : table.f0) appendU32(v);
+    }
+    for (std::uint32_t v : table.f1) {
+        if (narrow1) {
+            out.push_back(static_cast<std::uint8_t>(v & 0xFFu));
+            out.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFFu));
+        } else {
+            appendU32(v);
+        }
+    }
+    while ((out.size() % 4) != 0) out.push_back(0);
+    for (std::uint32_t v : table.f2) {
+        if (narrow2) {
+            out.push_back(static_cast<std::uint8_t>(v & 0xFFu));
+            out.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFFu));
+        } else {
+            appendU32(v);
+        }
+    }
+    return out;
+}
+
 }  // namespace ocid
+

@@ -40,6 +40,26 @@ bool PcmReadHeader(const std::vector<std::uint8_t>& pcm, std::uint32_t& tableCou
 std::vector<std::uint8_t> PcmEncode(const std::vector<std::uint8_t>& headerPrefix,
                                     const std::vector<PcmTable>& tables, std::string& error);
 
+// 通用表骨架（真机 type 6/8/9/A/B，20,000 张表上 byte-exact）：
+//   u32 header = (count << 8) | flags
+//     bit0 仅 type6 会被真机置位（"字符串容器子变体"，语义未定；解码时原样保留，
+//          编码时由调用方给出，不猜）
+//     bit4 = f1 以 u16 存储、bit5 = f2 以 u16 存储
+//     bit6 = 小表（count < 7 且 type != 9）⇒ f0 数组整体省略
+//   body = [u32 f0[count]] f1[count] pad4 f2[count]
+struct PcmRecordTable {
+    std::uint8_t type = 0;
+    bool bit0 = false;  // type6 的子变体位；其它类型恒 false
+    std::vector<std::uint32_t> f0;  // 可能为空（小表省略）
+    std::vector<std::uint32_t> f1;
+    std::vector<std::uint32_t> f2;
+};
+
+bool PcmDecodeRecordTable(const PcmTable& table, PcmRecordTable& out, std::string& error);
+
+// 宽度与"省略 f0"按 count/取值范围反推（canonical）；bit0 取 out.bit0。
+std::vector<std::uint8_t> PcmEncodeRecordTable(const PcmRecordTable& table, std::string& error);
+
 }  // namespace ocid
 
 #endif  // OCID_PCM_H
