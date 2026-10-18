@@ -148,6 +148,7 @@ if ($RootInfo) {
     }
     if (-not $PSBoundParameters.ContainsKey('RootMinimal') -and $null -eq $info.executionState) { $RootMinimal = [switch]$true }
     if (-not $PSBoundParameters.ContainsKey('Ccpinterface') -and $info.ccpinterface) { $Ccpinterface = [switch]$true }
+    if (-not $PSBoundParameters.ContainsKey('InstallersShortcut') -and $info.installersShortcut) { $InstallersShortcut = [switch]$true }
 }
 
 $rootArgs = @('cbs-plan-root', $Arch, $StackVersion, $planRoot)

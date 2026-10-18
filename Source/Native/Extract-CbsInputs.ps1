@@ -121,6 +121,7 @@ $mcp = New-Object 'System.Collections.Generic.List[string]'
 $skeleton = New-Object 'System.Collections.Generic.HashSet[string]'
 $root = @{ values = @{}; stacks = @{} }
 $hasCcp = $false
+$hasInstallersShortcut = $false
 
 $componentRoot = 'DerivedData\Components'
 $deployRoot = 'CanonicalData\Deployments'
@@ -134,6 +135,7 @@ foreach ($line in [IO.File]::ReadLines($truth)) {
         # family key itself (everything sits under v!<version>), so the bucket
         # association must be taken from the key list, not from values.
         if ($f.Count -ge 2 -and $f[1] -eq 'ccpinterface') { $hasCcp = $true }
+        if ($f.Count -ge 2 -and $f[1] -eq 'Installers\Shortcut') { $hasInstallersShortcut = $true }
         if ($f.Count -ge 2 -and $f[1].StartsWith($vindexRoot + '\')) {
             $relPath = $f[1].Substring($vindexRoot.Length + 1)
             $partsKey = $relPath.Split('\')
@@ -321,6 +323,7 @@ $rootInfo = [ordered]@{
     }
     imageRoot          = $ImageRoot
     ccpinterface       = $hasCcp
+    installersShortcut = $hasInstallersShortcut
 }
 foreach ($name in ($root.stacks.Keys | Sort-Object)) {
     $text = (Get-Utf16 $root.stacks[$name].hex).TrimEnd([char]0)
