@@ -1663,6 +1663,220 @@ static int CmdCbsDiff(const std::wstring& pathA, const std::wstring& pathB, int 
 #endif
 }
 
+// ── 计划 → 台账文件（cbs-write）──────────────────────────────────────────
+//
+// 输入就是 cbs-dump 那种规范化文本（K/V 行），所以 cbs-plan-components /
+// cbs-plan-deployments / cbs-plan-versioned 的产物可以合并后直接落成 hive。
+// 造空壳 hive 的办法：临时键 → RegSaveKey 出文件 → RegLoadKey 挂起来写 →
+// RegUnloadKey 落盘。挂载名用 OCIDOUT（不以 SOFTWARE 结尾，绕开 UCPD 硬编码）。
+#ifdef _WIN32
+namespace {
+
+bool HexToBytes(const std::string& hex, std::vector<std::uint8_t>& out)
+{
+    if (hex.size() % 2 != 0) return false;
+    out.clear();
+    out.reserve(hex.size() / 2);
+    auto nib = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (std::size_t i = 0; i < hex.size(); i += 2)
+    {
+        const int hi = nib(hex[i]);
+        const int lo = nib(hex[i + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out.push_back(static_cast<std::uint8_t>((hi << 4) | lo));
+    }
+    return true;
+}
+
+std::vector<std::string> SplitTabs(const std::string& line)
+{
+    std::vector<std::string> out;
+    std::size_t pos = 0;
+    while (true)
+    {
+        const std::size_t end = line.find('\t', pos);
+        if (end == std::string::npos) { out.push_back(line.substr(pos)); break; }
+        out.push_back(line.substr(pos, end - pos));
+        pos = end + 1;
+    }
+    return out;
+}
+
+// RegSaveKey / RegLoadKey 要备份/还原特权；没有就 1314 (ERROR_PRIVILEGE_NOT_HELD)。
+bool EnablePrivilege(const wchar_t* name, std::wstring& err)
+{
+    HANDLE token = nullptr;
+    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
+    {
+        err = L"OpenProcessToken 失败：" + std::to_wstring(::GetLastError());
+        return false;
+    }
+    LUID luid{};
+    if (!::LookupPrivilegeValueW(nullptr, name, &luid))
+    {
+        const DWORD rc = ::GetLastError();
+        ::CloseHandle(token);
+        err = std::wstring(L"LookupPrivilegeValue(") + name + L") 失败：" + std::to_wstring(rc);
+        return false;
+    }
+    TOKEN_PRIVILEGES tp{};
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Luid = luid;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    ::SetLastError(ERROR_SUCCESS);
+    ::AdjustTokenPrivileges(token, FALSE, &tp, sizeof(tp), nullptr, nullptr);
+    const DWORD rc = ::GetLastError();
+    ::CloseHandle(token);
+    if (rc != ERROR_SUCCESS)
+    {
+        err = std::wstring(L"启用特权 ") + name + L" 失败：" + std::to_wstring(rc);
+        return false;
+    }
+    return true;
+}
+
+// 建（或开）相对键。rel 用 UTF-8、以 '\\' 分段；空串即根键。
+HKEY EnsureKeyCached(HKEY root, const std::string& relUtf8, std::map<std::string, HKEY>& cache)
+{
+    if (relUtf8.empty()) return root;
+    auto it = cache.find(relUtf8);
+    if (it != cache.end()) return it->second;
+
+    const std::wstring rel = FromUtf8OrAnsi(relUtf8.c_str());
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(root, rel.c_str(), 0, nullptr, 0, KEY_ALL_ACCESS, nullptr, &key,
+                        nullptr) != ERROR_SUCCESS)
+    {
+        return nullptr;
+    }
+    cache[relUtf8] = key;
+    return key;
+}
+
+} // namespace
+#endif
+
+static int CmdCbsWrite(const std::wstring& planPath, const std::wstring& hivePath)
+{
+#ifdef _WIN32
+    std::wstring raw, err;
+    if (!ReadFileUtf8(planPath, raw, err)) { Err(ToUtf8(err)); return 2; }
+    const std::string text = ToUtf8(raw);
+
+    std::wstring privErr;
+    if (!EnablePrivilege(L"SeBackupPrivilege", privErr) ||
+        !EnablePrivilege(L"SeRestorePrivilege", privErr))
+    {
+        Err(ToUtf8(privErr) + "（cbs-write 改动的是离线 hive 文件，需要这两个特权）");
+        return 2;
+    }
+
+    // 1) 空壳 hive 文件
+    const wchar_t* kSeed = L"SOFTWARE\\OCIDHiveSeed";
+    RegDeleteTreeW(HKEY_LOCAL_MACHINE, kSeed);
+    HKEY seed = nullptr;
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kSeed, 0, nullptr, 0, KEY_ALL_ACCESS, nullptr,
+                        &seed, nullptr) != ERROR_SUCCESS)
+    {
+        Err("造临时种子键失败（需要管理员）");
+        return 2;
+    }
+    DeleteFileW(hivePath.c_str());
+    const LSTATUS saveRc = RegSaveKeyW(seed, hivePath.c_str(), nullptr);
+    RegCloseKey(seed);
+    RegDeleteTreeW(HKEY_LOCAL_MACHINE, kSeed);
+    if (saveRc != ERROR_SUCCESS)
+    {
+        Err("RegSaveKey 失败：" + std::to_string(saveRc));
+        return 2;
+    }
+
+    // 2) 挂起来写
+    const wchar_t* kMount = L"OCIDOUT";
+    const LSTATUS loadRc = RegLoadKeyW(HKEY_LOCAL_MACHINE, kMount, hivePath.c_str());
+    if (loadRc != ERROR_SUCCESS)
+    {
+        Err("RegLoadKey 失败：" + std::to_string(loadRc));
+        return 2;
+    }
+
+    HKEY root = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kMount, 0, KEY_ALL_ACCESS, &root) != ERROR_SUCCESS)
+    {
+        RegUnLoadKeyW(HKEY_LOCAL_MACHINE, kMount);
+        Err("打不开挂载点");
+        return 2;
+    }
+
+    // 3) 逐行落键/值
+    std::map<std::string, HKEY> cache;
+    long long keys = 0, values = 0, badLines = 0;
+    std::size_t pos = 0;
+    while (pos < text.size())
+    {
+        std::size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(pos, end - pos);
+        pos = end + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+
+        const std::vector<std::string> fields = SplitTabs(line);
+        if (fields.size() < 2) { ++badLines; continue; }
+
+        if (fields[0] == "K")
+        {
+            if (EnsureKeyCached(root, fields[1], cache) == nullptr) { ++badLines; continue; }
+            ++keys;
+        }
+        else if (fields[0] == "V" && fields.size() >= 5)
+        {
+            HKEY key = EnsureKeyCached(root, fields[1], cache);
+            if (key == nullptr) { ++badLines; continue; }
+            std::vector<std::uint8_t> data;
+            if (!HexToBytes(fields[4], data)) { ++badLines; continue; }
+            const std::wstring name = FromUtf8OrAnsi(fields[2].c_str());
+            const DWORD type = static_cast<DWORD>(std::strtoul(fields[3].c_str(), nullptr, 10));
+            const BYTE* bytes = data.empty() ? nullptr : data.data();
+            if (RegSetValueExW(key, name.c_str(), 0, type, bytes,
+                               static_cast<DWORD>(data.size())) != ERROR_SUCCESS)
+            {
+                ++badLines;
+                continue;
+            }
+            ++values;
+        }
+        else
+        {
+            ++badLines;
+        }
+    }
+
+    for (auto& entry : cache) RegCloseKey(entry.second);
+    RegCloseKey(root);
+
+    // 4) 落盘
+    const LSTATUS flushRc = RegUnLoadKeyW(HKEY_LOCAL_MACHINE, kMount);
+    if (flushRc != ERROR_SUCCESS)
+    {
+        Err("RegUnloadKey 失败：" + std::to_string(flushRc));
+        return 1;
+    }
+
+    OutLn("written keys=" + std::to_string(keys) + " values=" + std::to_string(values) +
+          " badLines=" + std::to_string(badLines) + " hive=" + ToUtf8(hivePath));
+    return badLines == 0 ? 0 : 1;
+#else
+    (void)planPath; (void)hivePath;
+    return 2;
+#endif
+}
+
 static void Usage()
 {
     OutLn("OCID servicing console");
@@ -1686,8 +1900,11 @@ static void Usage()
     OutLn("  ocid_manifest cbs-plan-components <manifestDir> <outFile> [--staged <winSxsDir>] [--limit N]");
     OutLn("  ocid_manifest cbs-plan-deployments <packagesDir> <manifestDir> <outFile> [--markers <csv>]");
     OutLn("  ocid_manifest cbs-plan-versioned <manifestDir> <packagesDir> <stagedDir> <stackVersion> <outFile>");
+    OutLn("  ocid_manifest cbs-plan-root <x86|arm|arm64|amd64|ia64> <stackVersion> <outFile>");
+    OutLn("      [--pending <32hex>] [--time <timestamp 文本>]  根键值（会话态可显式给）");
     OutLn("      --markers: key|appid|thumb|markers（真机导出的安装/启用状态，决定 p!/s!/i!）");
     OutLn("  ocid_manifest cbs-diff <a.txt> <b.txt> [--limit N]   compare two cbs-dump files");
+    OutLn("  ocid_manifest cbs-write <plan.txt> <hivePath>   rebuild a hive file from a cbs-dump text");
     OutLn("");
     OutLn("Data goes to stdout, diagnostics to stderr.");
 }
@@ -2611,6 +2828,14 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
         return key.size() > 17 ? key.substr(0, key.size() - 17) : key;
     };
     long long mums = 0, declared = 0, catalogComponents = 0;
+    // 诊断：OCID_CT_CANDIDATES=<csv> 时把每个 .mum 的组件声明与最终选择都导出来，
+    // 用来反推"真机 CT 选的是哪个包的 cat"（真机 912 条 CT 我们还没覆盖）。
+    FILE* ctLog = nullptr;
+    {
+        wchar_t logPath[1024]{};
+        const DWORD logLen = GetEnvironmentVariableW(L"OCID_CT_CANDIDATES", logPath, 1024);
+        if (logLen > 0 && logLen < 1024) _wfopen_s(&ctLog, logPath, L"wb");
+    }
     {
         WIN32_FIND_DATAW found{};
         HANDLE find = FindFirstFileW((packagesDir + L"\\*.mum").c_str(), &found);
@@ -2684,6 +2909,13 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
                         // 同文化里**最后声明**者（实测 1,330/1,697 命中，其余记为偏差）。
                         catalogByComponent[keyPrefix(CbsComponentKeyName(declaredIdentity))]
                                           [packageCulture] = catalogHex;
+                        if (ctLog != nullptr)
+                        {
+                            const std::string prefix = keyPrefix(CbsComponentKeyName(declaredIdentity));
+                            std::fprintf(ctLog, "decl|%s|%s|%s|%s\n", prefix.c_str(),
+                                         packageCulture.c_str(),
+                                         ToUtf8(found.cFileName).c_str(), catalogHex.c_str());
+                        }
                         ++catalogComponents;
                     }
                 }
@@ -2788,6 +3020,9 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
                     if (neutral != catIt->second.end()) catalogHex = neutral->second;
                 }
                 if (catalogHex.empty()) catalogHex = catIt->second.begin()->second;
+                if (ctLog != nullptr)
+                    std::fprintf(ctLog, "pick|%s|%s|%s\n", componentKey.c_str(),
+                                 culture.c_str(), catalogHex.c_str());
                 lines.insert("V\t" + versionPath + "\tCT\t3\t" +
                              Utf16LeHex(FromUtf8OrAnsi(catalogHex.c_str())));
                 ++ct;
@@ -2812,6 +3047,7 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
     }
 
     // 直接逐行写 std::set（别先拷进 vector：全量 864 个 .mum 时那一步曾 0xC0000409）。
+    if (ctLog != nullptr) std::fclose(ctLog);
     {
         FILE* out = _wfopen(outPath.c_str(), L"wb");
         if (!out) { Err("写不了文件：" + ToUtf8(outPath)); return 1; }
@@ -2833,6 +3069,70 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
     (void)manifestDir; (void)packagesDir; (void)stagedDir; (void)stackVersion; (void)outPath;
     return 2;
 #endif
+}
+
+// ── 根值计划（cbs-plan-root）──────────────────────────────────────────────
+//
+// COMPONENTS 根键上的值由安装会话产生：StoreFormatVersion/StoreArchitecture 是
+// 存储格式（固定），ExecutionState/PendingXmlIdentifier 是"当前事务状态"（每次
+// 安装都会变），ServicingStackVersions 记录用过这套栈的版本与时间。
+// 组装新镜像时这些值由 OCID 自己写；与微软原版对拍时它们属于"会话态"，需要
+// 用 --pending/--time 显式给（否则用零/固定时间）。
+static int CmdCbsPlanRoot(const std::wstring& archText, const std::wstring& stackVersion,
+                          const std::wstring& outPath, const std::wstring& pendingHex,
+                          const std::wstring& stackTime)
+{
+    const std::string arch = ToUtf8(archText);
+    std::uint32_t archCode = 0;
+    if (arch == "x86") archCode = 0;
+    else if (arch == "arm") archCode = 5;
+    else if (arch == "ia64") archCode = 6;
+    else if (arch == "amd64") archCode = 9;
+    else if (arch == "arm64") archCode = 12;
+    else { Err("未知架构（x86|arm|arm64|amd64|ia64）：" + arch); return 2; }
+
+    std::vector<std::string> lines;
+    auto addK = [&lines](const std::string& path) { lines.push_back("K\t" + path); };
+    auto addV = [&lines](const std::string& path, const std::string& name, const char* type,
+                         const std::string& hex)
+    { lines.push_back("V\t" + path + "\t" + name + "\t" + type + "\t" + hex); };
+
+    std::string pending = ToUtf8(pendingHex);
+    if (pending.empty()) pending = std::string(32, '0');
+
+    char archHex[16];
+    std::snprintf(archHex, sizeof(archHex), "%02x%02x%02x%02x",
+                  static_cast<unsigned>(archCode & 0xFFu),
+                  static_cast<unsigned>((archCode >> 8) & 0xFFu),
+                  static_cast<unsigned>((archCode >> 16) & 0xFFu),
+                  static_cast<unsigned>((archCode >> 24) & 0xFFu));
+
+    const std::string stack = ToUtf8(stackVersion);
+    const std::string time = stackTime.empty() ? std::string("2011/8/4:8:52:25.424")
+                                               : ToUtf8(stackTime);
+    const std::string stackLine = time + " " + stack;
+
+    addK("");
+    addV("", "StoreFormatVersion", "3", Utf16LeHex(L"0.0.0.6"));
+    addV("", "StoreArchitecture", "3", archHex);
+    addV("", "ExecutionState", "4", "06000000");
+    addV("", "PendingXmlIdentifier", "3", Utf16LeHex(FromUtf8OrAnsi(pending.c_str())));
+    addK("ServicingStackVersions");
+    addV("ServicingStackVersions", stack, "1", Utf16LeHex(FromUtf8OrAnsi(stackLine.c_str())));
+    addV("ServicingStackVersions", "LastWCPVersionToAccessStore", "1",
+         Utf16LeHex(FromUtf8OrAnsi(stack.c_str())));
+    addK("Installers");
+    addK("Installers\\Ngen");
+    addV("Installers\\Ngen", "TicklerArchWoW", "4", "01000000");
+    addK("Configuration");
+    addK("ccpinterface");
+
+    std::sort(lines.begin(), lines.end());
+    std::wstring writeErr;
+    if (!WriteLinesUtf8(outPath, lines, writeErr)) { Err(ToUtf8(writeErr)); return 1; }
+    OutLn("root plan written " + ToUtf8(outPath) + " arch=" + arch +
+          " stack=" + stack);
+    return 0;
 }
 
 int main(int argc, char** argv)
@@ -2993,12 +3293,29 @@ int main(int argc, char** argv)
                                    FromUtf8OrAnsi(argv[6]));
     }
 
+    // cbs-plan-root <arch> <stackVersion> <outFile> [--pending <32hex>] [--time <text>]
+    if (cmd == L"cbs-plan-root" && argc >= 5) {
+        std::wstring pending, when;
+        for (int i = 5; i + 1 < argc; ++i) {
+            const std::wstring opt = FromUtf8OrAnsi(argv[i]);
+            if (opt == L"--pending") pending = FromUtf8OrAnsi(argv[++i]);
+            else if (opt == L"--time") when = FromUtf8OrAnsi(argv[++i]);
+        }
+        return CmdCbsPlanRoot(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]),
+                              FromUtf8OrAnsi(argv[4]), pending, when);
+    }
+
     if (cmd == L"cbs-diff" && argc >= 4) {
         int mx = 0;
         for (int i = 4; i < argc; ++i) {
             if (std::string(argv[i]) == "--limit" && i + 1 < argc) { mx = atoi(argv[++i]); }
         }
         return CmdCbsDiff(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]), mx);
+    }
+
+    // cbs-write <planFile> <hivePath>：把计划文本落成 hive 文件
+    if (cmd == L"cbs-write" && argc >= 4) {
+        return CmdCbsWrite(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]));
     }
 
     // cbs-hash：算身份折叠 / 值名后缀用的 H39 文本哈希（调试用）。
