@@ -46,6 +46,7 @@ param(
     [string[]] $StackEntries = @(),
     [switch] $Transactional,
     [switch] $SkipFileVerify,
+    [switch] $SkipStoreVerify,
     [string] $DiffAgainst,
     [string] $Exe
 )
@@ -214,20 +215,29 @@ if ($Transactional) { $writeArgs += '--transactional' }
 Invoke-Planner 'write' $writeArgs
 Write-Host ("[assemble] hive: {0} ({1} bytes)" -f $hive, (Get-Item $hive).Length)
 
-if ($DiffAgainst) {
+if ($DiffAgainst -or -not $SkipStoreVerify) {
     $mount = 'OCIDASM'
     $dump = Join-Path $OutDir 'hive-dump.txt'
     & reg unload "HKLM\$mount" 2>$null | Out-Null
     & reg load "HKLM\$mount" $hive | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "reg load failed for $hive" }
     try {
-        Invoke-Planner 'dump' @('cbs-dump', "HKLM\$mount", $dump)
+        if (-not $SkipStoreVerify) {
+            Write-Host "[assemble] self-consistency check (key/value names recomputed from record data)"
+            & $Exe cbs-verify-store "HKLM\$mount"
+            if ($LASTEXITCODE -ne 0) { throw "cbs-verify-store failed (exit $LASTEXITCODE): the assembled ledger is not self-consistent" }
+        }
+        if ($DiffAgainst) {
+            Invoke-Planner 'dump' @('cbs-dump', "HKLM\$mount", $dump)
+        }
     } finally {
         & reg unload "HKLM\$mount" | Out-Null
     }
-    Write-Host "[assemble] diff against $DiffAgainst"
-    & $Exe cbs-diff $dump $DiffAgainst --limit 8
-    exit $LASTEXITCODE
+    if ($DiffAgainst) {
+        Write-Host "[assemble] diff against $DiffAgainst"
+        & $Exe cbs-diff $dump $DiffAgainst --limit 8
+        exit $LASTEXITCODE
+    }
 }
 
 exit 0

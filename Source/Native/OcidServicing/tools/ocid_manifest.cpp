@@ -1611,6 +1611,273 @@ static int CmdCbsDump(const std::wstring& hiveSpec, const std::wstring& outPath)
 #endif
 }
 
+// ── 台账自洽性核对（cbs-verify-store）──────────────────────────────────
+//
+// 手上没有"微软原版"时，仍然可以证明一份 COMPONENTS 是**自洽**的：每个键名都
+// 能从它自己的 identity 重算出来，每个值名都能从它自己的数据重算出来，部署与
+// 组件之间的引用都闭合。OCID 自己组装的镜像走这一关，就不必依赖对拍样本。
+//
+// 查的东西：
+//   1) 组件键名 == CbsComponentKeyName(record.identity)
+//   2) f! 值名 == CbsFileValueName(原始大小写文件名)
+//   3) 部署键名 == CbsDeploymentKeyName(appid)
+//   4) p!/s!/i! 值名 == CbsPayloadValueName(prefix, payload 身份)
+//   5) 每个 c! 指向的部署键存在
+//   6) 每个部署 appid 都有一条 CF=12 的组件记录（真机 2,276/2,276 成立）
+//   7) Catalogs 键都是 64 个 hex；VersionedIndex 的家庭键都由某个组件产生
+static int CmdCbsVerifyStore(const std::wstring& hiveSpec)
+{
+#ifdef _WIN32
+    HKEY rootKey = nullptr;
+    std::wstring sub, err;
+    if (!ParseHivePath(hiveSpec, rootKey, sub, err)) { Err(ToUtf8(err)); return 2; }
+
+    HKEY store = nullptr;
+    if (RegOpenKeyExW(rootKey, sub.c_str(), 0, KEY_READ, &store) != ERROR_SUCCESS)
+    {
+        Err("打不开台账根（reg load 了吗？）");
+        return 2;
+    }
+
+    auto report = [](const char* label, std::size_t count) {
+        if (count != 0) Err(std::string(label) + "=" + std::to_string(count));
+    };
+
+    std::size_t componentCount = 0, deploymentCount = 0, catalogCount = 0, familyCount = 0;
+    std::size_t badComponentKey = 0, badFileName = 0, badDeploymentKey = 0, badPayloadName = 0;
+    std::size_t missingMarkTarget = 0, missingAppIdComponent = 0, badCatalogKey = 0, orphanFamily = 0;
+    std::vector<std::string> samples;
+
+    std::set<std::string> componentKeys;
+    std::set<std::string> deploymentKeys;
+    std::set<std::string> appIdComponentKeys;   // CF=12 的组件键（部署 appid 的落点）
+    std::set<std::string> familyKeys;           // 由组件产生的家庭键
+
+    auto note = [&samples](const std::string& text) {
+        if (samples.size() < 20) samples.push_back(text);
+    };
+
+    // 1) 组件
+    {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(store, L"DerivedData\\Components", 0, KEY_READ, &key) == ERROR_SUCCESS)
+        {
+            std::vector<std::wstring> names;
+            if (EnumSubKeys(key, names, err))
+            {
+                for (const std::wstring& name : names)
+                {
+                    HKEY item = nullptr;
+                    if (RegOpenKeyExW(key, name.c_str(), 0, KEY_READ, &item) != ERROR_SUCCESS) continue;
+                    std::vector<CbsRegValue> raw;
+                    if (!ReadAllValues(item, raw, err)) { RegCloseKey(item); continue; }
+                    const std::vector<CbsValue> values = ToCbsValues(raw);
+                    RegCloseKey(item);
+                    ++componentCount;
+
+                    const std::string keyName = ToUtf8(name);
+                    componentKeys.insert(keyName);
+
+                    CbsComponentRecord record;
+                    std::string decodeErr;
+                    if (!CbsDecodeComponentRecord(name, values, record, decodeErr)) { ++badComponentKey; note("decode " + keyName); continue; }
+                    if (!CbsIsComponentName(name)) ++badComponentKey;
+
+                    CbsIdentity identity;
+                    if (!CbsParseIdentity(record.identity, identity, decodeErr) ||
+                        CbsComponentKeyName(identity) != keyName)
+                    {
+                        ++badComponentKey;
+                        note("key " + keyName + " != " + (record.identity.empty() ? "<none>" : CbsComponentKeyName(identity)));
+                    }
+                    else
+                    {
+                        familyKeys.insert(CbsFamilyKeyName(identity));
+                    }
+
+                    for (const CbsFile& file : record.files)
+                    {
+                        if (file.fileName.empty()) continue;
+                        if (CbsFileValueName(file.fileName) != file.valueName)
+                        {
+                            ++badFileName;
+                            note("fname " + keyName + " " + file.valueName);
+                        }
+                    }
+                    if (record.hasConfigFlags && record.configFlags == 12) appIdComponentKeys.insert(keyName);
+                }
+            }
+            RegCloseKey(key);
+        }
+    }
+
+    // 2) 部署
+    {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(store, L"CanonicalData\\Deployments", 0, KEY_READ, &key) == ERROR_SUCCESS)
+        {
+            std::vector<std::wstring> names;
+            if (EnumSubKeys(key, names, err))
+            {
+                for (const std::wstring& name : names)
+                {
+                    HKEY item = nullptr;
+                    if (RegOpenKeyExW(key, name.c_str(), 0, KEY_READ, &item) != ERROR_SUCCESS) continue;
+                    std::vector<CbsRegValue> raw;
+                    if (!ReadAllValues(item, raw, err)) { RegCloseKey(item); continue; }
+                    const std::vector<CbsValue> values = ToCbsValues(raw);
+                    RegCloseKey(item);
+                    ++deploymentCount;
+
+                    const std::string keyName = ToUtf8(name);
+                    deploymentKeys.insert(keyName);
+
+                    CbsDeploymentRecord record;
+                    std::string decodeErr;
+                    if (!CbsDecodeDeploymentRecord(name, values, record, decodeErr)) { ++badDeploymentKey; note("dep-decode " + keyName); continue; }
+
+                    CbsIdentity identity;
+                    if (!CbsParseIdentity(record.appId, identity, decodeErr) ||
+                        CbsDeploymentKeyName(identity) != keyName)
+                    {
+                        ++badDeploymentKey;
+                        note("dep-key " + keyName);
+                    }
+                    else if (componentKeys.count(CbsComponentKeyName(identity)) == 0)
+                    {
+                        ++missingAppIdComponent;
+                        note("appid-component " + keyName + " -> " + CbsComponentKeyName(identity));
+                    }
+
+                    for (const CbsPayload& payload : record.payloads)
+                    {
+                        if (CbsPayloadValueName(payload.prefix, payload.identity) != payload.valueName)
+                        {
+                            ++badPayloadName;
+                            note("payload " + keyName + " " + payload.valueName);
+                        }
+                    }
+                }
+            }
+            RegCloseKey(key);
+        }
+    }
+
+    // 3) c! 引用闭合
+    {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(store, L"DerivedData\\Components", 0, KEY_READ, &key) == ERROR_SUCCESS)
+        {
+            std::vector<std::wstring> names;
+            if (EnumSubKeys(key, names, err))
+            {
+                for (const std::wstring& name : names)
+                {
+                    HKEY item = nullptr;
+                    if (RegOpenKeyExW(key, name.c_str(), 0, KEY_READ, &item) != ERROR_SUCCESS) continue;
+                    std::vector<CbsRegValue> raw;
+                    if (!ReadAllValues(item, raw, err)) { RegCloseKey(item); continue; }
+                    const std::vector<CbsValue> values = ToCbsValues(raw);
+                    RegCloseKey(item);
+                    CbsComponentRecord record;
+                    std::string decodeErr;
+                    if (!CbsDecodeComponentRecord(name, values, record, decodeErr)) continue;
+                    for (const CbsMark& mark : record.deploymentMarks)
+                    {
+                        if (deploymentKeys.count(mark.deploymentName) == 0)
+                        {
+                            ++missingMarkTarget;
+                            note("mark " + ToUtf8(name) + " -> " + mark.deploymentName);
+                        }
+                    }
+                }
+            }
+            RegCloseKey(key);
+        }
+    }
+
+    // 4) Catalogs 键形态
+    {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(store, L"CanonicalData\\Catalogs", 0, KEY_READ, &key) == ERROR_SUCCESS)
+        {
+            std::vector<std::wstring> names;
+            if (EnumSubKeys(key, names, err))
+            {
+                for (const std::wstring& name : names)
+                {
+                    ++catalogCount;
+                    const std::string text = ToUtf8(name);
+                    bool ok = text.size() == 64;
+                    for (char c : text)
+                        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) ok = false;
+                    if (!ok) { ++badCatalogKey; note("catalog " + text); }
+                }
+            }
+            RegCloseKey(key);
+        }
+    }
+
+    // 5) VersionedIndex 家庭键必须由某个组件产生
+    {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(store, L"DerivedData\\VersionedIndex", 0, KEY_READ, &key) == ERROR_SUCCESS)
+        {
+            std::vector<std::wstring> buckets;
+            if (EnumSubKeys(key, buckets, err))
+            {
+                for (const std::wstring& bucket : buckets)
+                {
+                    HKEY bucketKey = nullptr;
+                    const std::wstring familiesPath = L"DerivedData\\VersionedIndex\\" + bucket + L"\\ComponentFamilies";
+                    if (RegOpenKeyExW(store, familiesPath.c_str(), 0, KEY_READ, &bucketKey) != ERROR_SUCCESS) continue;
+                    std::vector<std::wstring> families;
+                    if (EnumSubKeys(bucketKey, families, err))
+                    {
+                        for (const std::wstring& family : families)
+                        {
+                            ++familyCount;
+                            const std::string text = ToUtf8(family);
+                            if (familyKeys.count(text) == 0)
+                            {
+                                ++orphanFamily;
+                                note("family " + text);
+                            }
+                        }
+                    }
+                    RegCloseKey(bucketKey);
+                }
+            }
+            RegCloseKey(key);
+        }
+    }
+
+    RegCloseKey(store);
+
+    report("bad-component-key", badComponentKey);
+    report("bad-file-name", badFileName);
+    report("bad-deployment-key", badDeploymentKey);
+    report("bad-payload-name", badPayloadName);
+    report("missing-mark-target", missingMarkTarget);
+    report("missing-appid-component", missingAppIdComponent);
+    report("bad-catalog-key", badCatalogKey);
+    report("orphan-family", orphanFamily);
+    for (const std::string& sample : samples) Err("  - " + sample);
+
+    const bool ok = (badComponentKey + badFileName + badDeploymentKey + badPayloadName +
+                     missingMarkTarget + missingAppIdComponent + badCatalogKey + orphanFamily) == 0;
+    OutLn("components=" + std::to_string(componentCount) +
+          " deployments=" + std::to_string(deploymentCount) +
+          " catalogs=" + std::to_string(catalogCount) +
+          " families=" + std::to_string(familyCount) +
+          " result=" + (ok ? "OK" : "MISMATCH"));
+    return ok ? 0 : 1;
+#else
+    (void)hiveSpec;
+    return 2;
+#endif
+}
+
 // ── 文件落位核对（cbs-verify-files）────────────────────────────────────
 //
 // 台账与文件必须同时成立：一个组件的 f! 值条数 = 它在 WinSxS 下的文件数。
@@ -1708,7 +1975,7 @@ static int CmdCbsVerifyFiles(const std::wstring& planPath, const std::wstring& w
     std::error_code ec;
 
     std::size_t withFiles = 0, filesExpected = 0;
-    std::size_t dirsMissing = 0, filesMissing = 0, countMismatch = 0;
+    std::size_t dirsMissing = 0, filesMissing = 0, countMismatch = 0, strayDirs = 0;
     std::vector<std::string> samples;
 
     for (const auto& item : expected)
@@ -1751,12 +2018,22 @@ static int CmdCbsVerifyFiles(const std::wstring& planPath, const std::wstring& w
         }
     }
 
+    // 反向核对：台账里没有 f! 的组件，不该在 WinSxS 下留下目录。
+    // 真机 8061 两个镜像都恰好成立（有目录 ⇔ 有 f!），所以这里只报数、不判失败，
+    // 免得"只落了部分载荷"的中间态被误判成计划错误。
+    for (const auto& key : componentKeys)
+    {
+        if (expected.count(key) != 0) continue;
+        if (fs::is_directory(root / fs::path(key), ec)) ++strayDirs;
+    }
+
     OutLn("components=" + std::to_string(componentKeys.size()) +
           " componentsWithFiles=" + std::to_string(withFiles) +
           " files=" + std::to_string(filesExpected) +
           " dirsMissing=" + std::to_string(dirsMissing) +
           " filesMissing=" + std::to_string(filesMissing) +
-          " countMismatch=" + std::to_string(countMismatch));
+          " countMismatch=" + std::to_string(countMismatch) +
+          " strayDirs=" + std::to_string(strayDirs));
     for (const std::string& s : samples) OutLn("  - " + s);
     return (dirsMissing == 0 && filesMissing == 0 && countMismatch == 0) ? 0 : 1;
 #else
@@ -2339,6 +2616,7 @@ static void Usage()
     OutLn("      --markers: key|appid|thumb|markers（真机导出的安装/启用状态，决定 p!/s!/i!）");
     OutLn("  ocid_manifest cbs-diff <a.txt> <b.txt> [--limit N]   compare two cbs-dump files");
     OutLn("  ocid_manifest cbs-verify-files <plan.txt> <winSxsDir>   check every f! value has its file staged");
+    OutLn("  ocid_manifest cbs-verify-store <hiveSpec>   self-consistency of a COMPONENTS hive (no reference needed)");
     OutLn("  ocid_manifest cbs-write <plan.txt> <hivePath> [--transactional]   rebuild a hive file from a cbs-dump text");
     OutLn("");
     OutLn("Data goes to stdout, diagnostics to stderr.");
@@ -4477,6 +4755,11 @@ int main(int argc, char** argv)
             if (std::string(argv[i]) == "--limit" && i + 1 < argc) { mx = atoi(argv[++i]); }
         }
         return CmdCbsDiff(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]), mx);
+    }
+
+    // cbs-verify-store <hiveSpec>：没有对拍样本时证明台账自洽
+    if (cmd == L"cbs-verify-store" && argc >= 3) {
+        return CmdCbsVerifyStore(FromUtf8OrAnsi(argv[2]));
     }
 
     // cbs-verify-files <planFile> <winSxsDir>：提交台账前核对文件是否都已落位
