@@ -37,6 +37,10 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <ktmw32.h>  // CreateTransaction / CommitTransaction / RollbackTransaction（KTM）
+#endif
+
 using namespace ocid;
 
 // ── 窄/宽字符串与控制台输出 ─────────────────────────────────────────────
@@ -1744,7 +1748,10 @@ bool EnablePrivilege(const wchar_t* name, std::wstring& err)
 }
 
 // 建（或开）相对键。rel 用 UTF-8、以 '\\' 分段；空串即根键。
-HKEY EnsureKeyCached(HKEY root, const std::string& relUtf8, std::map<std::string, HKEY>& cache)
+// txn 非空时走 RegCreateKeyTransacted —— 键/值写入都进同一个 KTM 事务，
+// 失败可整体回滚（hive 文件保持原样）。
+HKEY EnsureKeyCached(HKEY root, const std::string& relUtf8, std::map<std::string, HKEY>& cache,
+                     HANDLE txn)
 {
     if (relUtf8.empty()) return root;
     auto it = cache.find(relUtf8);
@@ -1752,8 +1759,13 @@ HKEY EnsureKeyCached(HKEY root, const std::string& relUtf8, std::map<std::string
 
     const std::wstring rel = FromUtf8OrAnsi(relUtf8.c_str());
     HKEY key = nullptr;
-    if (RegCreateKeyExW(root, rel.c_str(), 0, nullptr, 0, KEY_ALL_ACCESS, nullptr, &key,
-                        nullptr) != ERROR_SUCCESS)
+    const LSTATUS rc = (txn != nullptr && txn != INVALID_HANDLE_VALUE)
+                           ? RegCreateKeyTransactedW(root, rel.c_str(), 0, nullptr, 0,
+                                                     KEY_ALL_ACCESS, nullptr, &key, nullptr, txn,
+                                                     nullptr)
+                           : RegCreateKeyExW(root, rel.c_str(), 0, nullptr, 0, KEY_ALL_ACCESS,
+                                             nullptr, &key, nullptr);
+    if (rc != ERROR_SUCCESS)
     {
         return nullptr;
     }
@@ -1762,9 +1774,16 @@ HKEY EnsureKeyCached(HKEY root, const std::string& relUtf8, std::map<std::string
 }
 
 } // namespace
+
+// KTM 事务化写入：CreateTransaction → RegOpenKeyTransacted/RegCreateKeyTransacted →
+// CommitTransaction（失败路径 RollbackTransaction，hive 文件不变）。
+// 需要 Win8+ 的 KTM 服务（桌面版/Server 默认运行）；离线 hive 必须先 RegLoadKey 挂起来。
+// 只用事务不会改变落盘字节：提交后 cbs-dump 与不事务的结果相同（有测试对拍）。
+#pragma comment(lib, "ktmw32.lib")
 #endif
 
-static int CmdCbsWrite(const std::wstring& planPath, const std::wstring& hivePath)
+static int CmdCbsWrite(const std::wstring& planPath, const std::wstring& hivePath,
+                       bool transactional)
 {
 #ifdef _WIN32
     std::wstring raw, err;
@@ -1809,8 +1828,27 @@ static int CmdCbsWrite(const std::wstring& planPath, const std::wstring& hivePat
     }
 
     HKEY root = nullptr;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kMount, 0, KEY_ALL_ACCESS, &root) != ERROR_SUCCESS)
+    HANDLE txn = nullptr;
+    if (transactional)
     {
+        txn = ::CreateTransaction(nullptr, 0, 0, 0, 0, 0, nullptr);
+        if (txn == nullptr || txn == INVALID_HANDLE_VALUE)
+        {
+            const DWORD rc = ::GetLastError();
+            RegUnLoadKeyW(HKEY_LOCAL_MACHINE, kMount);
+            Err("CreateTransaction 失败：" + std::to_string(rc) +
+                "（KTM 服务不可用？可去掉 --transactional）");
+            return 2;
+        }
+    }
+    const LSTATUS openRc =
+        (txn != nullptr)
+            ? RegOpenKeyTransactedW(HKEY_LOCAL_MACHINE, kMount, 0, KEY_ALL_ACCESS, &root, txn,
+                                    nullptr)
+            : RegOpenKeyExW(HKEY_LOCAL_MACHINE, kMount, 0, KEY_ALL_ACCESS, &root);
+    if (openRc != ERROR_SUCCESS)
+    {
+        if (txn != nullptr) ::CloseHandle(txn);
         RegUnLoadKeyW(HKEY_LOCAL_MACHINE, kMount);
         Err("打不开挂载点");
         return 2;
@@ -1834,12 +1872,12 @@ static int CmdCbsWrite(const std::wstring& planPath, const std::wstring& hivePat
 
         if (fields[0] == "K")
         {
-            if (EnsureKeyCached(root, fields[1], cache) == nullptr) { ++badLines; continue; }
+            if (EnsureKeyCached(root, fields[1], cache, txn) == nullptr) { ++badLines; continue; }
             ++keys;
         }
         else if (fields[0] == "V" && fields.size() >= 5)
         {
-            HKEY key = EnsureKeyCached(root, fields[1], cache);
+            HKEY key = EnsureKeyCached(root, fields[1], cache, txn);
             if (key == nullptr) { ++badLines; continue; }
             std::vector<std::uint8_t> data;
             if (!HexToBytes(fields[4], data)) { ++badLines; continue; }
@@ -1863,6 +1901,30 @@ static int CmdCbsWrite(const std::wstring& planPath, const std::wstring& hivePat
     for (auto& entry : cache) RegCloseKey(entry.second);
     RegCloseKey(root);
 
+    // 事务提交/回滚必须在句柄都关掉之后做。
+    bool rolledBack = false;
+    if (txn != nullptr)
+    {
+        if (badLines == 0)
+        {
+            if (!::CommitTransaction(txn))
+            {
+                const DWORD rc = ::GetLastError();
+                ::RollbackTransaction(txn);
+                ::CloseHandle(txn);
+                RegUnLoadKeyW(HKEY_LOCAL_MACHINE, kMount);
+                Err("CommitTransaction 失败：" + std::to_string(rc) + "（已回滚）");
+                return 1;
+            }
+        }
+        else
+        {
+            ::RollbackTransaction(txn);
+            rolledBack = true;
+        }
+        ::CloseHandle(txn);
+    }
+
     // 4) 落盘
     const LSTATUS flushRc = RegUnLoadKeyW(HKEY_LOCAL_MACHINE, kMount);
     if (flushRc != ERROR_SUCCESS)
@@ -1872,7 +1934,9 @@ static int CmdCbsWrite(const std::wstring& planPath, const std::wstring& hivePat
     }
 
     OutLn("written keys=" + std::to_string(keys) + " values=" + std::to_string(values) +
-          " badLines=" + std::to_string(badLines) + " hive=" + ToUtf8(hivePath));
+          " badLines=" + std::to_string(badLines) + " hive=" + ToUtf8(hivePath) +
+          (txn != nullptr ? (rolledBack ? " transaction=rolled-back" : " transaction=committed")
+                          : ""));
     return badLines == 0 ? 0 : 1;
 #else
     (void)planPath; (void)hivePath;
@@ -2119,7 +2183,7 @@ static void Usage()
     OutLn("      [--pending <32hex>] [--time <timestamp 文本>]  根键值（会话态可显式给）");
     OutLn("      --markers: key|appid|thumb|markers（真机导出的安装/启用状态，决定 p!/s!/i!）");
     OutLn("  ocid_manifest cbs-diff <a.txt> <b.txt> [--limit N]   compare two cbs-dump files");
-    OutLn("  ocid_manifest cbs-write <plan.txt> <hivePath>   rebuild a hive file from a cbs-dump text");
+    OutLn("  ocid_manifest cbs-write <plan.txt> <hivePath> [--transactional]   rebuild a hive file from a cbs-dump text");
     OutLn("");
     OutLn("Data goes to stdout, diagnostics to stderr.");
 }
@@ -4226,9 +4290,13 @@ int main(int argc, char** argv)
         return CmdCbsDiff(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]), mx);
     }
 
-    // cbs-write <planFile> <hivePath>：把计划文本落成 hive 文件
+    // cbs-write <planFile> <hivePath> [--transactional]：把计划文本落成 hive 文件
     if (cmd == L"cbs-write" && argc >= 4) {
-        return CmdCbsWrite(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]));
+        bool transactional = false;
+        for (int i = 4; i < argc; ++i) {
+            if (FromUtf8OrAnsi(argv[i]) == L"--transactional") transactional = true;
+        }
+        return CmdCbsWrite(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]), transactional);
     }
 
     // cbs-hash：算身份折叠 / 值名后缀用的 H39 文本哈希（调试用）。
