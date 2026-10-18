@@ -119,6 +119,7 @@ $ct = New-Object 'System.Collections.Generic.List[string]'
 $vflags = New-Object 'System.Collections.Generic.List[string]'
 $mcp = New-Object 'System.Collections.Generic.List[string]'
 $skeleton = New-Object 'System.Collections.Generic.HashSet[string]'
+$content = New-Object 'System.Collections.Generic.HashSet[string]'
 $root = @{ values = @{}; stacks = @{} }
 $hasCcp = $false
 $hasInstallersShortcut = $false
@@ -195,6 +196,7 @@ foreach ($line in [IO.File]::ReadLines($truth)) {
                 $fam = $parts[$famIdx + 1]
                 $isVersionNode = ($parts.Length -gt $famIdx + 2)
                 if (-not $isVersionNode) {
+                    if ($name.StartsWith('f256!')) { [void]$content.Add($fam); continue }
                     if ($name -eq 'SomeUnparsedVersionsExist') {
                         [void]$skeleton.Add($fam)
                         continue
@@ -214,11 +216,13 @@ foreach ($line in [IO.File]::ReadLines($truth)) {
                         $off = [BitConverter]::ToUInt32($b, 4)
                         $len = [BitConverter]::ToUInt32($b, 8)
                         $mcp.Add(('{0}|{1}|{2}|{3}' -f $path, $name.Substring(4), $off, $len))
+                        [void]$content.Add($fam)
                     }
                     continue
                 }
                 if ($name -eq 'CT') {
                     $ct.Add(($fam + '|' + $parts[$famIdx + 2].Substring(2) + '|' + ((Get-Utf16 $hex).Trim())))
+                    [void]$content.Add($fam)
                     continue
                 }
                 continue
@@ -259,6 +263,8 @@ Write-Lines (Join-Path $OutDir 'cache.csv') ($cache | Sort-Object -Unique)
 Write-Lines (Join-Path $OutDir 'ct.csv') ($ct | Sort-Object -Unique)
 Write-Lines (Join-Path $OutDir 'version_flags.csv') ($vflags | Sort-Object -Unique)
 Write-Lines (Join-Path $OutDir 'mcp.csv') ($mcp | Sort-Object -Unique)
+# a family that also carries real content (f256/MCP/CT/version flags) is not skeleton-only
+$skeleton.ExceptWith($content)
 Write-Lines (Join-Path $OutDir 'skeleton_families.csv') ($skeleton | Sort-Object)
 
 # ---- packages state (SOFTWARE hive) ----------------------------------------
@@ -335,3 +341,4 @@ $json = $rootInfo | ConvertTo-Json -Depth 6
 
 Write-Host ("[inputs] {0}: deployments={1} claims={2} flags={3} buckets={4} ct={5} vflags={6} mcp={7} skeleton={8} packages={9}" -f `
         $Hive, $markers.Count, $claims.Count, $flags.Count, ($buckets | Sort-Object -Unique).Count, $ct.Count, $vflags.Count, $mcp.Count, $skeleton.Count, $packages)
+

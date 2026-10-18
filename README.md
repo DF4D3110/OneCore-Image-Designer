@@ -147,7 +147,15 @@ TestContent/DevicePlatformIDs、V2 专有与 V2 已废弃字段）。`Assets/Val
 
 `CbsStore` 负责 COMPONENTS 台账的编解码，`ocid_manifest cbs-write` 与 `assemble-cbs-store.ps1` 负责
 从组件清单/包清单生成它；流程是"组件计划 → 部署与 catalog 计划 → 版本索引计划 → 根值 → 事务化落盘 →
-`cbs-verify-files`/`cbs-verify-store` 自检 → 与真机 `cbs-diff` 对拍"。
+`cbs-verify-files`/`cbs-verify-store` 自检 → 与真机 `cbs-diff` 对拍"。`ocid-assemble.ps1` 把整条链
+（含安装历史输入导出与覆盖表自动生成）收成**一条命令**：
+
+```powershell
+pwsh -NoProfile -File .\ocid-assemble.ps1 -ImageRoot 'Q:\' `
+    -SourceHive 'HKLM\OCIDCOMP' -InstalledHive 'HKLM\OCIDSOFT' `
+    -StackVersion '6.2.8061.0 (fbl_core1_soc.110803-1830)' `
+    -OutDir 'E:\ocid_verify\oneX86' -AutoOverrides -Transactional
+```
 
 | 项 | 状态 |
 | --- | --- |

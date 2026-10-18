@@ -126,6 +126,42 @@ Foundation 交付 payload"复刻）。8419 的 253 条里最大一类是"骨架�
 
 ## 6. 复现
 
+### 6.0 一条命令（推荐）
+
+`ocid-assemble.ps1` 把"取输入 → 三次规划 → 合并 → 事务化落盘 → 提交前核对 → 自动生成覆盖表 → 再组装 → 最终 cbs-diff"串成一次调用。
+只要目标镜像的 COMPONENTS 已挂载（`reg load`）且 SOFTWARE 可用，三个镜像都是**一条命令到 0/0**：
+
+```powershell
+cd D:\GitHub_Projects\OneCore-Image-Designer\Source\Native
+pwsh -NoProfile -File .\build-servicing.ps1
+
+# 8061 x86（Q:）：43,100 键 / 120,978 值，最终 0/0
+pwsh -NoProfile -File .\ocid-assemble.ps1 `
+    -ImageRoot 'Q:\' -SourceHive 'HKLM\OCIDCOMP' -InstalledHive 'HKLM\OCIDSOFT' `
+    -StackVersion '6.2.8061.0 (fbl_core1_soc.110803-1830)' `
+    -OutDir 'E:\ocid_verify\oneX86' -AutoOverrides -Transactional
+#   pass 1: 43,098 键 / 120,978 值，差 42 值；覆盖表 54 行；pass 2: 0/0
+
+# 8061 ARM（P:）：613 键 / 1,408 值，最终 0/0
+pwsh -NoProfile -File .\ocid-assemble.ps1 `
+    -ImageRoot 'P:\' -SourceHive 'HKLM\OCIDCOMPP' -InstalledHive 'HKLM\OCIDPSOFT' `
+    -StackVersion '6.2.8061.0 (fbl_core1_soc.110803-1830)' `
+    -OutDir 'E:\ocid_verify\oneARM' -AutoOverrides -Transactional
+#   pass 1: 610 键 / 1,375 值，差 53 值；覆盖表 53 行；pass 2: 0/0
+
+# 8419 ARM（挂载的 WIM + 两个 hive 文件）：23,328 键 / 61,277 值，最终 0/0
+pwsh -NoProfile -File .\ocid-assemble.ps1 `
+    -ImageRoot 'E:\ocid_verify\mnt8419' -SourceHive 'HKLM\OCID8419' `
+    -SoftwareHivePath 'E:\ocid_verify\8419\SOFTWARE.hiv' `
+    -StackVersion '6.2.8419.0 (winmain.120521-1835)' `
+    -OutDir 'E:\ocid_verify\one8419' -AutoOverrides -Transactional
+#   pass 1: 23,327 键 / 61,244 值，差 89+122 值；覆盖表 158 行；pass 2: 0/0
+```
+
+参数含义：`-SourceHive` 触发 `Extract-CbsInputs.ps1`（也可用 `-InputsDir` 复用已导出的输入，或逐个传 `-Markers/-Claims/...`）；`-ExtractDefaultBucket` 缺省取 `-StackVersion`（当前栈桶即默认桶）；`-AutoOverrides` 会用 pass 1 的 `hive-dump.txt` 与 `-DiffAgainst`（缺省 `inputs\truth.txt`）生成覆盖表再跑 pass 2；`-Transactional` 把注册表写入包进 KTM 事务。
+
+### 6.1 手工分步（首次用 6.0 已经不需要；保留用于逐步排障）
+
 ```powershell
 cd D:\GitHub_Projects\OneCore-Image-Designer\Source\Native
 pwsh -NoProfile -File .\build-servicing.ps1
@@ -210,7 +246,7 @@ pwsh -NoProfile -File .\assemble-cbs-store.ps1 `
 覆盖表由 `make-cbs-overrides.ps1` 从一次对拍的差集生成（`set`/`remove`/`add-key`/`remove-key` 四种行），
 用法：`pwsh -NoProfile -File .\make-cbs-overrides.ps1 -Dump <组装后的 hive-dump> -Truth <真机转储> -Out <输出.csv>`。
 
-### 6.1 事务化落盘（KTM）
+### 6.2 事务化落盘（KTM）
 
 `cbs-write` 支持 `--transactional`：整轮写入包进一个 KTM 事务
 （`CreateTransaction` → `RegOpenKeyTransactedW` / `RegCreateKeyTransactedW` → `CommitTransaction`），
@@ -230,7 +266,7 @@ ocid_manifest cbs-write plan-bad.txt rollback.hiv --transactional
 
 需要 Win8+ 的 KTM 服务（桌面版/Server 默认运行）；`--transactional` 不加则退回普通写入。`assemble-cbs-store.ps1 -Transactional` 会把开关透传下来（ARM 8061 走事务提交后对真机仍 0/0）。
 
-### 6.2 文件 + 台账的原子性（顺序约定 + 提交前核对）
+### 6.3 文件 + 台账的原子性（顺序约定 + 提交前核对）
 
 台账只描述"WinSxS 里应该有什么文件"。如果先写台账、文件却没落成，镜像就是坏的；
 反过来文件多落了一些只是孤儿（台账没引用，不破坏任何组件）。所以原子性靠**顺序约定**：
@@ -257,7 +293,7 @@ ocid_manifest cbs-write plan-bad.txt rollback.hiv --transactional
 这条核对同时是"计划正确性"的第二把尺子：`f!` 集合与磁盘文件集合必须一一对应，
 任何清单解析偏差（多一条 f!、少一条、名字大小写错）都会在这里暴露，而不用等挂载 hive 后对拍。
 
-### 6.3 台账自洽性核对（cbs-verify-store，不需要任何参照样本）
+### 6.4 台账自洽性核对（cbs-verify-store，不需要任何参照样本）
 
 `ocid_manifest cbs-verify-store <hiveSpec>` 在**没有微软原版可对拍**时也能证明一份
 COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一关即可：
@@ -348,3 +384,5 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
 
 结论：写侧对 8061/8419 这类"XML 清单 + 0.0.0.6"镜像已闭环；要覆盖 16299+，需要先解 DCM
 （紧凑清单容器）与 `Drivers`/`NonCanonicalData` 两个新台账，这不是现有管道的小改。
+
+
