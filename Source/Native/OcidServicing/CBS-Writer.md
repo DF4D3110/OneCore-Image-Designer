@@ -139,36 +139,51 @@ pwsh -NoProfile -File .\Extract-CbsInputs.ps1 `
 #    产出 markers/claims/flags/buckets/cache/ct/version_flags/mcp/skeleton_families/
 #    packages_state/root_info.json + truth.txt（同时是 cbs-diff 的基准）
 
+# 1) 组装：输入全部来自上一步的 -OutDir（-RootInfo 自动展开镜像形态：
+#    ExecutionState/PendingXmlIdentifier/历史栈条目/--minimal/--ccpinterface）
 pwsh -NoProfile -File .\assemble-cbs-store.ps1 `
     -ImageRoot 'Q:\' `
     -StackVersion '6.2.8061.0 (fbl_core1_soc.110803-1830)' `
-    -OutDir 'E:\ocid_verify\asmx' -HiveName 'OCIDX.hiv' `
-    -Markers  'E:\ocid_verify\deployments_full.csv' `
-    -Installed 'E:\ocid_verify\packages_state.txt' `
-    -Claims   'E:\ocid_verify\cbs_claims.csv' `
-    -Flags    'E:\ocid_verify\cbs_flags.csv' `
-    -Buckets  'E:\ocid_verify\buckets.csv' `
-    -Cache    'E:\ocid_verify\cache.csv' `
-    -Ct       'E:\ocid_verify\ct.csv' `
-    -VersionFlags 'E:\ocid_verify\version_flags.csv' `
-    -Mcp      'E:\ocid_verify\mcp_values.csv' `
-    -Pending  'a4dfe6df8352cc01310e00004c08480d' `
+    -OutDir 'E:\ocid_verify\asmx' -HiveName 'OCIDX.hiv' -Transactional `
+    -Markers 'E:\ocid_verify\inputs8061\markers.csv' `
+    -Installed 'E:\ocid_verify\inputs8061\packages_state.txt' `
+    -Claims 'E:\ocid_verify\inputs8061\claims.csv' `
+    -Flags 'E:\ocid_verify\inputs8061\flags.csv' `
+    -Buckets 'E:\ocid_verify\inputs8061\buckets.csv' `
+    -Cache 'E:\ocid_verify\inputs8061\cache.csv' `
+    -Ct 'E:\ocid_verify\inputs8061\ct.csv' `
+    -VersionFlags 'E:\ocid_verify\inputs8061\version_flags.csv' `
+    -Mcp 'E:\ocid_verify\inputs8061\mcp.csv' `
+    -SkeletonFamilies 'E:\ocid_verify\inputs8061\skeleton_families.csv' `
+    -RootInfo 'E:\ocid_verify\inputs8061\root_info.json' `
     -Override 'E:\ocid_verify\overrides_x86.csv' `
-    -DiffAgainst 'E:\ocid_verify\truth_all.txt'
+    -DiffAgainst 'E:\ocid_verify\inputs8061\truth.txt'
+#    → written keys=43097 values=120978、对 truth.txt 0/0
 
-# ARM（8061）：根值走 --minimal（首会话状态在本镜像里不存在），历史栈条目单独给
+# 2) ARM（8061）：DefaultBucket 必须给"当前栈桶"（否则 118 个内容家庭会全被当成外移）
+pwsh -NoProfile -File .\Extract-CbsInputs.ps1 `
+    -Hive 'HKLM\OCIDCOMPP' -OutDir 'E:\ocid_verify\inputsARM' `
+    -DefaultBucket '6.2.8061.0 (fbl_core1_soc.110803-1830)' `
+    -InstalledHive 'HKLM\OCIDPSOFT'
+
 pwsh -NoProfile -File .\assemble-cbs-store.ps1 `
     -ImageRoot 'P:\' `
     -StackVersion '6.2.8061.0 (fbl_core1_soc.110803-1830)' `
-    -OutDir 'E:\ocid_verify\asmb' -HiveName 'OCIDA.hiv' `
-    -Markers 'E:\ocid_verify\arm_markers.csv' -Installed 'E:\ocid_verify\packages_state_arm.txt' `
-    -Claims 'E:\ocid_verify\arm_claims.csv' -Flags 'E:\ocid_verify\arm_flags.csv' `
-    -Buckets 'E:\ocid_verify\arm_buckets.csv' -Cache 'E:\ocid_verify\arm_cache.csv' `
-    -VersionFlags 'E:\ocid_verify\arm_vflags.csv' -Mcp 'E:\ocid_verify\arm_mcp.csv' `
-    -RootMinimal `
-    -StackEntries '6.2.7992.0 (fbl_fun_lad.110407-1318)|2011/8/4:6:42:41.654 6.2.7992.0 (fbl_fun_lad.110407-1318)' `
-    -Override 'E:\ocid_verify\overrides_arm.csv' `
-    -DiffAgainst 'E:\ocid_verify\truth_arm.txt'
+    -OutDir 'E:\ocid_verify\asmARM3' -HiveName 'ARMA.hiv' -Transactional `
+    -Markers 'E:\ocid_verify\inputsARM\markers.csv' `
+    -Installed 'E:\ocid_verify\inputsARM\packages_state.txt' `
+    -Claims 'E:\ocid_verify\inputsARM\claims.csv' `
+    -Flags 'E:\ocid_verify\inputsARM\flags.csv' `
+    -Buckets 'E:\ocid_verify\inputsARM\buckets.csv' `
+    -Cache 'E:\ocid_verify\inputsARM\cache.csv' `
+    -VersionFlags 'E:\ocid_verify\inputsARM\version_flags.csv' `
+    -Mcp 'E:\ocid_verify\inputsARM\mcp.csv' `
+    -RootInfo 'E:\ocid_verify\inputsARM\root_info.json' `
+    -Override 'E:\ocid_verify\overrides_arm2.csv' `
+    -DiffAgainst 'E:\ocid_verify\inputsARM\truth.txt'
+#    → written keys=610 values=1408、0/0
+#    注意：ARM 这个镜像的 117 个家庭"旧桶有内容、当前桶有骨架"，绝不能传
+#    -SkeletonFamilies —— 该开关只给 8419 那种旧桶已被裁剪、只剩骨架的镜像。
 
 # 8419 ARM（单桶 6.2.8419.0，首会话/旧桶都已裁剪）：骨架家庭 + 根区开关 + 覆盖表
 pwsh -NoProfile -File .\assemble-cbs-store.ps1 `
