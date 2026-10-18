@@ -149,11 +149,26 @@ pwsh -NoProfile -File .\assemble-cbs-store.ps1 `
 
 ## 7. 剩余工作
 
-1. **PCM 表构建器**（`BuildPcmTables`）：把清单 XML 直接编译成 35 张表。现状：容器、TOC、槽位、
-   串池桶序、type6 规模定律、type 2/6/8/9/A/B 表编解码都已自研并逐字节自证（3,041 份语料全过）；
-   缺的是 68 B 文档记录 / 96 B 文件记录 / dependency / type 8/9/10 的字段语义（由 wcp 里 114 个
-   schema handler 生成，正在反编译）。做完后 `WinSxS\ManifestCache` 也能自研生成；
-   注意**它不影响 COMPONENTS**（`MCP_*`/`(default)` 已经走 `--mcp`/`--version-flags` 输入）。
-2. 覆盖表瘦身：把第 4 节里还能从镜像推出来的行逐条升级成算法（优先 f256 段序——若能从
-   组件登记顺序或 CF 位推出来）。
+1. **PCM 表构建器**（`BuildPcmTables`）：把清单 XML 直接编译成 35 张表。容器、TOC、槽位、
+   串池桶序、type6 规模定律、type 2/6/8/9/A/B 表编解码已自研并逐字节自证（3,041 份语料全过）。
+   反编译路线（"路线二"）已把字段语义推进到下面这一步（详见 `E:\ocid_verify\pcm_schema_route2.md`）：
+   - **先纠正一个前提**：`0x100B3E40–0x100BC7AE` 的 114 个函数**不是**表写入者，而是
+     `CMicrodomManifestWalker` 的遍历/校验回调（产出 12 字节 `(ns,name,value)` 三元组）；
+     真正的构建器是 `CCdfManifestBuilder::GeneratePCM`（x86 VA `0x100AB672`，
+     `base\wcp\manifestparser\pcmc_pcmbuilder.cpp`），按 39 个固定 key 顺序 build + AddBlob。
+   - **68 B 文档记录：完全解出，纯清单可重建（600/600 逐字节 identical）**。`[3]`=dependency 数
+     （2757/2757）、`[9]`=有 `<mvid>` 则 7、`[11]`=有 `<deployment>` 则 `2*ndep+nfile`、
+     `[1]`=标志位（bit0 恒置、bit3=`<deployment>`、bit4=`<noInheritable>` 或 `<gac>` 且无
+     `sourcePath=`）；`[14]` 仍未解（2,509 份 -1 / 248 份 0）。
+   - **96 B 文件记录**：24 dword 中 18 个有公式；`[2][3][4][10][15][16][18]` 是 builder 内部
+     intern 小索引（`[14]=3+4k`、`[16]=base+30k`、`[18]≈[4]`），需复刻 intern 顺序。
+   - 48 B/16 B dependency、20 B（`<file hash=>` 的 SHA-1）、32 B（`<dsig:DigestValue>` 的
+     SHA-256）、36 B（`<gac>`）布局全部解出，删除对应 XML 即整条消失（knockout 证实）。
+   - 仍不可推导：MdHd `b0` bit4..6（未初始化栈字节）、type6 flags.bit0、外层 28 B 包装头
+     h0/h8/h10。
+   - 后续任务：读 `GeneratePCM` 的 intern helpers + ladder 实验，交付"无 oracle"的
+     `buildpcm_self.py`（≥200 份语料整份逐字节一致），产物在 `E:\ocid_verify\pcm_route3\`。
+   - 注意**PCM 不影响 COMPONENTS**（`MCP_*`/`(default)` 已经走 `--mcp`/`--version-flags` 输入）。
+2. 覆盖表瘦身：第 4 节剩下的行已逐条试过推导（f256 段序试了架构/文化/CF/组件键哈希序，
+   只能解释 56/60 的顺序且方向不定；CT 的归属包不在 `.mum` 声明集合里）⇒ 保留为输入。
 3. 然后进入 KTM 事务化（把上面所有写入包进事务，失败可回滚）。
