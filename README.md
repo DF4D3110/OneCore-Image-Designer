@@ -143,6 +143,23 @@ TestContent/DevicePlatformIDs、V2 专有与 V2 已废弃字段）。`Assets/Val
 | `MacroExpander` | `$(runtime.*)` 路径宏与 `$(runtime.host.*)` 注册表根宏的展开，含 WOW64 变体与未展开宏上报。 |
 | `SecurityDescriptor` | SDDL 解析与描述、`(inherit)` 直通，以及 SDDL ↔ 自相对二进制互转。 |
 
+### CBS 台账写侧（COMPONENTS）
+
+`CbsStore` 负责 COMPONENTS 台账的编解码，`ocid_manifest cbs-write` 与 `assemble-cbs-store.ps1` 负责
+从组件清单/包清单生成它；流程是"组件计划 → 部署与 catalog 计划 → 版本索引计划 → 根值 → 事务化落盘 →
+`cbs-verify-files`/`cbs-verify-store` 自检 → 与真机 `cbs-diff` 对拍"。
+
+| 项 | 状态 |
+| --- | --- |
+| 读侧全库 decode→re-encode（`cbs-scan`） | 0 不一致 |
+| 组件/部署/家庭键、伪键折叠 | 13,325/13,325 与 2,283/2,283 命中 |
+| `f!`、`p!/s!/i!`、`S256H`、`CatalogThumbprint`、`Catalogs`、`f256!`、`MCP_*`、`CF` | 已解并落地 |
+| 验收（对微软原版逐键/逐值/逐字节） | 8061 x86 43,100 键/120,978 值；8061 ARM 613/1,408；8419 ARM 23,328/61,277 —— `cbs-diff` 均 0/0 |
+| 安装历史类值 | 作为输入：`Extract-CbsInputs.ps1` 一条命令导出，`make-cbs-overrides.ps1` 生成覆盖表 |
+| `WinSxS\ManifestCache\*_blobs.bin`（PCM/CDF） | 容器层可逐字节重建（62.1% 整文件一致），元素记录表族仍在推进 |
+
+架构、算法与复现命令见 `Source/Native/OcidServicing/CBS-Writer.md`。
+
 同一份代码同时支撑控制台工具与主程序。托管侧经 `Services/OcidServicingNative.cs` 绑定，并在
 `Services/OcidSmiService.cs` 中应用决策。应用刻意**不**回退到托管版的值编码实现：原生库不可用时跳过该
 操作并如实上报——一个静默写错的字节映像比一次明确的失败更糟。

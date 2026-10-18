@@ -159,6 +159,24 @@ exposes it to the application through a small C ABI.
 | `MacroExpander` | Expansion of `$(runtime.*)` path macros and `$(runtime.host.*)` registry-root macros, including WOW64 variants and unresolved-macro reporting. |
 | `SecurityDescriptor` | SDDL resolution and description, `(inherit)` pass-through, and SDDL ↔ self-relative binary conversion. |
 
+### CBS store writer (COMPONENTS)
+
+`CbsStore` encodes and decodes the COMPONENTS store; `ocid_manifest cbs-write` and
+`assemble-cbs-store.ps1` produce it from component and package manifests. The pipeline is
+component plan → deployment/catalog plan → versioned-index plan → root values → transacted write →
+`cbs-verify-files` / `cbs-verify-store` self-checks → `cbs-diff` against the reference image.
+
+| Item | Status |
+| --- | --- |
+| Decode → re-encode of a whole store (`cbs-scan`) | 0 mismatches |
+| Component/deployment/family keys, pseudo-key fold | 13,325/13,325 and 2,283/2,283 |
+| `f!`, `p!/s!/i!`, `S256H`, `CatalogThumbprint`, `Catalogs`, `f256!`, `MCP_*`, `CF` | solved and implemented |
+| Acceptance (per key/value/byte vs. Microsoft's store) | 8061 x86 43,100 keys/120,978 values; 8061 ARM 613/1,408; 8419 ARM 23,328/61,277 — `cbs-diff` is 0/0 for all three |
+| Install-history values | Taken as inputs: `Extract-CbsInputs.ps1` exports them, `make-cbs-overrides.ps1` builds the override table |
+| `WinSxS\ManifestCache\*_blobs.bin` (PCM/CDF) | Container layer reproduces byte-exactly (62.1% of whole files), element-record tables still in progress |
+
+Architecture, algorithms and repro commands: `Source/Native/OcidServicing/CBS-Writer.md`.
+
 The same code backs both the console tool and the application. The managed side binds through
 `Services/OcidServicingNative.cs` and applies the decisions in `Services/OcidSmiService.cs`. The
 application deliberately never falls back to a managed re-implementation of value encoding: when the
