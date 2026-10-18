@@ -2033,7 +2033,7 @@ static void Usage()
     OutLn("      [--installed <csv>] [--claims <csv>] [--flags <csv>]");
     OutLn("      --claims: 组件键|部署键（c! 归属，安装计划输入）；--flags: 组件键|CF 十进制");
     OutLn("  ocid_manifest cbs-plan-versioned <manifestDir> <packagesDir> <stagedDir> <stackVersion> <outFile>");
-    OutLn("      [--buckets <csv>] [--cache <csv>]");
+    OutLn("      [--buckets <csv>] [--cache <csv>] [--ct <csv>] [--version-flags <csv>]");
     OutLn("      --buckets: 家庭键|桶文本（安装历史：被更早服务栈暂存的组件留在那个桶）");
     OutLn("      --cache: 桶文本|缓存 id 8hex|已用字节（ManifestCacheIdentifier/UtilizedSpace）");
     OutLn("  ocid_manifest cbs-plan-root <x86|arm|arm64|amd64|ia64> <stackVersion> <outFile>");
@@ -3074,6 +3074,7 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
                                const std::wstring& bucketsPath,
                                const std::wstring& cachePath,
                                const std::wstring& ctPath,
+                               const std::wstring& versionFlagsPath,
                                const std::wstring& outPath)
 {
 #ifdef _WIN32
@@ -3325,6 +3326,44 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
         }
     }
 
+    // --version-flags <csv>：行 `相对版本节点路径|DWORD 十进制`（版本节点的 `(default)`
+    // 是 ManifestCache 写完清单后由工作栈置的闭包状态位图，纯清单推不出，先当输入；
+    // 等 PCM 编码器落地后应改为由缓存内容算出）。
+    std::map<std::string, std::string> versionFlagOverride;
+    if (!versionFlagsPath.empty())
+    {
+        std::wstring wideText, readErr;
+        if (!ReadFileUtf8(versionFlagsPath, wideText, readErr))
+        {
+            Err("读不了 --version-flags 文件：" + ToUtf8(versionFlagsPath));
+            return 2;
+        }
+        const std::string text = ToUtf8(wideText);
+        std::size_t pos = 0;
+        while (pos < text.size())
+        {
+            std::size_t end = text.find('\n', pos);
+            if (end == std::string::npos) end = text.size();
+            std::string line = text.substr(pos, end - pos);
+            pos = end + 1;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const std::size_t bar = line.find('|');
+            if (bar == std::string::npos) continue;
+            const std::string path = line.substr(0, bar);
+            const std::string flagText = line.substr(bar + 1);
+            const auto flagValue = std::strtoul(flagText.c_str(), nullptr, 10);
+            std::vector<std::uint8_t> bytes(4);
+            bytes[0] = static_cast<std::uint8_t>(flagValue & 0xFF);
+            bytes[1] = static_cast<std::uint8_t>((flagValue >> 8) & 0xFF);
+            bytes[2] = static_cast<std::uint8_t>((flagValue >> 16) & 0xFF);
+            bytes[3] = static_cast<std::uint8_t>((flagValue >> 24) & 0xFF);
+            std::string flagHex;
+            HexAppend(bytes, flagHex);
+            versionFlagOverride[path] = flagHex;
+        }
+    }
+
     long long manifests = 0, stagedFiles = 0, f256 = 0, ct = 0, bad = 0;
     // 家庭层 f256 值可能由多个版本的条目拼接而成（键 = "家庭路径\t值名"）。
     std::map<std::string, std::map<std::string, std::string>> fileSegments;
@@ -3372,6 +3411,11 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
         const std::string version = ToUtf8(manifest.identity.Version());
         const std::string versionPath = familyPath + "\\v!" + version;
         lines.insert("K\t" + versionPath);
+        const auto versionFlag = versionFlagOverride.find(versionPath);
+        if (versionFlag != versionFlagOverride.end())
+        {
+            lines.insert("V\t" + versionPath + "\t\t4\t" + versionFlag->second);
+        }
         if (movedToOlderBucket)
         {
             // 被更早服务栈暂存过的家庭在当前桶里仍有家庭键与版本节点，但只带一个
@@ -3715,19 +3759,20 @@ int main(int argc, char** argv)
     }
 
     // cbs-plan-versioned <manifestDir> <packagesDir> <stagedDir> <stackVersion> <outFile>
-    //                   [--buckets <csv>] [--cache <csv>]
+    //                   [--buckets <csv>] [--cache <csv>] [--ct <csv>] [--version-flags <csv>]
     if (cmd == L"cbs-plan-versioned" && argc >= 7) {
-        std::wstring bucketsPath, cachePath, ctPath;
+        std::wstring bucketsPath, cachePath, ctPath, versionFlagsPath;
         for (int i = 7; i + 1 < argc; ++i)
         {
             const std::wstring opt = FromUtf8OrAnsi(argv[i]);
             if (opt == L"--buckets") bucketsPath = FromUtf8OrAnsi(argv[++i]);
             else if (opt == L"--cache") cachePath = FromUtf8OrAnsi(argv[++i]);
             else if (opt == L"--ct") ctPath = FromUtf8OrAnsi(argv[++i]);
+            else if (opt == L"--version-flags") versionFlagsPath = FromUtf8OrAnsi(argv[++i]);
         }
         return CmdCbsPlanVersioned(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]),
                                    FromUtf8OrAnsi(argv[4]), FromUtf8OrAnsi(argv[5]),
-                                   bucketsPath, cachePath, ctPath,
+                                   bucketsPath, cachePath, ctPath, versionFlagsPath,
                                    FromUtf8OrAnsi(argv[6]));
     }
 
@@ -3785,6 +3830,10 @@ int main(int argc, char** argv)
     Usage();
     return 1;
 }
+
+
+
+
 
 
 
