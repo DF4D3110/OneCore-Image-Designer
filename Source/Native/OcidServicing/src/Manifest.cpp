@@ -222,6 +222,13 @@ namespace ocid {
                         if (const auto* v = c.FindAttr(L"name")) f.securityDescriptorName = *v;
                     }
                 }
+                for (const auto& c : child.children) {
+                    // <asmv2:hash><dsig:DigestValue>base64</dsig:DigestValue></asmv2:hash>
+                    if (_wcsicmp(c.LocalName().c_str(), L"hash") != 0) continue;
+                    for (const auto& d : c.children) {
+                        if (_wcsicmp(d.LocalName().c_str(), L"DigestValue") == 0 && !d.text.empty()) f.digestBase64 = d.text;
+                    }
+                }
                 out.files.push_back(std::move(f));
             }
             else if (_wcsicmp(ln.c_str(), L"directories") == 0) {

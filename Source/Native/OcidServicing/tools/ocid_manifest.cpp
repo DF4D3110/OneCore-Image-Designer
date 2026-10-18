@@ -21,6 +21,7 @@
 #include "ocid/MacroExpander.h"
 #include "ocid/Manifest.h"
 #include "ocid/Pcm.h"
+#include "ocid/Dcm.h"
 #include "ocid/Microdom.h"
 #include "ocid/RegistryValue.h"
 #include "ocid/Sha256.h"
@@ -58,6 +59,13 @@ namespace {
     void Err(const std::string& s)   { fflush(stdout); fputs(s.c_str(), stderr); fputc('\n', stderr); }
 
 #ifdef _WIN32
+    // 现代镜像（16299+）的组件清单是 DCM 压缩容器；给了解压字典时在这里透明解码，
+    // 上层（清单解析、计划生成）不需要知道清单是否被压过。
+    std::vector<std::uint8_t> g_manifestDictionary;
+    // 现代镜像（16299+）的 f! 值是 REG_DWORD 文件状态位；非 1 的状态由 --file-flags
+    // 输入（安装历史），键是 "<组件键>|<f! 值名>"。
+    std::map<std::string, std::uint32_t> g_fileFlags;
+
     bool ReadFileUtf8(const std::wstring& path, std::wstring& out, std::wstring& err)
     {
         FILE* f = _wfopen(path.c_str(), L"rb");
@@ -68,6 +76,19 @@ namespace {
         std::string buf((size_t)(n > 0 ? n : 0), '\0');
         if (n > 0) fread(&buf[0], 1, (size_t)n, f);
         fclose(f);
+
+        if (!g_manifestDictionary.empty() && buf.size() >= 8
+            && (unsigned char)buf[0] == 'D' && (unsigned char)buf[1] == 'C'
+            && (unsigned char)buf[2] == 'M' && (unsigned char)buf[3] == 0x01) {
+            std::vector<std::uint8_t> compressed(buf.begin(), buf.end());
+            std::vector<std::uint8_t> decoded;
+            std::string decodeError;
+            if (!DcmDecodeManifest(compressed, g_manifestDictionary, decoded, decodeError)) {
+                err = L"DCM 清单解压失败：" + path;
+                return false;
+            }
+            buf.assign(decoded.begin(), decoded.end());
+        }
 
         size_t start = 0;
         if (buf.size() >= 3 && (unsigned char)buf[0] == 0xEF
@@ -1508,6 +1529,20 @@ void HexAppend(const std::vector<std::uint8_t>& data, std::string& out)
     }
 }
 
+// REG_DWORD 的小端 hex（真机 cbs-dump 的行格式用同一个表示）。
+std::string HexDword(std::uint32_t value)
+{
+    static const char* digits = "0123456789abcdef";
+    std::string text(8, '0');
+    for (int i = 0; i < 4; ++i)
+    {
+        const std::uint8_t byte = static_cast<std::uint8_t>((value >> (8 * i)) & 0xFFu);
+        text[2 * i] = digits[byte >> 4];
+        text[2 * i + 1] = digits[byte & 0x0F];
+    }
+    return text;
+}
+
 bool DumpKeyRecursive(HKEY key, const std::wstring& relPath, DWORD depth,
                       std::vector<std::string>& lines, std::wstring& err)
 {
@@ -2582,6 +2617,43 @@ static int CmdCbsPcmReencode(const std::wstring& pcmPath, const std::wstring& ou
     return identical ? 0 : 2;
 }
 
+// 16299+ 的组件清单是 DCM 压缩容器（"DCM\x01" + msdelta PA30 补丁）。
+// 这个命令把一份 DCM 清单解回原始 XML，方便取证；日常路径里 ReadFileUtf8 会透明解码。
+static int CmdCbsDcmDecode(const std::wstring& inPath, const std::wstring& outPath)
+{
+#ifdef _WIN32
+    if (g_manifestDictionary.empty()) {
+        Err("需要 --dcm-dictionary <wcp.dll>");
+        return 2;
+    }
+    FILE* f = _wfopen(inPath.c_str(), L"rb");
+    if (!f) { Err("打不开文件：" + ToUtf8(inPath)); return 2; }
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    std::vector<std::uint8_t> input((size_t)(n > 0 ? n : 0));
+    if (n > 0) fread(input.data(), 1, (size_t)n, f);
+    fclose(f);
+
+    std::vector<std::uint8_t> output;
+    std::string error;
+    if (!DcmDecodeManifest(input, g_manifestDictionary, output, error)) {
+        Err("解压失败：" + error);
+        return 1;
+    }
+    FILE* o = _wfopen(outPath.c_str(), L"wb");
+    if (!o) { Err("写不了文件：" + ToUtf8(outPath)); return 2; }
+    if (!output.empty()) fwrite(output.data(), 1, output.size(), o);
+    fclose(o);
+    OutLn("compressed=" + std::to_string(input.size()) + " decompressed=" + std::to_string(output.size()));
+    return 0;
+#else
+    (void)inPath; (void)outPath;
+    Err("仅支持 Windows");
+    return 2;
+#endif
+}
+
 static void Usage()
 {
     OutLn("OCID servicing console");
@@ -2617,6 +2689,7 @@ static void Usage()
     OutLn("      [--minimal] [--ccpinterface] [--installers-shortcut]  根键形态开关");
     OutLn("      --markers: key|appid|thumb|markers（真机导出的安装/启用状态，决定 p!/s!/i!）");
     OutLn("  ocid_manifest cbs-diff <a.txt> <b.txt> [--limit N]   compare two cbs-dump files");
+    OutLn("  ocid_manifest cbs-dcm-decode <inDcm> <outXml> --dcm-dictionary <wcp.dll>");
     OutLn("  ocid_manifest cbs-verify-files <plan.txt> <winSxsDir>   check every f! value has its file staged");
     OutLn("  ocid_manifest cbs-verify-store <hiveSpec>   self-consistency of a COMPONENTS hive (no reference needed)");
     OutLn("  ocid_manifest cbs-write <plan.txt> <hivePath> [--transactional]   rebuild a hive file from a cbs-dump text");
@@ -2812,7 +2885,7 @@ int CmdCbsKeyCheck(const std::wstring& path, const std::wstring& namesMode)
 // `cbs-dump` 的真机导出做 diff。计划行格式与 cbs-dump 相同：
 //   K\tDerivedData\Components\<组件键>
 //   V\t…\<键>\tidentity\t3\t<hex ASCII 身份文本>
-//   V\t…\<键>\tS256H\t3\t<hex SHA-256（清单文件整份字节）>
+//   V\t…\<键>\tS256H\t3\t<hex SHA-256（解压后清单 XML 整份字节）>
 //   V\t…\<键>\tf!<文件名>\t3\t<hex UTF-16LE 原始大小写文件名>
 // 还差的部分（c! / CF / 部署记录 / 版本索引）会以“真机有、计划无”的形式出现，
 // 正好就是待办清单。
@@ -3008,8 +3081,26 @@ static int CmdCbsPlanComponents(const std::wstring& manifestDir,
                   identityHex);
         lines.push_back("V\t" + keyPath + "\tidentity\t3\t" + identityHex);
 
+        // 清单本身是 DCM 压缩 ⇒ 现代镜像（16299+）：f! 值改成 REG_DWORD 状态位。
+        const bool modernFileValues = !g_manifestDictionary.empty() && DcmIsCompressed(bytes);
         std::string shaHex;
-        HexAppend(Sha256(bytes), shaHex);
+        // 16299+ 的清单是 DCM 压缩（msdelta 补丁）；真机 S256H = 解压后清单 XML 的 SHA-256，
+        // 8061 的清单本来就是明文，两种情形都由这里的"解码后再哈希"统一覆盖。
+        std::vector<std::uint8_t> manifestHashBytes = bytes;
+        if (!g_manifestDictionary.empty() && DcmIsCompressed(manifestHashBytes))
+        {
+            std::vector<std::uint8_t> decoded;
+            std::string dcmErr;
+            if (DcmDecodeManifest(manifestHashBytes, g_manifestDictionary, decoded, dcmErr))
+            {
+                manifestHashBytes.swap(decoded);
+            }
+            else
+            {
+                Err("DCM 解码失败（S256H 将退化）" + ToUtf8(found.cFileName) + "：" + dcmErr);
+            }
+        }
+        HexAppend(Sha256(manifestHashBytes), shaHex);
         lines.push_back("V\t" + keyPath + "\tS256H\t3\t" + shaHex);
 
         if (!isStaged) continue;
@@ -3021,7 +3112,22 @@ static int CmdCbsPlanComponents(const std::wstring& manifestDir,
             // （即值名后缀 != 原始文件名）——真机 19,006 条 f! 值一条不差：
             //   c2wtshost.exe（本来就全小写）=> 数据为空
             //   Accessibility.dll / 超 25 字符被截断 => 数据是原始大小写的 UTF-16
+            // 16299+（清单是 DCM 压缩）= 现代 f! 语义：值类型 4（REG_DWORD），
+            // 数据是文件状态位（真机分布 1:29,725 / 0x21:3,521 / 0x41:1,038 / 0x61:1）；
+            // 缺省写 1，非 1 的状态由 --file-flags 输入（安装历史）。
+            // 8061/8419（明文清单）= 旧语义：值类型 3，数据是原始大小写文件名的 UTF-16LE。
             const std::string valueName = CbsFileValueName(file.name);
+            if (modernFileValues)
+            {
+                const std::string flagKey = key + "|" + valueName;
+                const auto flagIt = g_fileFlags.find(flagKey);
+                const std::uint32_t flagValue =
+                    flagIt != g_fileFlags.end() ? flagIt->second : 1u;
+                lines.push_back("V\t" + keyPath + "\t" + valueName + "\t4\t" +
+                                HexDword(flagValue));
+                ++files;
+                continue;
+            }
             const std::string suffix =
                 valueName.size() > 2 ? valueName.substr(2) : std::string();
             const std::string nameUtf8 = ToUtf8(file.name);
@@ -3467,14 +3573,15 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
         }
         if (resolveOrder.empty())
         {
-            Err("--sessions 目录里没解析出任何 <Resolve>：" + ToUtf8(sessionsDir));
-            return 2;
+            // 现代镜像常常没有任何会话记录（镜像里 Windows\servicing\Sessions 为空）：
+            // 这不是错误，退回"按 .mum 声明集合选 catalog"的老规则。
+            Err("提示：--sessions 目录里没有 <Resolve>，按无会话数据继续：" + ToUtf8(sessionsDir));
+            resolveOrder.clear();
         }
     }
-    const bool useSessions = !resolveOrder.empty();
-
     long long packages = 0, updates = 0, declared = 0, resolved = 0, payloads = 0, noCat = 0;
     long long deployments = 0;
+    const bool useSessions = !resolveOrder.empty();
     std::set<std::string> deploymentKeys;
     std::map<std::string, DeploymentPlan> plan;
     long long flagDeployments = 0;  // 由 --flags 的 CF=12 补出来的部署记录条数
@@ -3812,7 +3919,9 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
             const std::string& valueText = overrideEntry.second;
             if (componentKey.empty() || valueText.empty()) continue;
             const long long value = std::strtoll(valueText.c_str(), nullptr, 10);
-            if (value <= 0 || value > 0x3F) continue;
+            // 现代镜像（16299+）的 CF 有 0x3F 之外的新位（如 0x200 = 已缓存），
+            // 所以这里不再限掩码：只要是真机导出的 DWORD 就照写。
+            if (value <= 0 || value > 0xFFFFFFFFLL) continue;
             std::uint8_t bytes[4] = {static_cast<std::uint8_t>(value & 0xFF),
                                      static_cast<std::uint8_t>((value >> 8) & 0xFF),
                                      static_cast<std::uint8_t>((value >> 16) & 0xFF),
@@ -4409,7 +4518,13 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
             const std::string fileValueName = CbsFileValueName(file.name);
             const std::string f256Name =
                 "f256" + (fileValueName.size() > 1 ? fileValueName.substr(1) : std::string());
-            std::wstring segment = FromUtf8OrAnsi(Base64Encode(Sha256(bytes)).c_str());
+            // 真机 f256 的 base64 来自清单里声明的 <dsig:DigestValue>（声明哈希），
+            // 不是磁盘文件的哈希：8061 两者恰好相等，16299 的落位文件被补丁/压缩过，
+            // 只有声明哈希能对上（实测 aagwrapper.dll：磁盘 eaa320ff… / 声明 4qq8JdW9…）。
+            std::wstring declaredDigest = file.digestBase64;
+            std::wstring segment = declaredDigest.empty()
+                ? FromUtf8OrAnsi(Base64Encode(Sha256(bytes)).c_str())
+                : declaredDigest;
             segment += L"!";
             segment += FromUtf8OrAnsi(version.c_str());
             segment += L"#";
@@ -4606,9 +4721,87 @@ static int CmdCbsPlanRoot(const std::wstring& archText, const std::wstring& stac
     return 0;
 }
 
+// 去掉首尾空白（Windows 换行也一并处理）。
+std::wstring TrimCopy(const std::wstring& text)
+{
+    size_t begin = 0;
+    size_t end = text.size();
+    while (begin < end && (text[begin] == L' ' || text[begin] == L'\t' || text[begin] == L'\r')) ++begin;
+    while (end > begin && (text[end - 1] == L' ' || text[end - 1] == L'\t' || text[end - 1] == L'\r')) --end;
+    return text.substr(begin, end - begin);
+}
+
 int main(int argc, char** argv)
 {
     SetupConsole();
+
+    // 全局开关 --dcm-dictionary <wcp.dll>：16299+ 镜像的组件清单是 DCM 压缩容器，
+    // 需要 servicing stack 的 wcp.dll 里那份字典来解压。解析后从 argv 里摘掉，
+    // 各命令都不需要认识它。
+    // 这两个容器必须活到 main 结束：argv 指向它们里面的字符缓冲区。
+    std::vector<std::string> args;
+    std::vector<char*> stripped;
+    {
+        args.reserve((size_t)argc);
+        for (int i = 0; i < argc; ++i) {
+            const std::string a = argv[i];
+            if (a == "--dcm-dictionary" && i + 1 < argc) {
+                const std::wstring wcpPath = FromUtf8OrAnsi(argv[i + 1]);
+                std::string loadError;
+#ifdef _WIN32
+                if (!LoadManifestDictionary(wcpPath, g_manifestDictionary, loadError)) {
+                    // 老镜像（8061 等）的 wcp.dll 里没有这份资源，清单本来也没压缩：
+                    // 只要不是真的要解 DCM，就当没给过这个开关。
+                    Err("提示：未能加载 DCM 字典（" + loadError + "），按未压缩清单处理");
+                }
+#else
+                (void)wcpPath;
+                (void)loadError;
+#endif
+                ++i;
+                continue;
+            }
+            if (a == "--file-flags" && i + 1 < argc)
+            {
+                // 现代镜像的 f! 值是文件状态位（REG_DWORD）；非 1 的状态只能抄安装历史。
+                // 行格式：<组件键>|<f! 值名>|<DWORD 十进制>
+                std::wstring csvText;
+                std::wstring csvErr;
+                if (ReadFileUtf8(FromUtf8OrAnsi(argv[i + 1]), csvText, csvErr))
+                {
+                    size_t pos = 0;
+                    while (pos < csvText.size())
+                    {
+                        const size_t end = csvText.find(L'\n', pos);
+                        const std::wstring row = csvText.substr(pos, end == std::wstring::npos ? std::wstring::npos : end - pos);
+                        pos = (end == std::wstring::npos) ? csvText.size() : end + 1;
+                        const std::wstring trimmed = TrimCopy(row);
+                        if (trimmed.empty() || trimmed[0] == L'#') continue;
+                        const size_t bar1 = trimmed.find(L'|');
+                        if (bar1 == std::wstring::npos) continue;
+                        const size_t bar2 = trimmed.find(L'|', bar1 + 1);
+                        if (bar2 == std::wstring::npos) continue;
+                        const std::string flagKey = ToUtf8(trimmed.substr(0, bar1)) + "|" + ToUtf8(trimmed.substr(bar1 + 1, bar2 - bar1 - 1));
+                        const std::string valueText = ToUtf8(trimmed.substr(bar2 + 1));
+                        g_fileFlags[flagKey] = static_cast<std::uint32_t>(strtoul(valueText.c_str(), nullptr, 10));
+                    }
+                }
+                else
+                {
+                    Err("无法读取 --file-flags：" + ToUtf8(csvErr));
+                }
+                ++i;
+                continue;
+            }
+
+            args.push_back(a);
+        }
+        stripped.reserve(args.size());
+        for (std::string& s : args) stripped.push_back(s.empty() ? const_cast<char*>("") : &s[0]);
+        argc = (int)stripped.size();
+        argv = stripped.data();
+    }
+
     if (argc < 2) { Usage(); return 1; }
 
     std::wstring cmd = FromUtf8OrAnsi(argv[1]);
@@ -4808,6 +5001,8 @@ int main(int argc, char** argv)
                               emitInstallersShortcut, stackEntries);
     }
 
+    if (cmd == L"cbs-dcm-decode" && argc >= 4)
+        return CmdCbsDcmDecode(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]));
     if (cmd == L"cbs-diff" && argc >= 4) {
         int mx = 0;
         for (int i = 4; i < argc; ++i) {
@@ -4868,6 +5063,10 @@ int main(int argc, char** argv)
     Usage();
     return 1;
 }
+
+
+
+
 
 
 

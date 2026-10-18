@@ -52,6 +52,8 @@ param(
     [switch] $SkipFileVerify,
     [switch] $SkipStoreVerify,
     [string] $DiffAgainst,
+    [string] $DcmDictionary,
+    [string] $FileFlags,
     [string] $Exe
 )
 
@@ -61,6 +63,18 @@ $root = (Resolve-Path $ImageRoot).Path.TrimEnd('\')
 if (-not $Manifests) { $Manifests = Join-Path $root 'Windows\WinSxS\Manifests' }
 if (-not $Packages)  { $Packages  = Join-Path $root 'Windows\servicing\Packages' }
 if (-not $WinSxs)    { $WinSxs    = Join-Path $root 'Windows\WinSxS' }
+
+# 16299+ 的组件清单是 DCM 压缩容器，字典在 servicing stack 的 wcp.dll 资源里。
+# 不给 $DcmDictionary 时按镜像里的 servicing stack 自动找一份。
+if (-not $DcmDictionary) {
+    $stackDir = Get-ChildItem (Join-Path $root 'Windows\WinSxS') -Directory -Filter '*_microsoft-windows-servicingstack_*' -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending | Select-Object -First 1
+    if ($stackDir) {
+        $cand = Get-ChildItem $stackDir.FullName -Filter 'wcp.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($cand) { $DcmDictionary = $cand.FullName }
+    }
+}
+$dcmArgs = @(); if ($DcmDictionary) { $dcmArgs = @('--dcm-dictionary', $DcmDictionary) }
 
 if (-not $Arch) {
     $kernel = Join-Path $root 'Windows\System32\ntoskrnl.exe'
@@ -103,9 +117,11 @@ $planRoot        = Join-Path $OutDir 'plan-root.txt'
 $planMerged      = Join-Path $OutDir 'plan-all.txt'
 $hive            = Join-Path $OutDir $HiveName
 
-Invoke-Planner 'components' @('cbs-plan-components', $Manifests, $planComponents, '--staged', $WinSxs)
+$componentArgs = @('cbs-plan-components', $Manifests, $planComponents, '--staged', $WinSxs) + $dcmArgs
+if ($FileFlags) { $componentArgs += @('--file-flags', $FileFlags) }
+Invoke-Planner 'components' $componentArgs
 
-$depArgs = @('cbs-plan-deployments', $Packages, $Manifests, $planDeployments)
+$depArgs = @('cbs-plan-deployments', $Packages, $Manifests, $planDeployments) + $dcmArgs
 if ($Markers)   { $depArgs += @('--markers', $Markers) }
 if ($Installed) { $depArgs += @('--installed', $Installed) }
 if ($Claims)    { $depArgs += @('--claims', $Claims) }
@@ -119,7 +135,7 @@ if (-not $Sessions) {
 if ($Sessions)  { $depArgs += @('--sessions', $Sessions) }
 Invoke-Planner 'deployments' $depArgs
 
-$verArgs = @('cbs-plan-versioned', $Manifests, $Packages, $WinSxs, $StackVersion, $planVersioned)
+$verArgs = @('cbs-plan-versioned', $Manifests, $Packages, $WinSxs, $StackVersion, $planVersioned) + $dcmArgs
 if ($Buckets) { $verArgs += @('--buckets', $Buckets) }
 if ($Cache)   { $verArgs += @('--cache', $Cache) }
 if ($Ct)      { $verArgs += @('--ct', $Ct) }
@@ -278,6 +294,8 @@ if ($DiffAgainst -or -not $SkipStoreVerify) {
 }
 
 exit 0
+
+
 
 
 

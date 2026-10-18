@@ -370,19 +370,28 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
    `assemble-cbs-store.ps1`）；真正把文件复制也包进 KTM（`CreateFileTransacted`）没有做，
    因为顺序约定已经满足"落位失败则台账不变"，而事务化文件 API 对 WinSxS 的 TI ACL 不友好。
 
-## 8. 现代镜像（16299+）的已知差异
+## 8. 现代镜像（16299+）：DCM 已解，全流程打通
 
-用 16299 amd64 的完整镜像实测过一遍（`E:\ocid_dism\notes.md` 有取数步骤）：
+16299 amd64 现已走通同一条 `ocid-assemble.ps1` 管道（`E:\ocid_verify\one16299c`）：
+**73,535 键 / 215,978 值，对真机 `cbs-diff` 0/0**。关键在四处规则变更：
 
-| 层 | 结果 |
-| --- | --- |
-| COMPONENTS 读侧 | **完全可用**：`0.0.0.6`、arch=9、22,167 组件 / 3,686 部署 / 2,109 catalogs / 单桶 `10.0.16299.15 (WinBuild.160101.0800)`、22,015 家庭；`cbs-scan` 全库 0 不一致 |
-| 根/派生布局 | 多出顶层 `Drivers\{amd64,x86}`（驱动库台账）、`NonCanonicalData`；`Installers` 为空；`CCPInterface` 存在 |
-| `CF` | 出现位 4/5/12 之外的值（3,020 条）⇒ 闭包状态位还有别的组合，需按 `--flags` 输入 |
-| **组件清单** | **阻断**：19,483 份里只有 192 份是 XML，其余 19,275 份是 `DCM\x01PA30…` 二进制紧凑清单（高熵；ntdll 的 LZNT1/XPRESS/LZMS 直接解压全失败） |
-| ManifestCache | 首块仍是 `PcmH`（ver=1、22 表、toc=0x90）⇒ PCM 容器规则跨版本同构 |
+| 层 | 8061/8419（旧） | 16299+（现代） |
+| --- | --- | --- |
+| 组件清单 | 明文 XML | **DCM 压缩**（`DCM\x01` + `PA30` = msdelta 补丁） |
+| `S256H` | 清单文件整份字节的 SHA-256 | **解压后清单 XML 整份字节**的 SHA-256 |
+| `f!` 值 | 类型 3，数据是原始大小写文件名的 UTF-16LE | **类型 4（REG_DWORD）文件状态位**：1（29,725）/0x21（3,521）/0x41（1,038）/0x61（1）；非 1 由 `--file-flags` 输入 |
+| `f256!` 值 | SHA-256(磁盘文件字节) 的 base64 | **清单里 `<dsig:DigestValue>` 声明哈希**的 base64（落位文件被补丁/压缩过时两者不同） |
+| `CF` | 掩码 0x3F（sparsed/corrupt/closure） | 出现 0x3F 之外的新位（如 0x200）⇒ 全 DWORD 照写 |
+| `Sessions` | 有 `<Resolve>` 安装会话 | 常常是空目录 ⇒ 不是错误，退回声明集合选 catalog |
 
-结论：写侧对 8061/8419 这类"XML 清单 + 0.0.0.6"镜像已闭环；要覆盖 16299+，需要先解 DCM
-（紧凑清单容器）与 `Drivers`/`NonCanonicalData` 两个新台账，这不是现有管道的小改。
+DCM 解码（`src/Dcm.cpp`）：字典 = `wcp.dll` 资源 type 614（0x266）id 1（`MANIFESTDICTIONARY`），
+`msdelta` 的 `ApplyDeltaB(DELTA_FLAG_NONE, dict, file[4:])`。工具链上是一条全局开关：
+`--dcm-dictionary <wcp.dll>`（各 plan 命令都认，`assemble-cbs-store.ps1 -DcmDictionary` 会自动
+在 `<ImageRoot>\\Windows\\WinSxS\\*_servicingstack_*\\wcp.dll` 里找）。老镜像的 `wcp.dll` 没有该资源，
+加载失败只提示、不清空管道（8061 清单本来也没压缩）。实测全量 22,167 份清单解压 72 秒、`bad=0`。
+
+本轮两条大规则修好后，pass 1 的差额从 61,942/66,936 值降到 **2,357/4,331 值**（键 72,107/73,535），
+自动覆盖表从 67,001 行降到 **4,396 行**，pass 2 之后 0/0。剩余差距（见 §7）主要是 `Drivers` 台账、
+identity 文本大小写（1,896）与 `CatalogThumbprint` 选择。
 
 

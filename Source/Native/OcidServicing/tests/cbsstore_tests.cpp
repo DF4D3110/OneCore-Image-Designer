@@ -13,6 +13,7 @@
 //   4. 编码器自证：解码 -> 再编码 -> 与真机字节逐字节相等
 
 #include "ocid/CbsStore.h"
+#include "ocid/Dcm.h"
 #include "ocid/ConsoleUtf8.h"
 #include "ocid/Pcm.h"
 
@@ -693,6 +694,15 @@ static void PcmRecordTables()
     run(9, "30010000000000000300");
     run(6, "710200000200000009000500");
 }
+static void DcmMagic()
+{
+    // 现代镜像（16299+）的清单以 DCM\x01 开头；老镜像不是。
+    const std::vector<std::uint8_t> compressed = {0x44, 0x43, 0x4D, 0x01, 0x50, 0x41, 0x33, 0x30};
+    const std::vector<std::uint8_t> plain = {0x3C, 0x3F, 0x78, 0x6D, 0x6C};
+    Check(DcmIsCompressed(compressed), "DCM 魔数识别");
+    Check(!DcmIsCompressed(plain), "普通 XML 不被当成 DCM");
+}
+
 int main()
 {
     SetupConsoleUtf8();
@@ -709,6 +719,7 @@ int main()
     ManifestCacheNames();
     PcmContainer();
     PcmRecordTables();
+    DcmMagic();
 
     printf("\n== 结果 ==\n  通过 %d / 失败 %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

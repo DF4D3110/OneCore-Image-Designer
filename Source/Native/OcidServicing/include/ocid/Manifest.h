@@ -157,6 +157,11 @@ namespace ocid {
         std::wstring importPath;      // 构建期导入路径（镜像里无意义，仅保留）
         std::wstring securityDescriptorName;  // 内嵌 <securityDescriptor name="…"/>
 
+        // 清单里 <file><asmv2:hash><dsig:DigestValue> 的 base64（SHA-256）：
+        // VersionedIndex 的 f256! 值用的就是它（不是磁盘文件的哈希——两者在
+        // 8061 里恰好相等，在 16299 里会因补丁/压缩而不同）。
+        std::wstring digestBase64;
+
         // `writeableType="systemData"` —— **这个属性决定了落点是不是硬链接**。
         //
         // 实测（8061 ARM 镜像）：<file> 带 `writeableType="systemData"` 的，
@@ -176,6 +181,11 @@ namespace ocid {
         bool         owner = false;   // owner="true"/"false"
         std::wstring attributes;      // "readOnly" / "readOnly hidden" …
         std::wstring securityDescriptorName;  // 内嵌 <securityDescriptor name="…"/>
+
+        // 清单里 <file><asmv2:hash><dsig:DigestValue> 的 base64（SHA-256）：
+        // VersionedIndex 的 f256! 值用的就是它（不是磁盘文件的哈希——两者在
+        // 8061 里恰好相等，在 16299 里会因补丁/压缩而不同）。
+        std::wstring digestBase64;
     };
 
     // ─────────────────────────────────────────────────────────────────────────

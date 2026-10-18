@@ -83,6 +83,7 @@ param(
     [string] $Ct,
     [string] $VersionFlags,
     [string] $Mcp,
+    [string] $FileFlags,
     [string] $SkeletonFamilies,
     [string] $Sessions,
 
@@ -141,6 +142,7 @@ if ($SourceHive) {
     if (-not $Ct) { $Ct = Join-Path $InputsDir 'ct.csv' }
     if (-not $VersionFlags) { $VersionFlags = Join-Path $InputsDir 'version_flags.csv' }
     if (-not $Mcp) { $Mcp = Join-Path $InputsDir 'mcp.csv' }
+if (-not $FileFlags) { $FileFlags = Join-Path $InputsDir 'file_flags.csv' }
     if (-not $SkeletonFamilies) { $SkeletonFamilies = Join-Path $InputsDir 'skeleton_families.csv' }
     if (-not $DiffAgainst -and (Test-Path (Join-Path $InputsDir 'truth.txt'))) {
         $DiffAgainst = Join-Path $InputsDir 'truth.txt'
@@ -195,6 +197,7 @@ function Invoke-Assemble([string] $PassDir, [string] $OverridePath, [switch] $Al
     if ($Ct) { $p['Ct'] = $Ct }
     if ($VersionFlags) { $p['VersionFlags'] = $VersionFlags }
     if ($Mcp) { $p['Mcp'] = $Mcp }
+if ($FileFlags) { $p['FileFlags'] = $FileFlags }
     if ($SkeletonFamilies) { $p['SkeletonFamilies'] = $SkeletonFamilies }
     if ($Sessions) { $p['Sessions'] = $Sessions }
     if ($rootInfo) { $p['RootInfo'] = $rootInfo }
