@@ -147,6 +147,26 @@ pwsh -NoProfile -File .\assemble-cbs-store.ps1 `
 覆盖表由 `make-cbs-overrides.ps1` 从一次对拍的差集生成（`set`/`remove`/`remove-key` 三种行），
 用法：`pwsh -NoProfile -File .\make-cbs-overrides.ps1 -Dump <组装后的 hive-dump> -Truth <真机转储> -Out <输出.csv>`。
 
+### 6.1 事务化落盘（KTM）
+
+`cbs-write` 支持 `--transactional`：整轮写入包进一个 KTM 事务
+（`CreateTransaction` → `RegOpenKeyTransactedW` / `RegCreateKeyTransactedW` → `CommitTransaction`），
+任何一行落键/写值失败就 `RollbackTransaction`，hive 文件保持原样。实测：
+
+```
+# 正常提交：内容与非事务完全一致（对真机 0/0）
+ocid_manifest cbs-write plan-all.txt txn.hiv --transactional
+  → written keys=43097 values=120978 badLines=0 transaction=committed
+  → reg load + cbs-dump + cbs-diff 真机：only-in-a 0/0、only-in-b 0/0
+
+# 注入坏行（前 500 行有效 + 1 行垃圾）：整体回滚
+ocid_manifest cbs-write plan-bad.txt rollback.hiv --transactional
+  → written keys=500 values=0 badLines=1 transaction=rolled-back（exit 1）
+  → reg load 后该 hive 里没有任何键（500 个键全部回滚）
+```
+
+需要 Win8+ 的 KTM 服务（桌面版/Server 默认运行）；`--transactional` 不加则退回普通写入。
+
 ## 7. 剩余工作
 
 1. **PCM 表构建器**（`BuildPcmTables`）：把清单 XML 直接编译成 35 张表。容器、TOC、槽位、
@@ -171,4 +191,6 @@ pwsh -NoProfile -File .\assemble-cbs-store.ps1 `
    - 注意**PCM 不影响 COMPONENTS**（`MCP_*`/`(default)` 已经走 `--mcp`/`--version-flags` 输入）。
 2. 覆盖表瘦身：第 4 节剩下的行已逐条试过推导（f256 段序试了架构/文化/CF/组件键哈希序，
    只能解释 56/60 的顺序且方向不定；CT 的归属包不在 `.mum` 声明集合里）⇒ 保留为输入。
-3. 然后进入 KTM 事务化（把上面所有写入包进事务，失败可回滚）。
+3. KTM 事务化：**注册表写入侧已完成**（`cbs-write --transactional`，见 6.1，提交/回滚都实测过）。
+   还没做的是"文件 + 注册表同一个事务"：CSI 落位用的是普通文件 API，若要做到"落位失败台账也不变"，
+   需要把载荷复制/建链接也包进 KTM 事务（`CreateFileTransacted` 或"先落文件、后提台账"的顺序约定）。
