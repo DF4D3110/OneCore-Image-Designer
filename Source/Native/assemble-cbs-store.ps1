@@ -39,10 +39,13 @@ param(
     [string] $Ct,
     [string] $VersionFlags,
     [string] $Mcp,
+ [string] $SkeletonFamilies,
     [string] $Override,
     [string] $Pending = '',
     [string] $Time = '',
     [switch] $RootMinimal,
+ [switch] $Ccpinterface,
+ [switch] $InstallersShortcut,
     [string[]] $StackEntries = @(),
     [switch] $Transactional,
     [switch] $SkipFileVerify,
@@ -121,12 +124,15 @@ if ($Cache)   { $verArgs += @('--cache', $Cache) }
 if ($Ct)      { $verArgs += @('--ct', $Ct) }
 if ($VersionFlags) { $verArgs += @('--version-flags', $VersionFlags) }
 if ($Mcp) { $verArgs += @('--mcp', $Mcp) }
+if ($SkeletonFamilies) { $verArgs += @('--skeleton-families', $SkeletonFamilies) }
 Invoke-Planner 'versioned' $verArgs
 
 $rootArgs = @('cbs-plan-root', $Arch, $StackVersion, $planRoot)
 if ($Pending) { $rootArgs += @('--pending', $Pending) }
 if ($Time)    { $rootArgs += @('--time', $Time) }
 if ($RootMinimal) { $rootArgs += '--minimal' }
+if ($Ccpinterface) { $rootArgs += '--ccpinterface' }
+if ($InstallersShortcut) { $rootArgs += '--installers-shortcut' }
 foreach ($entry in $StackEntries) {
     if ($entry) { $rootArgs += @('--stack-entry', $entry) }
 }
@@ -143,6 +149,9 @@ if ($Override -and (Test-Path $Override)) {
     # 行格式（TAB 分隔）：
     #   set    <相对路径> <值名> <类型> <hex>   替换该值（没有则新增）
     #   remove <相对路径> <值名>                删除该值
+    #   add-key <相对路径>                      新增一个空键（真机偶有我们计划里没有的空键，
+    #                                           例 8419 的 `Installers\Shortcut`）
+    #   remove-key <相对路径>                   删除该键及其全部子键/值
     # 典型用途：组件 identity 里 8 条历史大小写、f256 多段拼接的安装顺序、
     # 根键的 ServicingStackVersions 时间串、servicing stack 部署的 payload。
     Write-Host ("[assemble] applying overrides: {0}" -f $Override)
@@ -155,6 +164,10 @@ if ($Override -and (Test-Path $Override)) {
         if ($f.Count -lt 2) { continue }
         if ($f[0] -eq 'remove-key') {
             [void]$dropKeySet.Add($f[1])
+            continue
+        }
+        if ($f[0] -eq 'add-key') {
+            $addList.Add('K' + "`t" + $f[1])
             continue
         }
         if ($f.Count -lt 3) { continue }

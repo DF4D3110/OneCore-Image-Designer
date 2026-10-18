@@ -58,8 +58,10 @@
 | `ManifestCacheIdentifier` / `UtilizedSpace_MCP_<id>` | `--cache` | 存储创建时生成，与 `H39` 无关（试过 30+ 候选全灭） |
 | 旧桶归属（`SomeUnparsedVersionsExist`） | `--buckets` | 被更早服务栈暂存过的家庭挂在旧桶下 |
 | `CT` 的不可推导部分 | `--ct` | 归属包不一定声明该组件（912 条） |
-| `CatalogThumbprint` 选择 | `--sessions` | 同一组件被多个包声明时，选哪个 `.cat` 由安装会话顺序决定 |
+| `CatalogThumbprint` 的选择 | `--sessions` | 同一组件被多个包声明时，选哪个 `.cat` 由安装会话顺序决定 |
 | `p!/s!/i!` 标记 | `--markers` | `i!` ≈ 包已安装位，但 185 条例外来自功能启用状态 |
+| "骨架家庭"（只有家庭键 + 空版本节点 + `SomeUnparsedVersionsExist`） | `--skeleton-families` | 内容被更早的服务栈写到已被裁剪的旧桶里（8419 有 112 个家庭这样，其中 55 个磁盘上还有载荷） |
+| 根区形态（`ccpinterface`、`Installers\Shortcut`、`ExecutionState`…） | `--minimal` / `--ccpinterface` / `--installers-shortcut` / `--pending` | 不同镜像的首会话集合不同：8061 x86 有 ExecutionState+PendingXml+Ngen+ccpinterface，8061 ARM 只有栈表，8419 有 ccpinterface+Installers\Shortcut+LastScavenge 而没有任何会话值 |
 
 输入 CSV 可用 `E:\ocid_verify\keyfold\mkinputs.py <真机转储> <前缀>` 从参考台账一键导出。
 
@@ -81,8 +83,15 @@
 6. **PCM 里文档第 0 元素记录的 `b0` bit4..6**：真机来自未初始化栈字节（0..7 都出现），
    没有语义，只能照抄或任意填。
 7. **type6 表的 `flags.bit0`**：清单里构造不出触发条件，按来源表照抄；重装时由安装计划带入。
+8. **8419 追加的三类**（8061 没暴露）：
+   - 组件 identity 里 22 条文化标签被小写（`en-GB`→`en-gb`），比 8061 多一个数量级，
+     且同一镜像里另有大量 `en-US` 保持原样 ⇒ 不是文化规则，是清单来源不同；
+   - 30 条 `p!/s!/i!` 的 payload 指向 `Microsoft-Windows-SKU-Foundation-Package-{base,admin,ds,net,termsrv}`，
+     而我们的部署继承的是 `common-foundation-package`（哪一次交付装过 SKU 版属于安装历史）；
+   - 23 条 `f256!comctl32.dll.mui` 的多段顺序是 **`6.0` 段在前、`6.2` 在后**（该镜像的 23 个语言全反），
+     与"升序"假说相反 —— 再次证明段序是安装顺序而不是排序键。
 
-## 5. 与真机对拍结果（2026-10，两个架构都做到 0 差异）
+## 5. 与真机对拍结果（2026-10，三个镜像都做到 0 差异）
 
 把"安装历史"那一组输入喂满（`--markers/--installed/--claims/--flags/--buckets/--cache/
 --ct/--version-flags/--mcp/--sessions`）之后，再对残余套一层**覆盖表**（`-Override`，
@@ -92,17 +101,23 @@
 | --- | --- | --- | --- |
 | 8061 x86（`Q:`） | 43,100 键 / 120,978 值 | 43,100 键 / 120,978 值 | **only-in-a 0 / 0、only-in-b 0 / 0** |
 | 8061 ARM（`P:`） | 613 键 / 1,408 值 | 613 键 / 1,408 值 | **only-in-a 0 / 0、only-in-b 0 / 0** |
+| 8419 ARM（`E:\ocid_verify\mnt8419`） | 23,328 键 / 61,277 值 | 23,328 键 / 61,277 值 | **only-in-a 0 / 0、only-in-b 0 / 0** |
+
+三个镜像的 `cbs-verify-store` 也全部 `result=OK`（8419：`components=7350 deployments=911
+catalogs=393 families=7310`）。
 
 **没有覆盖表时**（纯清单 + 安装历史输入）的差额：x86 `only-in-a 1 键 / 42 值`、
-`only-in-b 0 键 / 43 值`；ARM `only-in-a 0 键 / 20 值`、`only-in-b 0 键 / 53 值`。
+`only-in-b 0 键 / 43 值`；ARM `only-in-a 0 键 / 20 值`、`only-in-b 0 键 / 53 值`；
+8419 `only-in-a 2 键 / 89 值`、`only-in-b 0 键 / 253 值`。
 按成因分（x86）：f256 段序 24/25、identity 大小写 8/8、appid 大小写 5/5、多余 CT 3、
 `UnstagedFiles` 2、多余 `c!` 1、多余 `CatalogThumbprint` 1、多余 Catalogs 键 1 ——
 **全部落在上面第 4 节的不可推导清单里**，没有一项属于算法缺口。
 ARM 侧多出的 33 条 `p!/s!/i!` 是因为 ARM 镜像只有 4 个包、没有 Foundation 包，
 清单里推出的部署组件拿不到 Windows Foundation 交付名字（x86 侧已由"清单独有部署继承
-Foundation 交付 payload"复刻）。
+Foundation 交付 payload"复刻）。8419 的 253 条里最大一类是"骨架家庭"（已由
+`--skeleton-families` 消掉 216 条），其余是第 4 节第 8 条那些安装历史。
 
-覆盖表规模：x86 86 行（`set`/`remove`/`remove-key` 合计）、ARM 73 行（全是 `set`）。
+覆盖表规模：x86 86 行、ARM 73 行、8419 289 行（含 `set`/`remove`/`add-key`/`remove-key`）。
 它只承担第 4 节那几类历史事实，不含任何"本可以推导"的值。
 
 两个桶的规则（`--buckets` 把家庭指到更早的服务栈桶时）：真机在**两个桶**里都有这个家庭——
@@ -145,9 +160,26 @@ pwsh -NoProfile -File .\assemble-cbs-store.ps1 `
     -StackEntries '6.2.7992.0 (fbl_fun_lad.110407-1318)|2011/8/4:6:42:41.654 6.2.7992.0 (fbl_fun_lad.110407-1318)' `
     -Override 'E:\ocid_verify\overrides_arm.csv' `
     -DiffAgainst 'E:\ocid_verify\truth_arm.txt'
+
+# 8419 ARM（单桶 6.2.8419.0，首会话/旧桶都已裁剪）：骨架家庭 + 根区开关 + 覆盖表
+pwsh -NoProfile -File .\assemble-cbs-store.ps1 `
+    -ImageRoot 'E:\ocid_verify\mnt8419\' -Arch arm `
+    -StackVersion '6.2.8419.0 (winmain.120521-1835)' `
+    -OutDir 'E:\ocid_verify\asm8419' -HiveName 'OCID8419.hiv' -Transactional `
+    -RootMinimal -Ccpinterface -InstallersShortcut `
+    -Time '2012/6/12:1:8:0.193' `
+    -StackEntries '6.2.7992.0 (fbl_fun_lad.110407-1318)|2012/5/22:9:36:2.871 6.2.7992.0 (fbl_fun_lad.110407-1318)' `
+    -Markers 'E:\ocid_verify\8419\a8419_markers.csv' `
+    -Installed 'E:\ocid_verify\8419\packages_state_8419.txt' `
+    -Claims 'E:\ocid_verify\8419\a8419_claims.csv' -Flags 'E:\ocid_verify\8419\a8419_flags.csv' `
+    -Cache 'E:\ocid_verify\8419\a8419_cache.csv' -Ct 'E:\ocid_verify\8419\a8419_ct.csv' `
+    -VersionFlags 'E:\ocid_verify\8419\a8419_vflags.csv' -Mcp 'E:\ocid_verify\8419\a8419_mcp.csv' `
+    -SkeletonFamilies 'E:\ocid_verify\8419\skeleton_families.csv' `
+    -Override 'E:\ocid_verify\8419\ovr4.tsv' `
+    -DiffAgainst 'E:\ocid_verify\8419\truth_8419.txt'
 ```
 
-覆盖表由 `make-cbs-overrides.ps1` 从一次对拍的差集生成（`set`/`remove`/`remove-key` 三种行），
+覆盖表由 `make-cbs-overrides.ps1` 从一次对拍的差集生成（`set`/`remove`/`add-key`/`remove-key` 四种行），
 用法：`pwsh -NoProfile -File .\make-cbs-overrides.ps1 -Dump <组装后的 hive-dump> -Truth <真机转储> -Out <输出.csv>`。
 
 ### 6.1 事务化落盘（KTM）
@@ -246,8 +278,11 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
      SHA-256）、36 B（`<gac>`）布局全部解出，删除对应 XML 即整条消失（knockout 证实）。
    - 仍不可推导：MdHd `b0` bit4..6（未初始化栈字节）、type6 flags.bit0、外层 28 B 包装头
      h0/h8/h10。
-   - 后续任务：读 `GeneratePCM` 的 intern helpers + ladder 实验，交付"无 oracle"的
-     `buildpcm_self.py`（≥200 份语料整份逐字节一致），产物在 `E:\ocid_verify\pcm_route3\`。
+   - 后续任务（"路线四"，进行中）：读 `GeneratePCM` 的 intern helpers + ladder 实验，做到"无 oracle"
+     的整份 PCM 重建。当前进度：200 对验证集 T1..T4 = 199/200（22 槽族 299/305、17 槽族 66/66），
+     全语料 T4 427/2757，卡点在 `<file>/<registryKeys>/<membership>/<localization>` 元素记录驱动的
+     key `1/2/9/16/17/201/210/666/34`（大族 0%）；中间产物在 `E:\ocid_verify\pcm_route3\`
+     （`buildpcm_self.py`、`port_notes.md`）与 `E:\ocid_verify\pcm_schema_route2.md`。
    - 注意**PCM 不影响 COMPONENTS**（`MCP_*`/`(default)` 已经走 `--mcp`/`--version-flags` 输入）。
 2. 覆盖表瘦身：第 4 节剩下的行已逐条试过推导（f256 段序试了架构/文化/CF/组件键哈希序，
    只能解释 56/60 的顺序且方向不定；CT 的归属包不在 `.mum` 声明集合里）⇒ 保留为输入。

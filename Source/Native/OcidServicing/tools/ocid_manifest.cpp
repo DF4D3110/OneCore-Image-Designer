@@ -2609,10 +2609,12 @@ static void Usage()
     OutLn("      --sessions: Windows\\servicing\\Sessions（按 <Resolve> 顺序决定 CatalogThumbprint）");
     OutLn("  ocid_manifest cbs-plan-versioned <manifestDir> <packagesDir> <stagedDir> <stackVersion> <outFile>");
     OutLn("      [--buckets <csv>] [--cache <csv>] [--ct <csv>] [--version-flags <csv>] [--mcp <csv>]");
+    OutLn("      [--skeleton-families <csv>]  家庭键列表：只发家庭键/空版本节点/SomeUnparsedVersionsExist");
     OutLn("      --buckets: 家庭键|桶文本（安装历史：被更早服务栈暂存的组件留在那个桶）");
     OutLn("      --cache: 桶文本|缓存 id 8hex|已用字节（ManifestCacheIdentifier/UtilizedSpace）");
     OutLn("  ocid_manifest cbs-plan-root <x86|arm|arm64|amd64|ia64> <stackVersion> <outFile>");
     OutLn("      [--pending <32hex>] [--time <timestamp 文本>]  根键值（会话态可显式给）");
+    OutLn("      [--minimal] [--ccpinterface] [--installers-shortcut]  根键形态开关");
     OutLn("      --markers: key|appid|thumb|markers（真机导出的安装/启用状态，决定 p!/s!/i!）");
     OutLn("  ocid_manifest cbs-diff <a.txt> <b.txt> [--limit N]   compare two cbs-dump files");
     OutLn("  ocid_manifest cbs-verify-files <plan.txt> <winSxsDir>   check every f! value has its file staged");
@@ -3870,6 +3872,7 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
                                const std::wstring& ctPath,
                                const std::wstring& versionFlagsPath,
                                const std::wstring& mcpPath,
+                               const std::wstring& skeletonPath,
                                const std::wstring& outPath)
 {
 #ifdef _WIN32
@@ -4011,6 +4014,32 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
     }
 
     std::set<std::string> lines;
+    // "骨架家庭"输入（行 = 家庭键，见发射处的说明）。8419 ARM 有 112 个此类家庭：
+    // 清单与载荷都在，但版本化索引里只有家庭键/空版本节点/`SomeUnparsedVersionsExist`。
+    std::set<std::string> skeletonFamilies;
+    if (!skeletonPath.empty())
+    {
+        std::wstring wideText, readErr;
+        if (!ReadFileUtf8(skeletonPath, wideText, readErr))
+        {
+            Err("读不了 --skeleton-families 文件：" + ToUtf8(skeletonPath));
+            return 2;
+        }
+        const std::string text = ToUtf8(wideText);
+        std::size_t pos = 0;
+        while (pos < text.size())
+        {
+            std::size_t end = text.find('\n', pos);
+            if (end == std::string::npos) end = text.size();
+            std::string line = text.substr(pos, end - pos);
+            pos = end + 1;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const std::size_t bar = line.find('|');
+            if (bar != std::string::npos) line.resize(bar);
+            if (!line.empty()) skeletonFamilies.insert(line);
+        }
+    }
     const std::string defaultBucketText = ToUtf8(stackVersion);
     const std::string bucket = "DerivedData\\VersionedIndex\\" + defaultBucketText;
     std::set<std::string> cacheBucketTexts;
@@ -4300,6 +4329,20 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
             contentBuckets.insert(bucketText);
         }
         std::vector<FamilyEntry> families;
+        // "骨架家庭"：组件/清单存在，但版本化索引里只有家庭键 + 空版本节点 +
+        // `SomeUnparsedVersionsExist` = 0x00，没有任何内容（MCP/CT/f256/(default) 都没有）。
+        // 8419 ARM 有 112 个这种家庭（其中 55 个磁盘上有载荷目录），来源是"更早的服务栈
+        // 把版本内容暂存到了已被裁剪的旧桶"，无法由清单推导，只能作为安装历史输入。
+        if (skeletonFamilies.count(familyKey) != 0)
+        {
+            lines.insert("K\t" + bucket);
+            lines.insert("K\t" + bucket + "\\ComponentFamilies");
+            const std::string familyPath = bucket + "\\ComponentFamilies\\" + familyKey;
+            lines.insert("K\t" + familyPath);
+            lines.insert("K\t" + familyPath + "\\v!" + version);
+            lines.insert("V\t" + familyPath + "\tSomeUnparsedVersionsExist\t3\t00");
+            continue;
+        }
         for (const std::string& contentBucket : contentBuckets)
         {
             families.push_back({ "DerivedData\\VersionedIndex\\" + contentBucket, familyKey, true });
@@ -4476,6 +4519,7 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
 static int CmdCbsPlanRoot(const std::wstring& archText, const std::wstring& stackVersion,
                           const std::wstring& outPath, const std::wstring& pendingHex,
                           const std::wstring& stackTime, bool minimal,
+                          bool emitCcpinterface, bool emitInstallersShortcut,
                           const std::vector<std::string>& stackEntries)
 {
     const std::string arch = ToUtf8(archText);
@@ -4541,7 +4585,15 @@ static int CmdCbsPlanRoot(const std::wstring& archText, const std::wstring& stac
         addK("Installers");
         addK("Installers\\Ngen");
         addV("Installers\\Ngen", "TicklerArchWoW", "4", "01000000");
-        addK("ccpinterface");
+    }
+    // 8419 的根有 `ccpinterface` 空键但没有任何会话值；8061 ARM 连这个键都没有
+    // => 单独一个开关，别把它绑在 --minimal 上。
+    if (!minimal || emitCcpinterface) addK("ccpinterface");
+    // 8419 的根有 `Installers\\Shortcut` 空键（无 Ngen/TicklerArchWoW）。
+    if (emitInstallersShortcut)
+    {
+        addK("Installers");
+        addK("Installers\\Shortcut");
     }
     // `Configuration` 两个真机镜像都有（空的策略键），与 --minimal 无关。
     addK("Configuration");
@@ -4716,7 +4768,7 @@ int main(int argc, char** argv)
     // cbs-plan-versioned <manifestDir> <packagesDir> <stagedDir> <stackVersion> <outFile>
     //                   [--buckets <csv>] [--cache <csv>] [--ct <csv>] [--version-flags <csv>] [--mcp <csv>]
     if (cmd == L"cbs-plan-versioned" && argc >= 7) {
-        std::wstring bucketsPath, cachePath, ctPath, versionFlagsPath, mcpPath;
+        std::wstring bucketsPath, cachePath, ctPath, versionFlagsPath, mcpPath, skeletonPath;
         for (int i = 7; i + 1 < argc; ++i)
         {
             const std::wstring opt = FromUtf8OrAnsi(argv[i]);
@@ -4725,28 +4777,35 @@ int main(int argc, char** argv)
             else if (opt == L"--ct") ctPath = FromUtf8OrAnsi(argv[++i]);
             else if (opt == L"--version-flags") versionFlagsPath = FromUtf8OrAnsi(argv[++i]);
             else if (opt == L"--mcp") mcpPath = FromUtf8OrAnsi(argv[++i]);
+            else if (opt == L"--skeleton-families") skeletonPath = FromUtf8OrAnsi(argv[++i]);
         }
         return CmdCbsPlanVersioned(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]),
                                    FromUtf8OrAnsi(argv[4]), FromUtf8OrAnsi(argv[5]),
                                    bucketsPath, cachePath, ctPath, versionFlagsPath, mcpPath,
-                                   FromUtf8OrAnsi(argv[6]));
+                                   skeletonPath, FromUtf8OrAnsi(argv[6]));
     }
 
     // cbs-plan-root <arch> <stackVersion> <outFile> [--pending <32hex>] [--time <text>]
     //                [--minimal] [--stack-entry <name>|<text>]...
+    //                [--ccpinterface] [--installers-shortcut]
     if (cmd == L"cbs-plan-root" && argc >= 5) {
         std::wstring pending, when;
         bool minimal = false;
+    bool emitCcpinterface = false;
+    bool emitInstallersShortcut = false;
         std::vector<std::string> stackEntries;
         for (int i = 5; i < argc; ++i) {
             const std::wstring opt = FromUtf8OrAnsi(argv[i]);
             if (opt == L"--minimal") { minimal = true; }
+        else if (opt == L"--ccpinterface") { emitCcpinterface = true; }
+        else if (opt == L"--installers-shortcut") { emitInstallersShortcut = true; }
             else if (opt == L"--pending" && i + 1 < argc) pending = FromUtf8OrAnsi(argv[++i]);
             else if (opt == L"--time" && i + 1 < argc) when = FromUtf8OrAnsi(argv[++i]);
             else if (opt == L"--stack-entry" && i + 1 < argc) stackEntries.push_back(argv[++i]);
         }
         return CmdCbsPlanRoot(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]),
-                              FromUtf8OrAnsi(argv[4]), pending, when, minimal, stackEntries);
+                              FromUtf8OrAnsi(argv[4]), pending, when, minimal, emitCcpinterface,
+                              emitInstallersShortcut, stackEntries);
     }
 
     if (cmd == L"cbs-diff" && argc >= 4) {
