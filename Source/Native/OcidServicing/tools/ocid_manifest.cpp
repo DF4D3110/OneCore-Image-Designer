@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <iterator>
 #include <map>
 #include <set>
 #include <string>
@@ -1478,6 +1479,188 @@ static int CmdCbsScan(const std::wstring& hiveSpec, int limit)
 #endif
 }
 
+// ── 台账规范化转储 / 对拍（cbs-dump、cbs-diff）──────────────────────────
+//
+// cbs-dump 把整个（已挂载的）COMPONENTS 台账按“路径 + 值名 + 类型 + 原始字节”摊平成
+// 文本：一行一个键（`K\t<相对路径>`）、一行一个值（`V\t<相对路径>\t<值名>\t<类型>\t<hex>`）。
+// 行按字典序排序，同一份内容在任何机器上转储都逐字节相同 —— 这是“OCID 装出来的台账
+// 与微软原版逐字节一致”的量化闸门：cbs-diff 逐个比两份转储。
+#ifdef _WIN32
+namespace {
+
+void HexAppend(const std::vector<std::uint8_t>& data, std::string& out)
+{
+    static const char* digits = "0123456789abcdef";
+    for (std::uint8_t b : data)
+    {
+        out.push_back(digits[b >> 4]);
+        out.push_back(digits[b & 0x0F]);
+    }
+}
+
+bool DumpKeyRecursive(HKEY key, const std::wstring& relPath, DWORD depth,
+                      std::vector<std::string>& lines, std::wstring& err)
+{
+    if (depth > 32) { err = L"键层数超过 32，疑似环"; return false; }
+
+    const std::string path = ToUtf8(relPath);
+    lines.push_back("K\t" + path);
+
+    std::vector<CbsRegValue> values;
+    if (!ReadAllValues(key, values, err)) return false;
+    for (const CbsRegValue& value : values)
+    {
+        std::string line = "V\t" + path + "\t" + value.name + "\t" +
+                           std::to_string(value.type) + "\t";
+        HexAppend(value.data, line);
+        lines.push_back(std::move(line));
+    }
+
+    DWORD subCount = 0;
+    if (RegQueryInfoKeyW(key, nullptr, nullptr, nullptr, &subCount, nullptr, nullptr,
+                         nullptr, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS)
+    {
+        err = L"RegQueryInfoKey 失败（子键）";
+        return false;
+    }
+    for (DWORD i = 0; i < subCount; ++i)
+    {
+        std::wstring name(512, L'\0');
+        DWORD nameLen = static_cast<DWORD>(name.size());
+        const LSTATUS rc = RegEnumKeyExW(key, i, &name[0], &nameLen, nullptr, nullptr,
+                                         nullptr, nullptr);
+        if (rc != ERROR_SUCCESS)
+        {
+            err = L"RegEnumKeyEx 失败（错误码 " + std::to_wstring(rc) + L"）";
+            return false;
+        }
+        name.resize(nameLen);
+
+        HKEY child = nullptr;
+        if (RegOpenKeyExW(key, name.c_str(), 0, KEY_READ, &child) != ERROR_SUCCESS)
+        {
+            err = L"打不开子键：" + name;
+            return false;
+        }
+        const std::wstring childPath = relPath.empty() ? name : (relPath + L"\\" + name);
+        const bool ok = DumpKeyRecursive(child, childPath, depth + 1, lines, err);
+        RegCloseKey(child);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+bool WriteLinesUtf8(const std::wstring& path, const std::vector<std::string>& lines,
+                    std::wstring& err)
+{
+    FILE* f = _wfopen(path.c_str(), L"wb");
+    if (!f) { err = L"写不了文件：" + path; return false; }
+    for (const std::string& line : lines)
+    {
+        fwrite(line.data(), 1, line.size(), f);
+        fputc('\n', f);
+    }
+    fclose(f);
+    return true;
+}
+
+} // namespace
+#endif
+
+static int CmdCbsDump(const std::wstring& hiveSpec, const std::wstring& outPath)
+{
+#ifdef _WIN32
+    HKEY rootKey = nullptr;
+    std::wstring sub, err;
+    if (!ParseHivePath(hiveSpec, rootKey, sub, err)) { Err(ToUtf8(err)); return 2; }
+
+    HKEY store = nullptr;
+    if (RegOpenKeyExW(rootKey, sub.c_str(), 0, KEY_READ, &store) != ERROR_SUCCESS)
+    {
+        Err("打不开台账根（reg load 了吗？）");
+        return 2;
+    }
+
+    std::vector<std::string> lines;
+    const bool ok = DumpKeyRecursive(store, L"", 0, lines, err);
+    RegCloseKey(store);
+    if (!ok) { Err(ToUtf8(err)); return 1; }
+
+    std::sort(lines.begin(), lines.end());
+    if (!WriteLinesUtf8(outPath, lines, err)) { Err(ToUtf8(err)); return 1; }
+
+    size_t keys = 0, values = 0;
+    for (const std::string& line : lines)
+        (line[0] == 'K' ? keys : values)++;
+    OutLn("dumped keys=" + std::to_string(keys) + " values=" + std::to_string(values) +
+          " lines=" + std::to_string(lines.size()));
+    return 0;
+#else
+    (void)hiveSpec; (void)outPath;
+    return 2;
+#endif
+}
+
+static int CmdCbsDiff(const std::wstring& pathA, const std::wstring& pathB, int limit)
+{
+#ifdef _WIN32
+    std::wstring rawA, rawB, err;
+    if (!ReadFileUtf8(pathA, rawA, err)) { Err(ToUtf8(err)); return 2; }
+    if (!ReadFileUtf8(pathB, rawB, err)) { Err(ToUtf8(err)); return 2; }
+
+    auto toSet = [](const std::wstring& raw) {
+        std::set<std::string> out;
+        const std::string text = ToUtf8(raw);
+        std::size_t pos = 0;
+        while (pos < text.size())
+        {
+            std::size_t end = text.find('\n', pos);
+            if (end == std::string::npos) end = text.size();
+            std::string line = text.substr(pos, end - pos);
+            pos = end + 1;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) out.insert(std::move(line));
+        }
+        return out;
+    };
+    const std::set<std::string> a = toSet(rawA);
+    const std::set<std::string> b = toSet(rawB);
+
+    std::vector<std::string> onlyA, onlyB;
+    std::set_difference(a.begin(), a.end(), b.begin(), b.end(), std::back_inserter(onlyA));
+    std::set_difference(b.begin(), b.end(), a.begin(), a.end(), std::back_inserter(onlyB));
+
+    auto countPrefix = [](const std::vector<std::string>& lines, char kind) {
+        return std::count_if(lines.begin(), lines.end(),
+                             [kind](const std::string& s) { return !s.empty() && s[0] == kind; });
+    };
+    const size_t aKeys = countPrefix(onlyA, 'K'), aVals = onlyA.size() - aKeys;
+    const size_t bKeys = countPrefix(onlyB, 'K'), bVals = onlyB.size() - bKeys;
+
+    OutLn("a lines=" + std::to_string(a.size()) + "  b lines=" + std::to_string(b.size()));
+    OutLn("only-in-a: keys=" + std::to_string(aKeys) + " values=" + std::to_string(aVals));
+    OutLn("only-in-b: keys=" + std::to_string(bKeys) + " values=" + std::to_string(bVals));
+
+    const int shown = (limit > 0) ? limit : 20;
+    int printed = 0;
+    for (const std::string& line : onlyA)
+    {
+        if (printed++ >= shown) break;
+        OutLn("  - " + line);
+    }
+    printed = 0;
+    for (const std::string& line : onlyB)
+    {
+        if (printed++ >= shown) break;
+        OutLn("  + " + line);
+    }
+    return (onlyA.empty() && onlyB.empty()) ? 0 : 1;
+#else
+    (void)pathA; (void)pathB; (void)limit;
+    return 2;
+#endif
+}
+
 static void Usage()
 {
     OutLn("OCID servicing console");
@@ -1497,6 +1680,8 @@ static void Usage()
     OutLn("  ocid_manifest macros                          list known $(runtime.*) macro names");
     OutLn("  ocid_manifest cbs-scan HKLM\\OCIDCOMP [--limit N]   decode+re-encode every store record");
     OutLn("  ocid_manifest cbs-keys <csvFile> [--names component|deployment]   check pseudo-key suffix / full key name");
+    OutLn("  ocid_manifest cbs-dump HKLM\\OCIDCOMP <outFile>   canonical (sorted) dump of the whole store");
+    OutLn("  ocid_manifest cbs-diff <a.txt> <b.txt> [--limit N]   compare two cbs-dump files");
     OutLn("");
     OutLn("Data goes to stdout, diagnostics to stderr.");
 }
@@ -1803,6 +1988,18 @@ int main(int argc, char** argv)
 
     if (cmd == L"cbs-families" && argc >= 4) {
         return CmdCbsFamilyCheck(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]));
+    }
+
+    if (cmd == L"cbs-dump" && argc >= 4) {
+        return CmdCbsDump(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]));
+    }
+
+    if (cmd == L"cbs-diff" && argc >= 4) {
+        int mx = 0;
+        for (int i = 4; i < argc; ++i) {
+            if (std::string(argv[i]) == "--limit" && i + 1 < argc) { mx = atoi(argv[++i]); }
+        }
+        return CmdCbsDiff(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]), mx);
     }
 
     if (cmd == L"macros")
