@@ -162,7 +162,7 @@ function Build-Dll {
 Get-Toolchain 'x86' | ForEach-Object { New-Dirs -Out $_.Out -Obj $_.Obj }
 Get-Toolchain 'x64' | ForEach-Object { New-Dirs -Out $_.Out -Obj $_.Obj }
 
-$core = @('src\Identity.cpp', 'src\Manifest.cpp', 'src\WcmSchema.cpp', 'src\RegistryValue.cpp', 'src\CmiInstaller.cpp', 'src\MacroExpander.cpp', 'src\SecurityDescriptor.cpp', 'src\FilePlacement.cpp', 'src\DriverPackage.cpp', 'src\DriverInf.cpp', 'src\CbsStore.cpp', 'src\Sha256.cpp', 'src\Pcm.cpp')
+$core = @('src\Identity.cpp', 'src\Manifest.cpp', 'src\WcmSchema.cpp', 'src\RegistryValue.cpp', 'src\CmiInstaller.cpp', 'src\MacroExpander.cpp', 'src\SecurityDescriptor.cpp', 'src\FilePlacement.cpp', 'src\DriverPackage.cpp', 'src\DriverInf.cpp', 'src\CbsStore.cpp', 'src\Sha256.cpp', 'src\Pcm.cpp', 'src\Microdom.cpp')
 $api  = $core + @('src\OcidServicingApi.cpp')
 $def  = Join-Path $src 'src\OcidServicing.def'
 
@@ -180,6 +180,8 @@ Build-Target 'ocid_place_tests.exe'    @('src\Identity.cpp', 'src\Manifest.cpp',
 Build-Target 'ocid_dmi_tests.exe'      @('src\DriverPackage.cpp', 'tests\driverpackage_tests.cpp')
 Build-Target 'ocid_dmiinf_tests.exe'    @('src\DriverPackage.cpp', 'src\DriverInf.cpp', 'tests\driverinf_tests.cpp')
 Build-Target 'ocid_cbs_tests.exe'      @('src\CbsStore.cpp', 'src\Sha256.cpp', 'src\Pcm.cpp', 'tests\cbsstore_tests.cpp')
+Build-Target 'ocid_microdom_tests.exe' @('src\Microdom.cpp', 'tests\microdom_tests.cpp')
     Build-Target 'ocid_manifest.exe'       ($core + @('tools\ocid_manifest.cpp'))
 
 Write-Host "[build] done -> $(Join-Path $root 'Output')"
+

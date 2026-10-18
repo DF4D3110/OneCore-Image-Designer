@@ -21,6 +21,7 @@
 #include "ocid/MacroExpander.h"
 #include "ocid/Manifest.h"
 #include "ocid/Pcm.h"
+#include "ocid/Microdom.h"
 #include "ocid/RegistryValue.h"
 #include "ocid/Sha256.h"
 #include "ocid/WcmSchema.h"
@@ -1881,6 +1882,42 @@ static int CmdCbsWrite(const std::wstring& planPath, const std::wstring& hivePat
 
 // 把一段已解压的 `PcmH` 流拆成 TOC 里的表载荷，再按真机容器语义重编码。
 // 用途：用真机样本自证 `ocid::PcmEncode` 能逐字节重建（cbs-pcm-reencode）。
+// cbs-microdom <manifest.xml> <out.mdhd>：把清单 XML 编译成 MdHd（微 DOM）段。
+// 用途：和真机 ManifestCache 里的 t11 表逐字节对拍（8061 小样本 2,988 B 已验证相同）。
+static int CmdCbsMicrodom(const std::wstring& manifestPath, const std::wstring& outPath)
+{
+    std::wstring xml;
+    std::wstring readError;
+    if (!ReadFileUtf8(manifestPath, xml, readError))
+    {
+        OutLn("读不了清单：" + ToUtf8(readError));
+        return 1;
+    }
+    std::vector<std::uint8_t> microdom;
+    std::string buildError;
+    if (!ocid::BuildMicrodomLayout(ToUtf8(xml), microdom, buildError))
+    {
+        OutLn("微 DOM 编译失败：" + buildError);
+        return 1;
+    }
+    FILE* out = nullptr;
+    if (_wfopen_s(&out, outPath.c_str(), L"wb") != 0 || out == nullptr)
+    {
+        OutLn("写不了文件：" + ToUtf8(outPath));
+        return 1;
+    }
+    const bool written = microdom.empty() ||
+                         std::fwrite(microdom.data(), 1, microdom.size(), out) == microdom.size();
+    std::fclose(out);
+    if (!written)
+    {
+        OutLn("写文件失败：" + ToUtf8(outPath));
+        return 1;
+    }
+    OutLn("microdom bytes=" + std::to_string(microdom.size()));
+    return 0;
+}
+
 static int CmdCbsPcmReencode(const std::wstring& pcmPath, const std::wstring& outPath)
 {
     std::vector<std::uint8_t> pcm;
@@ -3737,12 +3774,18 @@ int main(int argc, char** argv)
         return CmdCbsPcmReencode(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]));
     }
 
+    // cbs-microdom：清单 XML → MdHd 段（和真机 ManifestCache 的 t11 表对拍）。
+    if (cmd == L"cbs-microdom" && argc >= 4) {
+        return CmdCbsMicrodom(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]));
+    }
+
     if (cmd == L"macros")
         return CmdMacros();
 
     Usage();
     return 1;
 }
+
 
 
 
