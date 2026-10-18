@@ -43,6 +43,12 @@
 | 根值 | `StoreFormatVersion="0.0.0.6"`、`StoreArchitecture`（x86=0/arm=5/ia64=6/amd64=9/arm64=12）、`ServicingStackVersions` | 真机实测 |
 | ManifestCache 容器 | 28 字节块头 + LZNT1(format 2, chunk 4096)；解压出 `PcmH`：84 字节头 + 4 张 inn-id 表 + 8 字节/项 TOC + 载荷 | `src/Pcm.cpp`，容器层与表骨架 byte-exact |
 | 微 DOM（MdHd） | `MdHd/MdSp/MdDl/MdDt/MdLc` 分节；`MdSp` 按串插入序 | `src/Microdom.cpp`，300/300 清单逐字节一致 |
+| DCM 清单（16299+） | `DCM\x01` + msdelta 补丁；字典 = `wcp.dll` 资源 type 614 id 1，`ApplyDeltaB(DELTA_FLAG_NONE, dict, file[4:])` | `src/Dcm.cpp`，22,167 份全量 `bad=0` |
+| `S256H`（现代） | **解压后**清单 XML 的 SHA-256（不是磁盘上的 DCM 字节） | 16299 22,167/22,167 |
+| `f!` 值（现代） | 类型 4（REG_DWORD）文件状态位：1 / 0x21 / 0x41 / 0x61；非 1 由 `--file-flags` 输入 | 16299 34,285 条全类型 4 |
+| `f256!`（现代） | 清单里 `<dsig:DigestValue>` 的 base64（落位文件被改过时与磁盘 SHA-256 不同） | 16299 全量 |
+| `Drivers` 台账（16299+） | `Drivers\<arch>\<INF 名>\<base64(SHA-256(INF 字节))>`，值名 `<包身份>~<update 名>`、数据 0 | 686/686 |
+| identity（现代） | `.inf.resources` 组件：整名小写后末段改回 `.Resources`；culture 逐字照抄（仅 `en-us`⇒`en-US`）；appid 的非 `en-US` culture 小写 | 16299 589/589 |
 
 ## 3. 必须当"安装历史"输入的值
 
@@ -55,6 +61,7 @@
 | `CF` | `--flags` | 闭包校验位图（`corruptionrepair.cpp` 的 6 个位），只有走过安装/校验路径的组件才有值 |
 | `MCP_<id>` | `--mcp` | 指向 ManifestCache 文件内的块偏移；块间有空隙 ⇒ 编码的是写入历史 |
 | 版本节点 `(default)` | `--version-flags` | ManifestCache 写完清单后由工作栈置的位图 |
+| 现代 `f!` 的非 1 状态 | `--file-flags` | REG_DWORD 状态位（0x21/0x41/0x61）编码的是文件落位/压缩历史 |
 | `ManifestCacheIdentifier` / `UtilizedSpace_MCP_<id>` | `--cache` | 存储创建时生成，与 `H39` 无关（试过 30+ 候选全灭） |
 | 旧桶归属（`SomeUnparsedVersionsExist`） | `--buckets` | 被更早服务栈暂存过的家庭挂在旧桶下 |
 | `CT` 的不可推导部分 | `--ct` | 归属包不一定声明该组件（912 条） |
@@ -90,34 +97,45 @@
      而我们的部署继承的是 `common-foundation-package`（哪一次交付装过 SKU 版属于安装历史）；
    - 23 条 `f256!comctl32.dll.mui` 的多段顺序是 **`6.0` 段在前、`6.2` 在后**（该镜像的 23 个语言全反），
      与"升序"假说相反 —— 再次证明段序是安装顺序而不是排序键。
+9. **16299 追加的三类**：
+   - **60 条 identity 是更早清单的写法**（`BgpNCProvider.Resources` 而清单是 `BgpNCProvider.resources`）；
+     另 11 条能由 `.mum` 里 `<component><assemblyIdentity>` 的原文大小写解释（`dual_SDFLauncher.inf`）。
+   - **14 条多余 `Drivers` 台账项**：Hyper-V/WVMS 虚拟驱动（`mpio.inf`、`msdm.inf` 一类），
+     真机不收录，但其包 `CurrentState=0x70` 与收录的包相同 ⇒ 判据未知。
+   - **`CatalogThumbprint` 的会话选择**：现代镜像的 `Sessions` 目录为空，多候选时只能按声明集合
+     的最后出现顺序选；少数据会话历史。
 
-## 5. 与真机对拍结果（2026-10，三个镜像都做到 0 差异）
+## 5. 与真机对拍结果（2026-10，四个镜像都做到 0 差异）
 
 把"安装历史"那一组输入喂满（`--markers/--installed/--claims/--flags/--buckets/--cache/
 --ct/--version-flags/--mcp/--sessions`）之后，再对残余套一层**覆盖表**（`-Override`，
 把只能从安装历史抄的值写死），组装结果与微软原版台账在逻辑层（键/值/类型/字节）完全一致：
 
-| 镜像 | 真机规模 | 组装结果 | cbs-diff |
-| --- | --- | --- | --- |
-| 8061 x86（`Q:`） | 43,100 键 / 120,978 值 | 43,100 键 / 120,978 值 | **only-in-a 0 / 0、only-in-b 0 / 0** |
-| 8061 ARM（`P:`） | 613 键 / 1,408 值 | 613 键 / 1,408 值 | **only-in-a 0 / 0、only-in-b 0 / 0** |
-| 8419 ARM（`E:\ocid_verify\mnt8419`） | 23,328 键 / 61,277 值 | 23,328 键 / 61,277 值 | **only-in-a 0 / 0、only-in-b 0 / 0** |
+| 镜像 | 真机规模 | 组装结果 | cbs-diff | 覆盖表 |
+| --- | --- | --- | --- | --- |
+| 8061 x86（`Q:`） | 43,100 键 / 120,978 值 | 43,100 键 / 120,978 值 | **only-in-a 0 / 0、only-in-b 0 / 0** | 54 行 |
+| 8061 ARM（`P:`） | 613 键 / 1,408 值 | 613 键 / 1,408 值 | **only-in-a 0 / 0、only-in-b 0 / 0** | 73 行 |
+| 8419 ARM（`E:\ocid_verify\mnt8419`） | 23,328 键 / 61,277 值 | 23,328 键 / 61,277 值 | **only-in-a 0 / 0、only-in-b 0 / 0** | 289 行 |
+| 16299 amd64（挂载的 WIM） | 73,535 键 / 215,978 值 | 73,535 键 / 215,978 值 | **only-in-a 0 / 0、only-in-b 0 / 0** | 889 行 |
 
-三个镜像的 `cbs-verify-store` 也全部 `result=OK`（8419：`components=7350 deployments=911
+四个镜像的 `cbs-verify-store` 也全部 `result=OK`（8419：`components=7350 deployments=911
 catalogs=393 families=7310`）。
 
 **没有覆盖表时**（纯清单 + 安装历史输入）的差额：x86 `only-in-a 1 键 / 42 值`、
-`only-in-b 0 键 / 43 值`；ARM `only-in-a 0 键 / 20 值`、`only-in-b 0 键 / 53 值`；
-8419 `only-in-a 2 键 / 89 值`、`only-in-b 0 键 / 253 值`。
+`only-in-b 0 键 / 42 值`；ARM `only-in-a 0 键 / 20 值`、`only-in-b 0 键 / 53 值`；
+8419 `only-in-a 2 键 / 89 值`、`only-in-b 0 键 / 253 值`；
+16299 `only-in-a 30 键 / 779 值`、`only-in-b 2 键 / 420 值`。
 按成因分（x86）：f256 段序 24/25、identity 大小写 8/8、appid 大小写 5/5、多余 CT 3、
 `UnstagedFiles` 2、多余 `c!` 1、多余 `CatalogThumbprint` 1、多余 Catalogs 键 1 ——
 **全部落在上面第 4 节的不可推导清单里**，没有一项属于算法缺口。
+16299 的 779/420 里最大一块同样是第 4 节第 9 条（60 条 identity、14 条虚拟驱动、会话派生
+`CatalogThumbprint`），其余是 `f256` 段序与个别 `c!`。
 ARM 侧多出的 33 条 `p!/s!/i!` 是因为 ARM 镜像只有 4 个包、没有 Foundation 包，
 清单里推出的部署组件拿不到 Windows Foundation 交付名字（x86 侧已由"清单独有部署继承
 Foundation 交付 payload"复刻）。8419 的 253 条里最大一类是"骨架家庭"（已由
 `--skeleton-families` 消掉 216 条），其余是第 4 节第 8 条那些安装历史。
 
-覆盖表规模：x86 86 行、ARM 73 行、8419 289 行（含 `set`/`remove`/`add-key`/`remove-key`）。
+覆盖表规模：x86 54 行、ARM 73 行、8419 289 行、16299 889 行（含 `set`/`remove`/`add-key`/`remove-key`）。
 它只承担第 4 节那几类历史事实，不含任何"本可以推导"的值。
 
 两个桶的规则（`--buckets` 把家庭指到更早的服务栈桶时）：真机在**两个桶**里都有这个家庭——
@@ -155,7 +173,17 @@ pwsh -NoProfile -File .\ocid-assemble.ps1 `
     -SoftwareHivePath 'E:\ocid_verify\8419\SOFTWARE.hiv' `
     -StackVersion '6.2.8419.0 (winmain.120521-1835)' `
     -OutDir 'E:\ocid_verify\one8419' -AutoOverrides -Transactional
-#   pass 1: 23,327 键 / 61,244 值，差 89+122 值；覆盖表 158 行；pass 2: 0/0
+#   pass 1: 23,327 键 / 61,113 值，差 89+253 值；覆盖表 289 行；pass 2: 0/0
+
+# 16299 amd64（挂载的 WIM，现代镜像：清单是 DCM 压缩）
+pwsh -NoProfile -File .\ocid-assemble.ps1 `
+    -ImageRoot 'E:\ocid_dism\mnt16299' -SourceHive 'HKLM\OCIDC16299' `
+    -SoftwareHivePath 'E:\ocid_dism\16299cfg\SOFTWARE' `
+    -StackVersion '10.0.16299.15 (WinBuild.160101.0800)' `
+    -FileFlags 'E:\ocid_verify\one16299\inputs\file_flags.csv' `
+    -OutDir 'E:\ocid_verify\one16299' -AutoOverrides -Transactional
+#   pass 1: 73,559 键 / 216,337 值，差 779+420 值；覆盖表 889 行；pass 2: 0/0
+#   现代镜像会自动启用：DCM 解码、f! DWORD、Drivers 台账、驱动部署 CatalogThumbprint
 ```
 
 参数含义：`-SourceHive` 触发 `Extract-CbsInputs.ps1`（也可用 `-InputsDir` 复用已导出的输入，或逐个传 `-Markers/-Claims/...`）；`-ExtractDefaultBucket` 缺省取 `-StackVersion`（当前栈桶即默认桶）；`-AutoOverrides` 会用 pass 1 的 `hive-dump.txt` 与 `-DiffAgainst`（缺省 `inputs\truth.txt`）生成覆盖表再跑 pass 2；`-Transactional` 把注册表写入包进 KTM 事务。
@@ -365,6 +393,7 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
    - 注意**PCM 不影响 COMPONENTS**（`MCP_*`/`(default)` 已经走 `--mcp`/`--version-flags` 输入）。
 2. 覆盖表瘦身：第 4 节剩下的行已逐条试过推导（f256 段序试了架构/文化/CF/组件键哈希序，
    只能解释 56/60 的顺序且方向不定；CT 的归属包不在 `.mum` 声明集合里）⇒ 保留为输入。
+   16299 的 889 行里最大一块是 `Drivers` 台账的 14 条虚拟驱动 + identity 71 条历史写法。
 3. KTM 事务化：**注册表写入侧已完成**（`cbs-write --transactional`，见 6.1，提交/回滚都实测过）。
    "文件 + 注册表"的原子性已用顺序约定 + 提交前核对解决（见 6.2，`cbs-verify-files` 已接进
    `assemble-cbs-store.ps1`）；真正把文件复制也包进 KTM（`CreateFileTransacted`）没有做，
@@ -390,8 +419,50 @@ DCM 解码（`src/Dcm.cpp`）：字典 = `wcp.dll` 资源 type 614（0x266）id 
 在 `<ImageRoot>\\Windows\\WinSxS\\*_servicingstack_*\\wcp.dll` 里找）。老镜像的 `wcp.dll` 没有该资源，
 加载失败只提示、不清空管道（8061 清单本来也没压缩）。实测全量 22,167 份清单解压 72 秒、`bad=0`。
 
-本轮两条大规则修好后，pass 1 的差额从 61,942/66,936 值降到 **2,357/4,331 值**（键 72,107/73,535），
-自动覆盖表从 67,001 行降到 **4,396 行**，pass 2 之后 0/0。剩余差距（见 §7）主要是 `Drivers` 台账、
-identity 文本大小写（1,896）与 `CatalogThumbprint` 选择。
+本轮两条大规则修好后，pass 1 的差额从 61,942/66,936 值降到 **779/420 值**（键 73,559/73,537），
+自动覆盖表从 67,001 行降到 **889 行**，pass 2 之后 0/0。
+
+### 8.1 `Drivers` 台账（16299+ 独有子系统）
+
+真机 16299 多出一棵 `Drivers` 树：**686 个父键 / 686 个叶键 / 686 个值**（占当时覆盖表的大头）。
+
+```
+Drivers\<arch>\<INF 名>\<base64(SHA-256(INF 文件字节))>
+    值名 = <包身份>~<.mum 里 <update name="…">>   数据 = REG_DWORD 0
+```
+
+- `<arch>` 取**驱动自己**声明的架构（WOW64 包里 `<driver>` 可能声明 `x86`，此时落 `Drivers\x86`，
+  尽管宿主包是 amd64）。
+- INF 文件按组件目录找：`<arch>_<inf>_…`、`amd64_dual_<inf>_…`、`amd64_dual_c_<inf>_…` 都要试
+  （dual 目录里可能放的是 `c_display.inf` 而不是 `display.inf`），逐个候选目录检查文件存在。
+- `--installed <csv>`（`CurrentState & 0x40`）过滤：只收已安装包声明的驱动。
+- 命令：`ocid_manifest cbs-plan-drivers <packagesDir> <winSxsDir> <outFile> [--installed <csv>]`；
+  `assemble-cbs-store.ps1` 只在**现代镜像**（清单以 `DCM\x01` 开头）时自动跑这一步，
+  或显式 `-ForceDrivers`。老镜像（8061/8419）的 `.mum` 里同样有 `<driver>` 声明，但真机台账里
+  没有 `Drivers` 树 ⇒ 绝不能跑。
+- 残余：14 条 Hyper-V/WVMS 虚拟驱动（`mpio.inf`、`msdm.inf` 一类）真机不收录，判据未知；
+  已在覆盖表删掉。
+
+### 8.2 根键形态与 `CCPInterface`
+
+同一版本线里根区的形状也不一致，`Extract-CbsInputs.ps1` 会把形态记进 `root_info.json`，
+`assemble-cbs-store.ps1 -RootInfo` 自动展开：
+
+| 键 | 8061 x86 | 8061 ARM | 8419 | 16299 |
+| --- | --- | --- | --- | --- |
+| `ExecutionState` / `PendingXmlIdentifier` | 有 | 无 | 无 | 无 |
+| `Configuration` | 空键 | 空键 | 空键 | 无 |
+| `ccpinterface` / `CCPInterface` | 小写空键 | 无 | 无 | `CCPInterface` |
+| `Installers` | 有（`Ngen\TicklerArchWoW`） | 无 | `Installers\Shortcut` | `Installers` |
+| `NonCanonicalData` / `TransformSettingsVersion` | 无 | 无 | 无 | 有 |
+
+对应开关：`--minimal`、`--ccpinterface-name <名>`、`--no-configuration`、`--noncanonical-data`、
+`--transform-settings`、`--installers-root`。
+
+### 8.3 现代 `CatalogThumbprint`
+
+8061 的驱动部署**不写** `CatalogThumbprint`（也不写 `Catalogs` 标记）；16299 的驱动部署**要写**。
+判定：`modernCatalog = !g_manifestDictionary.empty()`（给了 `--dcm-dictionary` 即现代镜像）。
+
 
 

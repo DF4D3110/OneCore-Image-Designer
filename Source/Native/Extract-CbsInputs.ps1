@@ -122,6 +122,11 @@ $skeleton = New-Object 'System.Collections.Generic.HashSet[string]'
 $content = New-Object 'System.Collections.Generic.HashSet[string]'
 $root = @{ values = @{}; stacks = @{} }
 $hasCcp = $false
+$ccpKeyName = 'ccpinterface'
+$hasConfiguration = $false
+$hasNonCanonicalData = $false
+$hasInstallers = $false
+$hasTransformSettings = $false
 $hasInstallersShortcut = $false
 
 $componentRoot = 'DerivedData\Components'
@@ -135,7 +140,19 @@ foreach ($line in [IO.File]::ReadLines($truth)) {
         # A family that lives in an older build bucket can have no values at the
         # family key itself (everything sits under v!<version>), so the bucket
         # association must be taken from the key list, not from values.
-        if ($f.Count -ge 2 -and $f[1] -eq 'ccpinterface') { $hasCcp = $true }
+        # 16299 用 `CCPInterface`，8061/8419 用 `ccpinterface`；大小写要照抄真机，
+        # 否则 cbs-diff 会多出一个键（PowerShell 的 -eq 不区分大小写，这里只记原文）。
+        if ($f.Count -ge 2 -and $f[1] -eq 'ccpinterface') { $hasCcp = $true; $ccpKeyName = $f[1] }
+        # 现代镜像（16299+）的根键集合与 8061/8419 不同：没有 Configuration，
+        # 多了 NonCanonicalData / DerivedData\TransformSettingsVersion。
+        if ($f.Count -ge 2) {
+            switch ($f[1]) {
+                'Configuration' { $hasConfiguration = $true }
+                'NonCanonicalData' { $hasNonCanonicalData = $true }
+                'Installers' { $hasInstallers = $true }
+                'DerivedData\TransformSettingsVersion' { $hasTransformSettings = $true }
+            }
+        }
         if ($f.Count -ge 2 -and $f[1] -eq 'Installers\Shortcut') { $hasInstallersShortcut = $true }
         if ($f.Count -ge 2 -and $f[1].StartsWith($vindexRoot + '\')) {
             $relPath = $f[1].Substring($vindexRoot.Length + 1)
@@ -329,6 +346,11 @@ $rootInfo = [ordered]@{
     }
     imageRoot          = $ImageRoot
     ccpinterface       = $hasCcp
+    ccpKeyName         = $ccpKeyName
+    configuration      = $hasConfiguration
+    nonCanonicalData   = $hasNonCanonicalData
+    installers         = $hasInstallers
+    transformSettings  = $hasTransformSettings
     installersShortcut = $hasInstallersShortcut
 }
 foreach ($name in ($root.stacks.Keys | Sort-Object)) {

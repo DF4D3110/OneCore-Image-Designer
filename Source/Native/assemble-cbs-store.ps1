@@ -46,6 +46,10 @@ param(
     [switch] $RootMinimal,
  [switch] $Ccpinterface,
  [switch] $InstallersShortcut,
+    [switch] $NoConfiguration,
+    [switch] $NonCanonicalData,
+    [switch] $TransformSettings,
+    [switch] $InstallersRoot,
     [string[]] $StackEntries = @(),
     [string] $RootInfo,
     [switch] $Transactional,
@@ -54,7 +58,9 @@ param(
     [string] $DiffAgainst,
     [string] $DcmDictionary,
     [string] $FileFlags,
-    [string] $Exe
+    [string] $Exe,
+    [switch] $SkipDrivers,
+    [switch] $ForceDrivers
 )
 
 $ErrorActionPreference = 'Stop'
@@ -75,6 +81,19 @@ if (-not $DcmDictionary) {
     }
 }
 $dcmArgs = @(); if ($DcmDictionary) { $dcmArgs = @('--dcm-dictionary', $DcmDictionary) }
+
+# 清单是否被 DCM 压缩 = 现代镜像（16299+）的硬标志。8061/8419 的 wcp.dll 里就算
+# 找到了字典资源，清单本身也是明文 XML，此时不能启用现代规则（f! DWORD、驱动台账、
+# 驱动部署的 CatalogThumbprint 等）。
+$manifestsAreDcm = $false
+$probeManifest = Get-ChildItem $Manifests -Filter '*.manifest' -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($probeManifest) {
+    $head = New-Object byte[] 4
+    $fs = [IO.File]::OpenRead($probeManifest.FullName)
+    try { [void]$fs.Read($head, 0, 4) } finally { $fs.Dispose() }
+    $manifestsAreDcm = ($head[0] -eq 0x44 -and $head[1] -eq 0x43 -and $head[2] -eq 0x4D -and $head[3] -eq 0x01)
+}
+if (-not $manifestsAreDcm) { $dcmArgs = @() }
 
 if (-not $Arch) {
     $kernel = Join-Path $root 'Windows\System32\ntoskrnl.exe'
@@ -113,6 +132,7 @@ function Invoke-Planner([string] $Label, [string[]] $Arguments) {
 $planComponents  = Join-Path $OutDir 'plan-components.txt'
 $planDeployments = Join-Path $OutDir 'plan-deployments.txt'
 $planVersioned   = Join-Path $OutDir 'plan-versioned.txt'
+$planDrivers     = Join-Path $OutDir 'plan-drivers.txt'
 $planRoot        = Join-Path $OutDir 'plan-root.txt'
 $planMerged      = Join-Path $OutDir 'plan-all.txt'
 $hive            = Join-Path $OutDir $HiveName
@@ -164,6 +184,11 @@ if ($RootInfo) {
     }
     if (-not $PSBoundParameters.ContainsKey('RootMinimal') -and $null -eq $info.executionState) { $RootMinimal = [switch]$true }
     if (-not $PSBoundParameters.ContainsKey('Ccpinterface') -and $info.ccpinterface) { $Ccpinterface = [switch]$true }
+    if ($info.ccpKeyName) { $ccpKeyName = [string]$info.ccpKeyName }
+    if ($null -ne $info.configuration -and -not $info.configuration -and -not $PSBoundParameters.ContainsKey('NoConfiguration')) { $NoConfiguration = [switch]$true }
+    if ($info.nonCanonicalData) { $NonCanonicalData = [switch]$true }
+    if ($info.transformSettings) { $TransformSettings = [switch]$true }
+    if ($info.installers) { $InstallersRoot = [switch]$true }
     if (-not $PSBoundParameters.ContainsKey('InstallersShortcut') -and $info.installersShortcut) { $InstallersShortcut = [switch]$true }
 }
 
@@ -171,17 +196,36 @@ $rootArgs = @('cbs-plan-root', $Arch, $StackVersion, $planRoot)
 if ($Pending) { $rootArgs += @('--pending', $Pending) }
 if ($Time)    { $rootArgs += @('--time', $Time) }
 if ($RootMinimal) { $rootArgs += '--minimal' }
-if ($Ccpinterface) { $rootArgs += '--ccpinterface' }
+if ($Ccpinterface) {
+    $rootArgs += '--ccpinterface'
+    if ($ccpKeyName) { $rootArgs += @('--ccpinterface-name', $ccpKeyName) }
+}
 if ($InstallersShortcut) { $rootArgs += '--installers-shortcut' }
+if ($NoConfiguration) { $rootArgs += '--no-configuration' }
+if ($NonCanonicalData) { $rootArgs += '--noncanonical-data' }
+if ($TransformSettings) { $rootArgs += '--transform-settings' }
+if ($InstallersRoot) { $rootArgs += '--installers-root' }
 foreach ($entry in $StackEntries) {
     if ($entry) { $rootArgs += @('--stack-entry', $entry) }
 }
 Invoke-Planner 'root' $rootArgs
 
+# Drivers 台账（`Drivers\<arch>\<inf>\<base64(SHA-256(INF))>`）是 16299+ 才有的
+# 子系统：8061/8419 的 .mum 里同样声明了 `<driver>`，但真机台账里没有这些键。
+# 现代镜像的标志是清单被 DCM 压缩（需要字典）⇒ 只有给了 -DcmDictionary 才做，
+# 或显式 -ForceDrivers。
+if (-not $SkipDrivers -and $Packages -and $WinSxs -and ($manifestsAreDcm -or $ForceDrivers)) {
+    # Drivers 台账（16299+ 才有）：Drivers\<arch>\<inf>\<base64(SHA-256(INF))>
+    # 值名 = <包身份>~<update 名>，数据 DWORD 0。旧镜像不写任何东西。
+    $drvArgs = @('cbs-plan-drivers', $Packages, $WinSxs, $planDrivers)
+    if ($Installed) { $drvArgs += @('--installed', $Installed) }
+    Invoke-Planner 'drivers' $drvArgs
+}
+
 Write-Host '[assemble] merging plans'
 $merged = @()
-foreach ($p in @($planComponents, $planDeployments, $planVersioned, $planRoot)) {
-    $merged += [IO.File]::ReadAllLines($p)
+foreach ($p in @($planComponents, $planDeployments, $planVersioned, $planDrivers, $planRoot)) {
+    if (Test-Path $p) { $merged += [IO.File]::ReadAllLines($p) }
 }
 $sorted = $merged | Sort-Object -Unique
 if ($Override -and (Test-Path $Override)) {

@@ -2688,6 +2688,8 @@ static void Usage()
     OutLn("      [--pending <32hex>] [--time <timestamp 文本>]  根键值（会话态可显式给）");
     OutLn("      [--minimal] [--ccpinterface] [--installers-shortcut]  根键形态开关");
     OutLn("      --markers: key|appid|thumb|markers（真机导出的安装/启用状态，决定 p!/s!/i!）");
+    OutLn("  ocid_manifest cbs-plan-drivers <packagesDir> <winSxsDir> <outFile>");
+    OutLn("      现代镜像的 Drivers 台账（Drivers\\<arch>\\<inf>\\<base64 SHA-256(INF)> → <包身份>~<update 名>）");
     OutLn("  ocid_manifest cbs-diff <a.txt> <b.txt> [--limit N]   compare two cbs-dump files");
     OutLn("  ocid_manifest cbs-dcm-decode <inDcm> <outXml> --dcm-dictionary <wcp.dll>");
     OutLn("  ocid_manifest cbs-verify-files <plan.txt> <winSxsDir>   check every f! value has its file staged");
@@ -2953,9 +2955,57 @@ std::string Utf16LeHex(const std::wstring& text)
 //   name, Culture=…, [Type=…,] Version=…, PublicKeyToken=…, ProcessorArchitecture=…[, versionScope=NonSxS]
 // 真机样例： `Microsoft-Windows-ServicingStack, Culture=neutral, Version=6.2.8061.0,
 //            PublicKeyToken=31bf3856ad364e35, ProcessorArchitecture=x86, versionScope=NonSxS`
+// 部署 appid 的文化写法：真机 16299 的 appid 里只有 `en-US` 保留大写，
+// 其余（`zh-TW`/`ro-RO`/`nb-NO` …）在 appid 里都是小写——即使组件 identity 里是原样大写。
+// 所以生成 appid 时把非英语文化强制小写（组件 identity 仍保留原样）。
+std::string LowerNonEnglishCultureInText(std::string text)
+{
+    const std::string key = "Culture=";
+    std::size_t pos = text.find(key);
+    if (pos == std::string::npos) return text;
+    pos += key.size();
+    std::size_t end = text.find(',', pos);
+    if (end == std::string::npos) end = text.size();
+    const std::string culture = text.substr(pos, end - pos);
+    const bool english = culture.size() >= 3 &&
+                         (culture[0] == 'e' || culture[0] == 'E') &&
+                         (culture[1] == 'n' || culture[1] == 'N') && culture[2] == '-';
+    if (english) return text;
+    std::string lowered = culture;
+    for (char& c : lowered)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    text.replace(pos, culture.size(), lowered);
+    return text;
+}
 std::string IdentityTextFromManifest(const AssemblyIdentity& identity)
 {
+    // 现代镜像（DCM 压缩清单，16299+）的 identity 文本按下面的规则归一：
+    //   * 名称：驱动语言包资源组件（`<inf>.inf.Resources`）**整体小写**
+    //     （清单 `AudioEndpoint.inf.Resources` → 台账 `audioendpoint.inf.Resources`，613 条）；
+    //   * 文化：按 title case 归一（`en-us`→`en-US`、`zh-tw`→`zh-TW`、`zh-hant-tw`→`zh-Hant-TW`），
+    //     22,167 条实测只有 `neutral` 与 title case 两种；
+    // 8061/8419 的明文清单时代沿用老规则（名称原样、除 en-* 外小写），因为那个时代的记录
+    // 来自安装时的另一份清单（8061 429 条、8419 22 条历史记录）。
+    const bool modernIdentity = !g_manifestDictionary.empty();
     std::string out = ToUtf8(identity.Name());
+    if (modernIdentity)
+    {
+        const std::string suffix = ".inf.resources";
+        if (out.size() >= suffix.size())
+        {
+            std::string tail = out.substr(out.size() - suffix.size());
+            for (char& c : tail)
+                if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            if (tail == suffix)
+            {
+                for (char& c : out)
+                    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+                // 真机保留 `.Resources` 的大小写（589/589 实测：清单 `AudioEndpoint.inf.Resources`
+                // → 台账 `audioendpoint.inf.Resources`；清单 `athw8x.INF.Resources` → 同形）。
+                out.replace(out.size() - suffix.size(), suffix.size(), ".inf.Resources");
+            }
+        }
+    }
     auto add = [&out](const char* key, const std::string& value) {
         out += ", ";
         out += key;
@@ -2963,16 +3013,19 @@ std::string IdentityTextFromManifest(const AssemblyIdentity& identity)
         out += value;
     };
     std::string language = ToUtf8(identity.Language());
-    // 真机 13,325 条 identity 值逐条对拍得到的规则：
-    //   * 清单 `language=""` 或 `language="*"`（.NET 中性程序集）→ `neutral`；
-    //   * 英语文化（`en-*`，大小写任意）**照抄清单**——台账里两种写法都真实存在：
-    //     `en-US`（x86 驱动语言包/资源组件）与 `en-us`（msil 组件）；
-    //   * 其他文化一律小写——`cs-CZ`→`cs-cz`、`sr-Latn-CS`→`sr-latn-cs`、
-    //     `qps-ploc` 保持原样。
+    // 现代镜像（16299+）的台账 Culture 基本是清单 language 的**逐字照抄**（22,167 条实测：
+    // `zh-TW`/`az-Latn-AZ`/`qps-ploc`/`ca-ES-valencia` 全保留）；只有一个固定归一：
+    // msil 组件清单里写 `en-us`，台账里统一成 `en-US`。
     if (language.empty() || language == "*")
         language = "neutral";
+    else if (modernIdentity)
+    {
+        if (language == "en-us") language = "en-US";
+    }
     else
     {
+        // 8061/8419 明文清单时代：英语照抄、其余小写（这两代记录里 8061 429 条、
+        // 8419 22 条是小写，属于安装时另一份清单留下的历史）。
         const bool english = language.size() >= 3 &&
                              (language[0] == 'e' || language[0] == 'E') &&
                              (language[1] == 'n' || language[1] == 'N') && language[2] == '-';
@@ -3081,8 +3134,10 @@ static int CmdCbsPlanComponents(const std::wstring& manifestDir,
                   identityHex);
         lines.push_back("V\t" + keyPath + "\tidentity\t3\t" + identityHex);
 
-        // 清单本身是 DCM 压缩 ⇒ 现代镜像（16299+）：f! 值改成 REG_DWORD 状态位。
-        const bool modernFileValues = !g_manifestDictionary.empty() && DcmIsCompressed(bytes);
+        // 现代镜像（16299+）的 f! 值是 REG_DWORD 状态位，且是**镜像级**属性：
+        // 16299 真机 34,285 条 f! 全部是类型 4，其中不少组件的清单本身仍是明文 XML
+        // （未走 DCM），所以不能按"该清单是否压缩"判定，只能按"是否加载了 DCM 字典"。
+        const bool modernFileValues = !g_manifestDictionary.empty();
         std::string shaHex;
         // 16299+ 的清单是 DCM 压缩（msdelta 补丁）；真机 S256H = 解压后清单 XML 的 SHA-256，
         // 8061 的清单本来就是明文，两种情形都由这里的"解码后再哈希"统一覆盖。
@@ -3687,7 +3742,7 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
                 const bool packageInstalled = installedPackages.empty() ||
                                               installedPackages.count(packageId) != 0;
                 DeploymentPlan& planned = plan[deploymentKey];
-                planned.appId = stored->second;
+                planned.appId = LowerNonEnglishCultureInText(stored->second);
                 planned.driver = stored->second.find(", Type=driverUpdate") != std::string::npos;
                 if (!catalogHex.empty())
                 {
@@ -3741,7 +3796,7 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
         const std::string flagDeploymentKey = CbsDeploymentKeyName(flagIdentity);
         if (plan.count(flagDeploymentKey) != 0) continue;  // .mum 已经产出的不重复
         DeploymentPlan& planned = plan[flagDeploymentKey];
-        planned.appId = stored->second;
+        planned.appId = LowerNonEnglishCultureInText(stored->second);
         planned.driver = stored->second.find(", Type=driverUpdate") != std::string::npos;
         deploymentKeys.insert(flagDeploymentKey);
         flagDerivedKeys.insert(flagDeploymentKey);
@@ -3791,17 +3846,20 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
         lines.insert("V\t" + deploymentPath + "\tappid\t3\t" + appIdHex);
         ++deployments;
 
-        // 驱动部署（Type=driverUpdate）不写 CatalogThumbprint / Catalogs 标记：
-        // 真机 574 个驱动部署全部没有这两个东西（1,703 个带 thumbprint 的部署
-        // 由 1,330 个语言包 + 357 个功能部署 + 16 个其它组成，一个驱动都没有）。
+        // 8061/8419：驱动部署（Type=driverUpdate）不写 CatalogThumbprint / Catalogs
+        // 标记（真机 574 个驱动部署全都没有；1,703 个带 thumbprint 的部署由 1,330 个
+        // 语言包 + 357 个功能部署 + 16 个其它组成，一个驱动都没有）。
+        // 16299+：驱动部署同样写 CatalogThumbprint（实测 497 个驱动部署有、且都等于其
+        // 声明包的 .cat），`Catalogs` 标记也照写。
+        const bool modernCatalog = !g_manifestDictionary.empty();
         const std::string catalogHex = ChooseDeploymentCatalog(planned, resolveOrder);
-        if (!catalogHex.empty() && !planned.driver)
+        if (!catalogHex.empty() && (modernCatalog || !planned.driver))
         {
             const std::wstring catalogText = FromUtf8OrAnsi(catalogHex.c_str());
             lines.insert("V\t" + deploymentPath + "\tCatalogThumbprint\t1\t" +
                          Utf16LeHex(catalogText));
         }
-        if (!planned.driver)
+        if (modernCatalog || !planned.driver)
         {
             for (const std::string& catalog : ChooseCatalogMarks(planned, catalogHex, useSessions))
             {
@@ -4624,6 +4682,198 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
 #endif
 }
 
+// ── Drivers 台账（cbs-plan-drivers）────────────────────────────────────────
+//
+// 现代镜像（16299+）把"驱动包 → INF 文件"的登记从 SOFTWARE\DriverDatabase 挪进了
+// COMPONENTS 的 `Drivers\<arch>\<inf 名>\<base64>`：
+//   * 键尾 base64 = INF 文件字节的 SHA-256（实测 `1394.inf` 的
+//     `rrKKdUqdXZjuBcrxCl0pbe8N7bviosCy2HSfEBCBUJ4=` 与 WinSxS 组件目录里那份
+//     INF 的 SHA-256 完全一致）；
+//   * 值名 = `<包身份文本>~<update 名>`，其中 update 名就是 .mum 里
+//     `<update name="40b0ebbb…">` 的 32 hex；数据恒为 REG_DWORD 0。
+// 16299 真机 686 个叶键/686 个值，全部来自 .mum 的 `<driver inf=…>` 且 INF 已落位。
+static int CmdCbsPlanDrivers(const std::wstring& packagesDir, const std::wstring& winSxsDir,
+                             const std::wstring& installedPath, const std::wstring& outPath)
+{
+#ifdef _WIN32
+    std::map<std::string, std::wstring> componentDirs; // 小写目录名 → 完整路径
+    {
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((winSxsDir + L"\\*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+                    fd.cFileName[0] != L'.')
+                {
+                    const std::wstring full = winSxsDir + L"\\" + fd.cFileName;
+                    componentDirs[ToUtf8(fd.cFileName)] = full;
+                }
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+
+    // 已安装包过滤：.mum 声明的驱动可能属于未安装的可选包（真机 16299 有 10 条这样的
+    // "声明了但台账没有"）。CSV 行格式 `包身份|CurrentState`，0x40 = 已安装。
+    std::set<std::string> installedPackages;
+    if (!installedPath.empty())
+    {
+        std::wstring csvText, csvErr;
+        if (ReadFileUtf8(installedPath, csvText, csvErr))
+        {
+            std::size_t pos = 0;
+            while (pos < csvText.size())
+            {
+                std::size_t eol = csvText.find(L'\n', pos);
+                std::wstring line = csvText.substr(pos, eol == std::wstring::npos ? std::wstring::npos : eol - pos);
+                pos = (eol == std::wstring::npos) ? csvText.size() : eol + 1;
+                while (!line.empty() && (line.back() == L'\r' || line.back() == L' ')) line.pop_back();
+                const std::size_t bar = line.find(L'|');
+                if (bar == std::wstring::npos) continue;
+                const std::wstring keyText = line.substr(0, bar);
+                const std::wstring stateText = line.substr(bar + 1);
+                wchar_t* endp = nullptr;
+                const unsigned long state = wcstoul(stateText.c_str(), &endp, 0);
+                if ((state & 0x40ul) != 0 && !keyText.empty())
+                    installedPackages.insert(AsciiLowerCopy(ToUtf8(keyText)));
+            }
+        }
+    }
+
+    std::set<std::string> lines;
+    int mums = 0;
+    int drivers = 0;
+    int missing = 0;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((packagesDir + L"\\*.mum").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+            ++mums;
+            const std::wstring full = packagesDir + L"\\" + fd.cFileName;
+            std::wstring text;
+            std::wstring readErr;
+            if (!ReadFileUtf8(full, text, readErr)) continue;
+            detail::XmlParser parser(text);
+            detail::XmlNode root;
+            if (!parser.ParseDocument(root)) continue;
+
+            std::vector<const detail::XmlNode*> identities;
+            CollectXmlByLocalName(root, L"assemblyIdentity", identities);
+            if (identities.empty()) continue;
+            const detail::XmlNode& pkg = *identities.front();
+            const std::string pkgName = MumAttr(pkg, L"name");
+            const std::string pkgToken = MumAttr(pkg, L"publicKeyToken");
+            const std::string pkgArch = MumAttr(pkg, L"processorArchitecture");
+            const std::string pkgLang = MumAttr(pkg, L"language");
+            const std::string pkgVersion = MumAttr(pkg, L"version");
+            if (pkgName.empty() || pkgArch.empty() || pkgVersion.empty()) continue;
+            const std::string archLower = AsciiLowerCopy(pkgArch);
+            const std::string culturePart = (pkgLang.empty() || pkgLang == "neutral") ? std::string() : pkgLang;
+            const std::string packageIdentity =
+                pkgName + "~" + pkgToken + "~" + pkgArch + "~" + culturePart + "~" + pkgVersion;
+            if (!installedPackages.empty() &&
+                installedPackages.count(AsciiLowerCopy(packageIdentity)) == 0)
+                continue;
+
+            std::vector<const detail::XmlNode*> updates;
+            CollectXmlByLocalName(root, L"update", updates);
+            for (const detail::XmlNode* update : updates)
+            {
+                const std::string updateName = MumAttr(*update, L"name");
+                if (updateName.empty()) continue;
+                std::vector<const detail::XmlNode*> driverNodes;
+                CollectXmlByLocalName(*update, L"driver", driverNodes);
+                for (const detail::XmlNode* driver : driverNodes)
+                {
+                    const std::string inf = MumAttr(*driver, L"inf");
+                    if (inf.empty()) continue;
+                    // 驱动自己的架构可能和包架构不同：WOW64 包里 `<driver><assemblyIdentity
+                    // processorArchitecture="x86">`（真机 16299 的 ntprint.inf/prnms003.inf
+                    // 就落在 `Drivers\x86` 下，而声明包是 amd64 的 WOW64 包）。
+                    std::string driverArch = archLower;
+                    std::vector<const detail::XmlNode*> driverIdentities;
+                    CollectXmlByLocalName(*driver, L"assemblyIdentity", driverIdentities);
+                    for (const detail::XmlNode* di : driverIdentities)
+                    {
+                        const std::string a = MumAttr(*di, L"processorArchitecture");
+                        if (!a.empty()) { driverArch = AsciiLowerCopy(a); break; }
+                    }
+                    if (driverArch.empty()) driverArch = archLower;
+                    const std::string infLower = AsciiLowerCopy(inf);
+                    const std::string archPrefix = driverArch + "_";
+                    const std::string needle = "_" + infLower + "_";
+                    // 组件目录名形如 `<arch>_<角色名>_<token>_<版本>_<culture>_<hash>`，
+                    // 角色名可能是裸 `<inf>`，也可能带 `dual_`（dual-mode 驱动）等前缀
+                    // （16299 实测 `amd64_dual_acpi.inf_…`）。同一 INF 可能同时存在
+                    // `dual_<inf>` 与 `dual_c_<inf>` 两个目录，但只有前者的目录里真有
+                    // `<inf>` 文件（后者放的是 `c_<inf>`），所以必须逐个候选试文件。
+                    std::wstring dir;
+                    std::wstring infPath;
+                    for (const auto& kv : componentDirs)
+                    {
+                        if (kv.first.compare(0, archPrefix.size(), archPrefix) != 0) continue;
+                        if (kv.first.find(needle) == std::string::npos) continue;
+                        if (kv.first.find("_servicingstack_") != std::string::npos) continue;
+                        const std::wstring candidate = kv.second + L"\\" + FromUtf8OrAnsi(inf.c_str());
+                        if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+                        dir = kv.second;
+                        infPath = candidate;
+                        break;
+                    }
+                    if (dir.empty()) { ++missing; continue; }
+                    if (GetFileAttributesW(infPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+                    {
+                        ++missing;
+                        continue;
+                    }
+                    std::vector<std::uint8_t> bytes;
+                    std::wstring bytesErr;
+                    if (!ReadFileBytes(infPath, bytes, bytesErr) || bytes.empty())
+                    {
+                        ++missing;
+                        continue;
+                    }
+                    const std::string b64 = Base64Encode(Sha256(bytes));
+                    const std::string parent = "Drivers\\" + driverArch + "\\" + inf;
+                    lines.insert("K\tDrivers");
+                    lines.insert("K\tDrivers\\" + archLower);
+                    lines.insert("K\t" + parent);
+                    lines.insert("K\t" + parent + "\\" + b64);
+                    lines.insert("V\t" + parent + "\\" + b64 + "\t" + packageIdentity + "~" +
+                                 updateName + "\t4\t00000000");
+                    ++drivers;
+                }
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+
+    std::FILE* file = nullptr;
+    if (_wfopen_s(&file, outPath.c_str(), L"wb") != 0 || file == nullptr)
+    {
+        Err("无法写入计划文件：" + ToUtf8(outPath));
+        return 2;
+    }
+    for (const std::string& line : lines)
+    {
+        std::fwrite(line.data(), 1, line.size(), file);
+        std::fputc('\n', file);
+    }
+    std::fclose(file);
+    OutLn("drivers=" + std::to_string(drivers) + " mums=" + std::to_string(mums) +
+          " missingInf=" + std::to_string(missing) + " lines=" + std::to_string(lines.size()));
+    return 0;
+#else
+    (void)packagesDir; (void)winSxsDir; (void)outPath;
+    return 2;
+#endif
+}
+
 // ── 根值计划（cbs-plan-root）──────────────────────────────────────────────
 //
 // COMPONENTS 根键上的值由安装会话产生：StoreFormatVersion/StoreArchitecture 是
@@ -4635,7 +4885,12 @@ static int CmdCbsPlanRoot(const std::wstring& archText, const std::wstring& stac
                           const std::wstring& outPath, const std::wstring& pendingHex,
                           const std::wstring& stackTime, bool minimal,
                           bool emitCcpinterface, bool emitInstallersShortcut,
-                          const std::vector<std::string>& stackEntries)
+                          const std::vector<std::string>& stackEntries,
+                          const std::string& ccpKeyName = "ccpinterface",
+                          bool emitConfiguration = true,
+                          bool emitNonCanonicalData = false,
+                          bool emitTransformSettings = false,
+                          bool emitInstallersRoot = false)
 {
     const std::string arch = ToUtf8(archText);
     std::uint32_t archCode = 0;
@@ -4703,15 +4958,25 @@ static int CmdCbsPlanRoot(const std::wstring& archText, const std::wstring& stac
     }
     // 8419 的根有 `ccpinterface` 空键但没有任何会话值；8061 ARM 连这个键都没有
     // => 单独一个开关，别把它绑在 --minimal 上。
-    if (!minimal || emitCcpinterface) addK("ccpinterface");
+    if (!minimal || emitCcpinterface) addK(ccpKeyName);
     // 8419 的根有 `Installers\\Shortcut` 空键（无 Ngen/TicklerArchWoW）。
     if (emitInstallersShortcut)
     {
         addK("Installers");
         addK("Installers\\Shortcut");
     }
-    // `Configuration` 两个真机镜像都有（空的策略键），与 --minimal 无关。
-    addK("Configuration");
+    // `Configuration` 8061/8419 都有（空的策略键），16299 没有 ⇒ 由根信息驱动。
+    // `NonCanonicalData` / `DerivedData\TransformSettingsVersion` 是 16299 才有的
+    // 新顶层键（后者带 Ari/WpnData 两个子键，值是会话态）。
+    if (emitConfiguration) addK("Configuration");
+    if (emitNonCanonicalData) addK("NonCanonicalData");
+    if (emitInstallersRoot) addK("Installers");
+    if (emitTransformSettings)
+    {
+        addK("DerivedData\\TransformSettingsVersion");
+        addK("DerivedData\\TransformSettingsVersion\\Ari");
+        addK("DerivedData\\TransformSettingsVersion\\WpnData");
+    }
 
     std::sort(lines.begin(), lines.end());
     std::wstring writeErr;
@@ -4958,6 +5223,16 @@ int main(int argc, char** argv)
                                      sessionsDir, FromUtf8OrAnsi(argv[4]));
     }
 
+    // cbs-plan-drivers <packagesDir> <winSxsDir> <outFile> [--installed <csv>]
+    if (cmd == L"cbs-plan-drivers" && argc >= 5) {
+        std::wstring installedPath;
+        for (int i = 5; i + 1 < argc; ++i) {
+            if (std::string(argv[i]) == "--installed") installedPath = FromUtf8OrAnsi(argv[++i]);
+        }
+        return CmdCbsPlanDrivers(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]),
+                                 installedPath, FromUtf8OrAnsi(argv[4]));
+    }
+
     // cbs-plan-versioned <manifestDir> <packagesDir> <stagedDir> <stackVersion> <outFile>
     //                   [--buckets <csv>] [--cache <csv>] [--ct <csv>] [--version-flags <csv>] [--mcp <csv>]
     if (cmd == L"cbs-plan-versioned" && argc >= 7) {
@@ -4986,19 +5261,31 @@ int main(int argc, char** argv)
         bool minimal = false;
     bool emitCcpinterface = false;
     bool emitInstallersShortcut = false;
+        std::string ccpKeyName = "ccpinterface";
+        bool emitConfiguration = true;
+        bool emitNonCanonicalData = false;
+        bool emitTransformSettings = false;
+        bool emitInstallersRoot = false;
         std::vector<std::string> stackEntries;
         for (int i = 5; i < argc; ++i) {
             const std::wstring opt = FromUtf8OrAnsi(argv[i]);
             if (opt == L"--minimal") { minimal = true; }
         else if (opt == L"--ccpinterface") { emitCcpinterface = true; }
+        else if (opt == L"--ccpinterface-name" && i + 1 < argc) { emitCcpinterface = true; ccpKeyName = argv[++i]; }
         else if (opt == L"--installers-shortcut") { emitInstallersShortcut = true; }
+        else if (opt == L"--no-configuration") { emitConfiguration = false; }
+        else if (opt == L"--noncanonical-data") { emitNonCanonicalData = true; }
+        else if (opt == L"--transform-settings") { emitTransformSettings = true; }
+        else if (opt == L"--installers-root") { emitInstallersRoot = true; }
             else if (opt == L"--pending" && i + 1 < argc) pending = FromUtf8OrAnsi(argv[++i]);
             else if (opt == L"--time" && i + 1 < argc) when = FromUtf8OrAnsi(argv[++i]);
             else if (opt == L"--stack-entry" && i + 1 < argc) stackEntries.push_back(argv[++i]);
         }
         return CmdCbsPlanRoot(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]),
                               FromUtf8OrAnsi(argv[4]), pending, when, minimal, emitCcpinterface,
-                              emitInstallersShortcut, stackEntries);
+                              emitInstallersShortcut, stackEntries, ccpKeyName,
+                              emitConfiguration, emitNonCanonicalData, emitTransformSettings,
+                              emitInstallersRoot);
     }
 
     if (cmd == L"cbs-dcm-decode" && argc >= 4)
