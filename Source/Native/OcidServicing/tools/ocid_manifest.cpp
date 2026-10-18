@@ -2752,6 +2752,27 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
             markerIt != markers.end()
                 ? markerIt->second
                 : (markersPath.empty() ? std::string("p") : std::string());
+
+        // 部署的 appid 自身也是一条组件记录：真机对**全部** 2,283 个部署组件写
+        // `CF=12`（0x4 清单在 | 0x8 文件在 的闭包状态），其中真正装了载荷的
+        // 1,532 个再写一条 `c!<部署键>`（数据为空，表示"这个组件由该部署安装"）。
+        // 2,276/2,283 命中（剩下 5 个 servicing stack 部署与 2 个没有清单的
+        // .mum 虚构声明）。
+        {
+            CbsIdentity deploymentIdentity;
+            std::string deploymentIdentityErr;
+            if (CbsParseIdentity(planned.appId, deploymentIdentity, deploymentIdentityErr))
+            {
+                const std::string componentPath =
+                    "DerivedData\\Components\\" + CbsComponentKeyName(deploymentIdentity);
+                lines.insert("K\t" + componentPath);
+                lines.insert("V\t" + componentPath + "\tCF\t4\t0c000000");
+                if (!markerList.empty() && !planned.payloads.empty())
+                    lines.insert("V\t" + componentPath + "\t" +
+                                 CbsMarkValueName(deploymentKey) + "\t3\t");
+            }
+        }
+
         if (markerList.empty()) continue;
         for (const std::string& payloadText : planned.payloads)
         {
