@@ -3990,9 +3990,9 @@ static int CmdCbsPlanRoot(const std::wstring& archText, const std::wstring& stac
         addV("", "PendingXmlIdentifier", "3", Utf16LeHex(FromUtf8OrAnsi(pending.c_str())));
     }
     addK("ServicingStackVersions");
-    addV("ServicingStackVersions", stack, "1", Utf16LeHex(FromUtf8OrAnsi(stackLine.c_str())));
+    addV("ServicingStackVersions", stack, "1", Utf16LeHex(FromUtf8OrAnsi(stackLine.c_str()) + L'\0'));
     addV("ServicingStackVersions", "LastWCPVersionToAccessStore", "1",
-         Utf16LeHex(FromUtf8OrAnsi(stack.c_str())));
+         Utf16LeHex(FromUtf8OrAnsi(stack.c_str()) + L'\0'));
     // `--stack-entry <名字>|<时间 版本>`：真机可能记录过多个服务栈（旧栈暂存的
     // 家庭挂在旧桶下，栈版本表里也留着它），这些历史条目只能由输入给出。
     for (const std::string& entry : stackEntries)
@@ -4003,7 +4003,7 @@ static int CmdCbsPlanRoot(const std::wstring& archText, const std::wstring& stac
         const std::string entryText = entry.substr(bar + 1);
         if (entryName.empty() || entryText.empty()) continue;
         addV("ServicingStackVersions", entryName, "1",
-             Utf16LeHex(FromUtf8OrAnsi(entryText.c_str())));
+             Utf16LeHex(FromUtf8OrAnsi(entryText.c_str()) + L'\0'));
     }
     if (!minimal)
     {

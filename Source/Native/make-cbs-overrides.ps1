@@ -25,6 +25,13 @@ foreach ($row in $rows) {
     $sign = $Matches[1]
     $body = $Matches[2]
     $f = $body.Split("`t")
+    if ($f[0] -eq 'K') {
+        # 我们有、truth 整键都没有 -> remove-key（连同子键/值一起删）
+        if ($sign -eq '-' -and $f[1] -ne '') {
+            $result.Add("remove-key`t$($f[1])")
+        }
+        continue
+    }
     if ($f[0] -ne 'V') { continue }
     if ($sign -eq '+') {
         $result.Add("set`t$($f[1])`t$($f[2])`t$($f[3])`t$($f[4])")
