@@ -105,7 +105,7 @@
    - **`CatalogThumbprint` 的会话选择**：现代镜像的 `Sessions` 目录为空，多候选时只能按声明集合
      的最后出现顺序选；少数据会话历史。
 
-## 5. 与真机对拍结果（2026-10，五个镜像都做到 0 差异）
+## 5. 与真机对拍结果（2026-10，六个镜像都做到 0 差异）
 
 把"安装历史"那一组输入喂满（`--markers/--installed/--claims/--flags/--buckets/--cache/
 --ct/--version-flags/--mcp/--sessions`）之后，再对残余套一层**覆盖表**（`-Override`，
@@ -118,15 +118,17 @@
 | 8419 ARM（`E:\ocid_verify\mnt8419`） | 23,328 键 / 61,277 值 | 23,328 键 / 61,277 值 | **only-in-a 0 / 0、only-in-b 0 / 0** | 289 行 |
 | 16299 amd64（挂载的 WIM） | 73,535 键 / 215,978 值 | 73,535 键 / 215,978 值 | **only-in-a 0 / 0、only-in-b 0 / 0** | 865 行 |
 | 9600 amd64（Win8.1，挂载的 wim） | 10,069 键 / 33,493 值 | 10,069 键 / 33,493 值 | **only-in-a 0 / 0、only-in-b 0 / 0** | 71 行 |
+| 17046 arm64（RS4 预览，挂载的 wim） | 62,881 键 / 153,580 值 | 62,881 键 / 153,580 值 | **only-in-a 0 / 0、only-in-b 0 / 0** | 245 行 |
 
-五个镜像的 `cbs-verify-store` 也全部 `result=OK`（8419：`components=7350 deployments=911
+六个镜像的 `cbs-verify-store` 也全部 `result=OK`（8419：`components=7350 deployments=911
 catalogs=393 families=7310`）。
 
 **没有覆盖表时**（纯清单 + 安装历史输入）的差额：x86 `only-in-a 1 键 / 42 值`、
 `only-in-b 0 键 / 42 值`；ARM `only-in-a 0 键 / 20 值`、`only-in-b 0 键 / 53 值`；
 8419 `only-in-a 2 键 / 89 值`、`only-in-b 0 键 / 253 值`；
 16299 `only-in-a 30 键 / 779 值`、`only-in-b 2 键 / 420 值`；
-9600 `only-in-a 16 键 / 55 值`、`only-in-b 0 键 / 28 值`。
+9600 `only-in-a 16 键 / 55 值`、`only-in-b 0 键 / 28 值`；
+17046 `only-in-a 14 键 / 164 值`、`only-in-b 1 键 / 182 值`。
 按成因分（x86）：f256 段序 24/25、identity 大小写 8/8、appid 大小写 5/5、多余 CT 3、
 `UnstagedFiles` 2、多余 `c!` 1、多余 `CatalogThumbprint` 1、多余 Catalogs 键 1 ——
 **全部落在上面第 4 节的不可推导清单里**，没有一项属于算法缺口。
@@ -137,7 +139,7 @@ ARM 侧多出的 33 条 `p!/s!/i!` 是因为 ARM 镜像只有 4 个包、没有 
 Foundation 交付 payload"复刻）。8419 的 253 条里最大一类是"骨架家庭"（已由
 `--skeleton-families` 消掉 216 条），其余是第 4 节第 8 条那些安装历史。
 
-覆盖表规模：x86 54 行、ARM 73 行、8419 289 行、16299 865 行、9600 71 行（含 `set`/`remove`/`add-key`/`remove-key`）。
+覆盖表规模：x86 54 行、ARM 53 行、8419 290 行、16299 865 行、9600 71 行、17046 245 行（含 `set`/`remove`/`add-key`/`remove-key`）。
 它只承担第 4 节那几类历史事实，不含任何"本可以推导"的值。
 
 两个桶的规则（`--buckets` 把家庭指到更早的服务栈桶时）：真机在**两个桶**里都有这个家庭——
@@ -184,7 +186,7 @@ pwsh -NoProfile -File .\ocid-assemble.ps1 `
     -StackVersion '10.0.16299.15 (WinBuild.160101.0800)' `
     -FileFlags 'E:\ocid_verify\one16299\inputs\file_flags.csv' `
     -OutDir 'E:\ocid_verify\one16299' -AutoOverrides -Transactional
-#   pass 1: 73,559 键 / 216,337 值，差 779+420 值；覆盖表 889 行；pass 2: 0/0
+#   pass 1: 73,559 键 / 216,337 值，差 767+408 值；覆盖表 865 行；pass 2: 0/0
 #   现代镜像会自动启用：DCM 解码、f! DWORD、Drivers 台账、驱动部署 CatalogThumbprint
 ```
 
@@ -432,9 +434,11 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
      的整份 PCM 重建。**当前进度**：C++ 构建器 `src/PcmBuild.cpp`（`ocid_manifest cbs-pcm-build`）
      直接由清单 XML 产出整份 `PcmH`，回归闸门是 `ocid_manifest cbs-pcm-diff`（T1 槽数 / T2 type+len /
      T3 payload / T4 整文件）。全语料 2,757 对：
-     **T1 2,745（99.6%）、T2 2,737（99.3%）、T3 2,715（98.5%）、T4 整文件 2,712（98.4%）**，
-     剩余 45 份按形状分 6 族（`MCP` t8 行序 9、小表/type6/10 表行序 7、cache 记录条数 12、
-     记录字段/串池内容 13、头部串 id 表序 3、`<gac>` 位置 1）。
+     **T1 2,752（99.8%）、T2 2,751（99.8%）、T3 2,746（99.6%）、T4 整文件 2,746（99.6%）**，
+     剩余 11 份都是**单样本形态**：`00367` t11 身份表 (列,id) 对顺序、`00487` 多一组句柄记录、
+     `00491/00494/01426` t10 行序与 catRank/t9 f1 语义耦合、`01633` 16B uidx 列表、`01769` 池内 tie 交换、
+     `02496/02512` 槽数 −2/−3、`02962` dir 20B dword1=10、`03040` 28B installerRegistration payload；
+     语料里各只出现一次，写规则就是打补丁 ⇒ 如实留白。
      **已实现**：表槽插入序 = `PCM_KEYS` 序（1,2,9,17,666,210…）、`f2` = 前置记录槽号定律、
      sdddef 16B / `<directory>` 20B / `<memberships>` / `<string>` / `<rescache>` / `<file><hash>` 16B
      记录布局、表头 flags（0x10/0x20/0x40/0x01）、两个 intern 时序修正、`<signatureInfo>` 8B
@@ -447,18 +451,18 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
      **唯一不能推导的输入**：文档第 0 元素记录的 `b0` bit4..6 来自真机未初始化栈字节
      （0..7 都出现，2,757 份里 984 份只有给对 `b0_extra` 才逐字节一致）⇒ `cbs-pcm-build` 的
      第三个参数就是它，按输入处理，不做猜测。
-     中间产物：`E:\ocid_verify\pcm_route8\report.md`（逐条规则 + 真机字节依据 + 剩余族）、
+     中间产物：`E:\ocid_verify\pcm_route9\report.md`（逐条规则 + 真机字节依据 + 剩余单样本）、
      `E:\ocid_verify\pcm_route7\`（Python 参考实现 `buildpcm_self*.py`、`build_all.py` 语料回归）。
-   - **仍开放（45 份，6 族）**：① key-666 `t8` 行序 9 份 —— 86/90 符合"cache GUID 的 64 位哈希升序"，
-     其余 4 份（含 instrumentation/rootDevices）疑走 56 项 kinds 表的秩，表还没定；② 小表与 type6/10
-     表行序 7 份（count<7 的桶序、01104 的 f1 配对）；③ cache 记录条数 ±1..3 共 12 份（各元素发几条、
-     `systemData` ≥2 条多一条 16B uidx 列表）；④ 记录字段/串池内容 13 份；⑤ 槽全同但头部串 id/ident
-     表序不同 3 份；⑥ `<gac>` 位置边界 1 份（01742，样本唯一，未特判）。这 6 族都需要新逆向
-     （桶表顺序、kinds 表键值、串池 intern 顺序），不是靠现有规则调参能过的。
+   - **仍开放（11 份，单样本）**：t11 身份表 (列,id) 对顺序 1、多一组句柄记录 1、t10 行序 × catRank 3、
+     16B uidx 列表 1、池内 tie 交换 1、槽数 −2/−3 共 2、dir 20B dword1 1、28B installerRegistration payload 1。
+     前 34 份（原六族）已在 route9 解出：t8 行按 kind GUID `Data1` 升序 + 头部 GUID 数组按 wcp 固定
+     kind 表序、key-17 行按 `f0` 升序且目录路径 id 按 `SitOrder(h32)`、`<gac>` 文档序、categoryMembership
+     8B + subcategory 串 id、key-9 `<string id>` 按 `SitOrder`、t10 按 `Hash64(subcategory)` 升序、
+     68B `[11]` = 20B deployment blob 槽号。报告 `E:\ocid_verify\pcm_route9\report.md`。
    - 注意**PCM 不影响 COMPONENTS**（`MCP_*`/`(default)` 已经走 `--mcp`/`--version-flags` 输入）。
 2. 覆盖表瘦身：第 4 节剩下的行已逐条试过推导（f256 段序试了架构/文化/CF/组件键哈希序，
    只能解释 56/60 的顺序且方向不定；CT 的归属包不在 `.mum` 声明集合里）⇒ 保留为输入。
-   16299 的 889 行里最大一块是 `Drivers` 台账的 14 条虚拟驱动 + identity 71 条历史写法。
+   16299 的 865 行里最大一块是 `Drivers` 台账的 14 条虚拟驱动 + identity 71 条历史写法。
 3. KTM 事务化：**注册表写入侧已完成**（`cbs-write --transactional`，见 6.1，提交/回滚都实测过）。
    "文件 + 注册表"的原子性已用顺序约定 + 提交前核对解决（见 6.2，`cbs-verify-files` 已接进
    `assemble-cbs-store.ps1`）；真正把文件复制也包进 KTM（`CreateFileTransacted`）没有做，
@@ -486,7 +490,7 @@ DCM 解码（`src/Dcm.cpp`）：字典 = `wcp.dll` 资源 type 614（0x266）id 
 加载失败只提示、不清空管道（8061 清单本来也没压缩）。实测全量 22,167 份清单解压 72 秒、`bad=0`。
 
 本轮两条大规则修好后，pass 1 的差额从 61,942/66,936 值降到 **779/420 值**（键 73,559/73,537），
-自动覆盖表从 67,001 行降到 **889 行**，pass 2 之后 0/0。
+自动覆盖表从 67,001 行降到 **865 行**，pass 2 之后 0/0。
 
 ### 8.1 `Drivers` 台账（16299+ 独有子系统）
 
@@ -553,6 +557,7 @@ Drivers\<arch>\<INF 名>\<base64(SHA-256(INF 文件字节))>
 | 10.0.10586 / 14357 | DCM | DWORD | 同上 | 无 | 有 `NonCanonicalData` | 未组装 |
 | 10.0.16212 | DCM | DWORD | 同上 | **有（骨架）** | `CCPInterface`（大写）、`TransformSettingsVersion` | 未组装 |
 | 10.0.16299 | DCM | DWORD | 同上 | 1,374 键 | 载荷名折叠 `__`、identity 归一 | 865 |
+| 10.0.17046 | DCM | DWORD | 同上 | 723(arm64)+5(arm)+5(x86) | **复合架构**（`arm64.arm`/`arm64.x86`/`wow64` 各占独立组件键前缀）、`CCPInterface`、无 `Configuration` | 245 |
 
 档位阈值（`CbsProfileForBuild`）：
 

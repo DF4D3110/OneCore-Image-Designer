@@ -2393,6 +2393,7 @@ static int CmdCbsVerifyFiles(const std::wstring& planPath, const std::wstring& w
 
     std::map<std::string, std::vector<std::string>> expected; // 组件键 → 文件名（小写）
     std::set<std::string> componentKeys;
+    std::size_t modernFileFlags = 0;
 
     const std::string text = ToUtf8(raw);
     std::size_t pos = 0;
@@ -2426,6 +2427,13 @@ static int CmdCbsVerifyFiles(const std::wstring& planPath, const std::wstring& w
         componentKeys.insert(componentKey);
 
         if (valueName.rfind("f!", 0) != 0) continue;
+        // 现代镜像（>=9600）的 f! 是 REG_DWORD 文件状态位（类型 4），没有文件名可推导，
+        // 只统计条数；否则会把状态字当成文件名去找几万个不存在的"文件"。
+        if (fields[3] == "4")
+        {
+            ++modernFileFlags;
+            continue;
+        }
         std::vector<std::string>& names = expected[componentKey];
 
         const std::string& hex = fields[4];
@@ -2509,12 +2517,16 @@ static int CmdCbsVerifyFiles(const std::wstring& planPath, const std::wstring& w
     // 反向核对：台账里没有 f! 的组件，不该在 WinSxS 下留下目录。
     // 真机 8061 两个镜像都恰好成立（有目录 ⇔ 有 f!），所以这里只报数、不判失败，
     // 免得"只落了部分载荷"的中间态被误判成计划错误。
-    for (const auto& key : componentKeys)
+    // 现代镜像（f! 是状态位）没有文件名可核对，反查目录这一项对它们没有意义。
+    if (filesExpected > 0)
     {
-        if (expected.count(key) != 0) continue;
-        if (fs::is_directory(root / fs::path(key), ec)) ++strayDirs;
-    }
+        for (const auto& key : componentKeys)
+        {
+            if (expected.count(key) != 0) continue;
+            if (fs::is_directory(root / fs::path(key), ec)) ++strayDirs;
+        }
 
+    }
     OutLn("components=" + std::to_string(componentKeys.size()) +
           " componentsWithFiles=" + std::to_string(withFiles) +
           " files=" + std::to_string(filesExpected) +
@@ -2522,6 +2534,8 @@ static int CmdCbsVerifyFiles(const std::wstring& planPath, const std::wstring& w
           " filesMissing=" + std::to_string(filesMissing) +
           " countMismatch=" + std::to_string(countMismatch) +
           " strayDirs=" + std::to_string(strayDirs));
+    if (modernFileFlags != 0)
+        OutLn("modern-file-flags: " + std::to_string(modernFileFlags) + "（类型 4 的状态位，不按文件名核对）");
     for (const std::string& s : samples) OutLn("  - " + s);
     return (dirsMissing == 0 && filesMissing == 0 && countMismatch == 0) ? 0 : 1;
 #else

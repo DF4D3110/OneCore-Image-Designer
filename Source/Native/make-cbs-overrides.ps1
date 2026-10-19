@@ -58,15 +58,22 @@ foreach ($row in $rows) {
     }
 }
 # truth 有、我们完全没有的**空键**（没有任何值能隐式建出来）→ add-key。
+# 值的路径会隐式建出它的**所有祖先键**，所以先把值路径及其祖先都收进集合，
+# 再按 O(1) 查表判断（早先按"每个缺键扫一遍值表"是 O(n²)，17046 上要跑几小时）。
+$implied = New-Object 'System.Collections.Generic.HashSet[string]'
+foreach ($v in $coveredByValue) {
+    $p = $v
+    while ($p -ne '' -and $p -ne $null) {
+        if (-not $implied.Add($p)) { break }
+        $i = $p.LastIndexOf('\')
+        if ($i -lt 0) { break }
+        $p = $p.Substring(0, $i)
+    }
+}
 foreach ($k in $missingKeys) {
-    $covered = $false
-    foreach ($v in $coveredByValue) {
-        if ($v -eq $k -or $v.StartsWith($k + '\')) { $covered = $true; break }
-    }
-    if (-not $covered) {
-        $line = "add-key`t$k"
-        if ($seen.Add($line)) { $result.Add($line) }
-    }
+    if ($implied.Contains($k)) { continue }
+    $line = "add-key`t$k"
+    if ($seen.Add($line)) { $result.Add($line) }
 }
 [IO.File]::WriteAllLines($Out, $result)
 "overrides lines=$($result.Count)"

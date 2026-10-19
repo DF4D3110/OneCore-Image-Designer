@@ -759,17 +759,17 @@ std::string BuildFileRecord(Interner& inter, const Elem& e, int sddBlob, std::ui
     });
 }
 
-std::string BuildDocRecord(std::size_t nDep, std::size_t nFile, bool hasMvid,
+// [11] 是**位置**而不是计数：它是 20B <deployment> 常量 blob 的槽号，也就是
+// 该 blob 之前已发射的元素记录（依赖对、文件组、字符串值…）的条数。02734/02786/
+// 02805 三个带 <localization> 的部署清单证明：2*nDep+4*nFile 的计数式公式少算了
+// 字符串值槽（3/5/50 → 5 = 4+1、8 = 6+2、50 = 48+2）。
+std::string BuildDocRecord(std::size_t nDep, std::uint32_t depBlobSlot, bool hasMvid,
                            bool hasDeployment, bool hasNoInheritable, bool hasGac,
-                           bool wild, bool hasHashFile, bool hasSourcePath,
-                           bool hasInfFile) {
+                           bool wild, bool hasHashFile, bool hasSourcePath) {
     std::uint32_t flags = 1;
     if (hasDeployment) flags |= 8;
     if ((hasNoInheritable && !hasSourcePath) || (hasGac && hasHashFile)) flags |= 16;
-    const std::uint32_t d11 =
-        hasDeployment
-            ? static_cast<std::uint32_t>(2 * nDep + (hasInfFile ? 4 * nFile : nFile))
-            : kNoId;
+    const std::uint32_t d11 = hasDeployment ? depBlobSlot : kNoId;
     return PackU32({
         1u,
         flags,
@@ -1174,6 +1174,9 @@ const char* const kCacheGuidTaskScheduler = "11596b389eb62d4da3ab796d2ec6af38";
 // <firewallRule> 全族共用一个 cache 记录（uidx 列表）和一个 GUID；
 // 该 GUID 从 02969/03001 的头部 GUID 表（offset 0x90）直接读出。
 const char* const kCacheGuidFirewallRule = "698dce68ae269f4fbea750613e7ab5c1";
+// 56 项 kinds 表 idx=21 的 GUID（上面 wcp_x86.dll 0x101F35C8 直接读出的第 21 项）；
+// 02915 的头部出现过，元素 local 名未知（可能是 lodctrData 变体）。
+const char* const kCacheGuidLodctrDat = "9bcb3d9a96a7df41b45577eba6a1ec1a";
 
 bool IsCacheRecordElement(const std::string& local) {
     return local == "lodctr" || local == "bfsvc" || local == "rescache" ||
@@ -1208,6 +1211,7 @@ int CacheRank(const std::string& local) {
 std::string CacheGuid(const std::string& local) {
     if (local == "mof") return kCacheGuidMof;
     if (local == "lodctr") return kCacheGuidLodctr;
+    if (local == "lodctrDat") return kCacheGuidLodctrDat;
     if (local == "bfsvc") return kCacheGuidBfsvc;
     if (local == "rescache") return kCacheGuidRescache;
     if (local == "instrumentation" || local == "events") return kCacheGuidInstrumentation;
@@ -1218,6 +1222,7 @@ std::string CacheGuid(const std::string& local) {
     if (local == "serviceData") return kCacheGuidServiceData;
     if (local == "securityDescriptor") return kCacheGuidSecurityDescriptor;
     if (local == "taskScheduler") return kCacheGuidTaskScheduler;
+    if (local == "firewallRule") return kCacheGuidFirewallRule;
     return std::string();
 }
 
@@ -1225,6 +1230,37 @@ std::string GuidBytes(const std::string& hex) {
     std::string out;
     HexDecode(hex, out);
     return out;
+}
+
+// 头部 cache GUID 表的**条目顺序**：与发射序（CacheRank/56 项 kinds 表 idx）不同，
+// 是另一张静态 kinds 表。证据（全语料 92 份多记录样本逐个两两约束，DAG 无环，
+// 该线性扩展 92/92 命中）：bfsvc<instrumentation<lodctr<lodctrDat<
+// securityDescriptor<serviceData<rootDevices<sppInstaller<mof<rescache<
+// taskScheduler<timezoneresourceAI。典型反例：00487 真机 [bfsvc,rescache]
+// （CacheRank 序相反）、02713 [instrumentation,taskScheduler]、02731
+// [instrumentation,securityDescriptor,serviceData]（完全逆发射序）。
+// 该顺序来自二进制里的静态表，清单 XML 里没有对应信息；未观测到的对
+// （firewallRule/ngen 与其他 kind 的组合）按已知约束的线性扩展放在末尾。
+const char* const kCacheGuidOrder[] = {
+    "bfsvc", "instrumentation", "lodctr", "lodctrDat", "securityDescriptor",
+    "serviceData", "rootDevices", "sppInstaller", "mof", "rescache",
+    "taskScheduler", "timezoneresourceAI", "firewallRule", "ngen",
+};
+
+int CacheGuidRank(const std::string& guid) {
+    for (int i = 0; i < static_cast<int>(sizeof(kCacheGuidOrder) / sizeof(*kCacheGuidOrder)); ++i) {
+        if (GuidBytes(CacheGuid(kCacheGuidOrder[i])) == guid) return i;
+    }
+    return 1000;
+}
+
+// t8 行序：按 GUID 的 Data1（前 4 字节小端 u32）升序（全语料 92/92）。
+std::uint32_t GuidData1(const std::string& guid) {
+    if (guid.size() < 4) return 0;
+    return static_cast<std::uint32_t>(static_cast<std::uint8_t>(guid[0])) |
+           (static_cast<std::uint32_t>(static_cast<std::uint8_t>(guid[1])) << 8) |
+           (static_cast<std::uint32_t>(static_cast<std::uint8_t>(guid[2])) << 16) |
+           (static_cast<std::uint32_t>(static_cast<std::uint8_t>(guid[3])) << 24);
 }
 
 // ---------------------------------------------------------------------------
@@ -1378,7 +1414,9 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     }
 
     std::vector<Row> fileRows;                  // key 1
-    std::size_t membSlot = kNoId;               // <memberships> 的 8B 记录
+    // 每个 <categoryMembership> 各有一条 8B 记录 {categoryInstance uidx, -1}，
+    // 不是整个 <memberships> 共用一条（02531：槽 7/8/9 = -1/84/128）。
+    std::unordered_map<std::uint32_t, std::size_t> membSlotByElem;
     std::vector<Row> dirRows;                   // key 17
     std::vector<DirObj> dirObjs;
     std::vector<Row> sddRows;                   // key 210
@@ -1414,14 +1452,17 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
 
     // ---- 3b. <gac> 引导记录（36B）-----------------------------------------
     //
-    // 位置不是固定的 slot 0：41 个带 <gac> 的样本里 36 个在 0、4 个在 2
-    // （02543/02544/02547/02550，恰好各有 1 条根 <dependency> = 2 个槽）、
-    // 01742 在 5（该样本第一条 <file> 没有 [17] 引用，第二条才有）。
-    // 即：它排在**依赖记录之后、第一个文件组之前**。dw0 只取决于两个可选属性：
+    // 它是**惰性**发射的：位置在"第一条引用它的 <file> 之前"，而不是固定 slot 0。
+    // 41 个带 <gac> 的样本里 36 个第一条 <file> 就带 <gac>（slot 0），
+    // 4 个恰好有 1 条根 <dependency> = 2 个槽（slot 2）；01742 的第一条
+    // <file> 没有 <gac>，第二条才有 → 它排在第一条文件记录之后（slot 5），
+    // 且 clrversion/managedculture 的 id 也顺延到 6/7。
+    // dw0 只取决于两个可选属性：
     //   clrversion + managedculture → 22，managedculture → 6，clrversion → 31。
     // 它作为 blob 与槽同时入池（id == 槽号），文件记录 [17] 直接引用该槽号。
     std::int32_t gacBlob = -1;
-    if (gacEl >= 0) {
+    const auto emitGacBlob = [&]() -> bool {
+        if (gacEl < 0) return false;
         const auto ga = AttrsOf(elems[static_cast<std::size_t>(gacEl)]);
         std::string mv = Attr(ga, "managedversion");
         if (mv.empty()) mv = "0.0.0.0";
@@ -1462,18 +1503,9 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
         }
         AppendSlot(slots, 1, blob);
         gacBlob = static_cast<std::int32_t>(slots.size() - 1u);
-    }
+        return true;
+    };
 
-    // ---- 3c. <ngen parameter> 进串池 --------------------------------------
-    // 5 个带 parameter 属性的样本（02543/02544/02547/02550/03005）真机串池里
-    // 都有该字符串，且它的 id 排在 gac 的 clrversion 之后、文件属性串之前
-    // （02543：0="4.0"、1="/NoDependencies /queue:1"、2=文件名）。它不被任何
-    // 记录引用，只是参与池，所以这里按文档序把值串入池即可。
-    for (const Elem& e : elems) {
-        if (e.local != "ngen") continue;
-        const std::string prm = Attr(AttrsOf(e), "parameter");
-        if (!prm.empty()) inter.String(prm);
-    }
 
     // ---- 4. 元素记录（文档序）--------------------------------------------
     std::uint32_t fileOrd = 0;
@@ -1515,6 +1547,22 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                         if (Attr(sa, "pageHash") == "true") sigFlags |= 2u;
                         if (Attr(sa, "PETrust") == "true") sigFlags |= 4u;
                     }
+                }
+            }
+
+            // <gac>/<ngen> 子元素在"文档序"位置发射：字符串池的 id 也按这个
+            // 顺序分配 —— 01742 第二条 file 的 gac 得到 clrversion/managedculture
+            // 的 id 6/7（第一条 file 的属性串 0..5 之后）；02543 的 gac 在文件
+            // 子元素最前，于是 clrversion=0，紧随其后的 ngen parameter=1，文件
+            // 名才拿到 2。故这里按 e.kids 顺序交错处理，而不是在记录末尾补。
+            for (std::uint32_t k : e.kids) {
+                if (elems[k].local == "gac") {
+                    if (gacBlob < 0) {
+                        if (!emitGacBlob()) return false;
+                    }
+                } else if (elems[k].local == "ngen") {
+                    const std::string prm = Attr(AttrsOf(elems[k]), "parameter");
+                    if (!prm.empty()) inter.String(prm);
                 }
             }
 
@@ -1613,14 +1661,10 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                 AppendSlot(slots, 9, hashPayload);
             }
 
-            // <gac> 子元素：file 自己 interning 名字之前先入池两个属性串。
+            // <gac> 子元素：blob 已在本次迭代开头惰性发出。
             std::int32_t gblob = -1;
             if (hGac && gacEl >= 0) {
                 gblob = gacBlob;
-                const auto ga = AttrsOf(elems[static_cast<std::size_t>(gacEl)]);
-                for (const char* k2 : {"clrversion", "managedculture"}) {
-                    if (!Attr(ga, k2).empty()) inter.String(Attr(ga, k2));
-                }
             }
             const std::int32_t nameId = inter.String(Attr(AttrsOf(e), "name"));
             fileRows.push_back(Row{
@@ -1654,10 +1698,45 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             AppendSlot(slots, 1,
                        PackU32({1u, static_cast<std::uint32_t>(nid), did, sid}));
         } else if (e.local == "memberships" && e.parent == 0) {
-            membSlot = slots.size();
-            AppendSlot(slots, 1, PackU32({kNoId, kNoId}));
+            // 每个 membership 一条 8B {categoryInstance uidx 或 -1, -1}；
+            // 载荷完全相同的记录只发一条（01091 两个无 instance → 1 条；
+            // 02531 三条互异 → 3 条；02772 只有带 instance 的那条）。
+            std::map<std::string, std::size_t> membSeen;
+            for (std::uint32_t k : e.kids) {
+                if (elems[k].local != "categoryMembership") continue;
+                std::uint32_t ci = kNoId;
+                for (std::uint32_t kk : elems[k].kids) {
+                    if (elems[kk].local == "categoryInstance") {
+                        ci = elems[kk].uidx;
+                        break;
+                    }
+                }
+                const std::string key8 =
+                    PackU32({ci, kNoId});
+                auto it = membSeen.find(key8);
+                if (it != membSeen.end()) {
+                    membSlotByElem[k] = it->second;
+                    continue;
+                }
+                const std::size_t sl = slots.size();
+                AppendSlot(slots, 1, key8);
+                membSeen[key8] = sl;
+                membSlotByElem[k] = sl;
+            }
         } else if (e.local == "categoryMembership") {
             membElems.push_back(idx);
+            if (membSlotByElem.find(idx) == membSlotByElem.end()) {
+                // 不在根 <memberships> 下的成员（正常语料不会走到）
+                std::uint32_t ci = kNoId;
+                for (std::uint32_t kk : e.kids) {
+                    if (elems[kk].local == "categoryInstance") {
+                        ci = elems[kk].uidx;
+                        break;
+                    }
+                }
+                membSlotByElem[idx] = slots.size();
+                AppendSlot(slots, 1, PackU32({ci, kNoId}));
+            }
         } else if (e.local == "directory") {
             const auto dat = AttrsOf(e);
             std::string dsdd;
@@ -1706,6 +1785,11 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
         }
     }
 
+    // 兜底：<gac> 存在但没有任何 <file> 引用它（语料 41/41 都有引用）。
+    if (gacEl >= 0 && gacBlob < 0) {
+        if (!emitGacBlob()) return false;
+    }
+
     // ---- 5. 文档常量 / micro-DOM / 文档记录 ------------------------------
     // <deployment> 发 20B 常量 blob，每个 <configuration> 发 [0, uidx]；两者
     // 都是 handler 期发射，按文档位置排序（没有同时出现的样本）。
@@ -1714,8 +1798,10 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     for (std::uint32_t c : confEls) region.emplace_back(elems[c].uidx, 1);
     std::sort(region.begin(), region.end());
     std::vector<std::pair<std::uint32_t, std::size_t>> confSlots;
+    std::size_t depBlobSlot = kNoId;
     for (const auto& item : region) {
         if (item.second == 0) {
+            depBlobSlot = slots.size();
             AppendSlot(slots, 1, BuildHash20());
         } else {
             confSlots.emplace_back(item.first, slots.size());
@@ -1735,7 +1821,8 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
 
     // ---- 6. cache 记录（静态 kinds 表顺序，不是文档序）-------------------
     std::vector<std::uint32_t> cacheSlots;
-    std::vector<std::string> cacheGuids;
+    std::vector<std::string> recGuids;   // 与 cacheSlots 平行：该记录对应的 GUID（migration 为空）
+    std::vector<std::string> cacheGuids; // 头部 GUID 表（去重后按静态 kinds 表序）
     std::vector<std::size_t> celist;
     for (std::size_t i = 0; i < elems.size(); ++i) {
         const std::string& ln = elems[i].local;
@@ -1777,7 +1864,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             std::string record;
             for (std::uint32_t m : mofs) record += PackU32({elems[m].uidx});
             AppendSlot(slots, 1, record);
-            cacheGuids.push_back(GuidBytes(kCacheGuidMof));
+            recGuids.push_back(GuidBytes(kCacheGuidMof));
         } else if (ln == "instrumentation") {
             std::int32_t ev = -1;
             for (std::uint32_t k : e.kids) {
@@ -1787,11 +1874,11 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                 ev >= 0 ? elems[static_cast<std::size_t>(ev)].uidx : e.uidx;
             cacheSlots.push_back(static_cast<std::uint32_t>(slots.size()));
             AppendSlot(slots, 1, PackU32({uidx}));
-            cacheGuids.push_back(GuidBytes(kCacheGuidInstrumentation));
+            recGuids.push_back(GuidBytes(kCacheGuidInstrumentation));
         } else if (ln == "events") {
             cacheSlots.push_back(static_cast<std::uint32_t>(slots.size()));
             AppendSlot(slots, 1, PackU32({e.uidx}));
-            cacheGuids.push_back(GuidBytes(kCacheGuidInstrumentation));
+            recGuids.push_back(GuidBytes(kCacheGuidInstrumentation));
         } else if (ln == "firewallRule") {
             // <firewallRule> 全族合成**一个** uidx 列表槽（02969：7 条规则 → 28B；
             // 03001：2 条 → 8B；02972：14 条 → 56B），且不贡献 GUID
@@ -1804,21 +1891,48 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                 if (w.local == "firewallRule") record += PackU32({w.uidx});
             }
             AppendSlot(slots, 1, record);
-            cacheGuids.push_back(GuidBytes(kCacheGuidFirewallRule));
+            recGuids.push_back(GuidBytes(kCacheGuidFirewallRule));
         } else {
             const std::size_t slot = slots.size();
             cacheSlots.push_back(static_cast<std::uint32_t>(slot));
             AppendSlot(slots, 1, PackU32({e.uidx}));
             if (ln != "migration") {
-                cacheGuids.push_back(GuidBytes(CacheGuid(ln)));
+                recGuids.push_back(GuidBytes(CacheGuid(ln)));
             } else {
                 migrSlot = slot;
+                recGuids.push_back(std::string()); // 占位，保持与 cacheSlots 对齐
             }
         }
     }
-    std::vector<std::uint32_t> cacheSlotsNoMig;
-    for (std::uint32_t s : cacheSlots) {
-        if (s != migrSlot) cacheSlotsNoMig.push_back(s);
+    // 头部 GUID 表：去重后按静态 kinds 表顺序（不是发射序，也不是文档序）。
+    {
+        for (const std::string& g : recGuids) {
+            if (g.empty()) continue;
+            bool seen = false;
+            for (const std::string& h : cacheGuids) {
+                if (h == g) { seen = true; break; }
+            }
+            if (!seen) cacheGuids.push_back(g);
+        }
+        std::stable_sort(cacheGuids.begin(), cacheGuids.end(),
+                         [](const std::string& a, const std::string& b) {
+                             return CacheGuidRank(a) < CacheGuidRank(b);
+                         });
+    }
+    // t8 行: {guid 表下标, 记录槽}；migration 不参与。
+    struct CacheRow {
+        std::uint32_t guidIdx = 0;
+        std::uint32_t slot = 0;
+    };
+    std::vector<CacheRow> cacheRows;
+    for (std::size_t i = 0; i < cacheSlots.size(); ++i) {
+        if (cacheSlots[i] == migrSlot) continue;
+        int idx = -1;
+        for (std::size_t g = 0; g < cacheGuids.size(); ++g) {
+            if (cacheGuids[g] == recGuids[i]) { idx = static_cast<int>(g); break; }
+        }
+        if (idx < 0) continue; // 无 GUID 的记录不进 key-666
+        cacheRows.push_back(CacheRow{static_cast<std::uint32_t>(idx), cacheSlots[i]});
     }
 
     // ---- 7. 68B 文档记录 --------------------------------------------------
@@ -1838,14 +1952,11 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             if (!Attr(at, "hash").empty()) hasHashFile = true;
             if (!Attr(at, "sourcePath").empty()) hasSourcePath = true;
         }
-        bool hasInfFile = false;
-        for (const Elem& e : elems) {
-            if (e.local == "infFile") { hasInfFile = true; break; }
-        }
         AppendSlot(slots, 1,
-                   BuildDocRecord(nDepTotal, files.size(), hasMvid, hasDeployment,
-                                  hasNoInh, hasGac, wild, hasHashFile, hasSourcePath,
-                                  hasInfFile));
+                   BuildDocRecord(nDepTotal,
+                                  static_cast<std::uint32_t>(depBlobSlot), hasMvid,
+                                  hasDeployment, hasNoInh, hasGac, wild, hasHashFile,
+                                  hasSourcePath));
     }
 
     // ---- 8. GeneratePCM 表槽（PCM_KEYS 固定调用序）-----------------------
@@ -1879,7 +1990,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             std::string payload;
             if (!MakeRecordTable(6, rows, true, payload, error)) return false;
             tbls.push_back(Slot{6, payload});
-        } else if (key == 2 && !membElems.empty() && membSlot != kNoId) {
+        } else if (key == 2 && !membElems.empty() && !membSlotByElem.empty()) {
             const std::size_t base = idents.size() - cats.size();
             std::vector<std::uint32_t> hashes;
             hashes.reserve(idents.size());
@@ -1900,28 +2011,46 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                 return catRank[a] < catRank[b];
             });
             std::vector<std::pair<std::uint32_t, std::size_t>> f1(membElems.size());
+            std::vector<std::uint64_t> subHash(membElems.size(), 0);
             for (std::size_t i : seq) {
                 std::vector<Row> l9;
                 l9.push_back(Row{0u, static_cast<std::uint32_t>(i),
-                                 static_cast<std::uint32_t>(membSlot)});
+                                 static_cast<std::uint32_t>(membSlotByElem[membElems[i]])});
                 std::string l9payload;
                 if (!MakeRecordTable(9, l9, false, l9payload, error)) return false;
                 const std::uint32_t t9s = static_cast<std::uint32_t>(slots.size());
                 AppendSlot(slots, 9, l9payload);
                 const std::uint32_t t6s = static_cast<std::uint32_t>(slots.size());
+                std::string sub;
+                for (std::uint32_t kk : elems[membElems[i]].kids) {
+                    if (elems[kk].local == "categoryInstance") {
+                        sub = Attr(AttrsOf(elems[kk]), "subcategory");
+                        break;
+                    }
+                }
                 {
+                    // t6 的 f1 是该 membership 的 <categoryInstance subcategory>
+                    // 字符串 id；没有 categoryInstance / 没有 subcategory 时为
+                    // 空串 id（02531: 15/16/17 = ''/AppMgmt/netsvcs）。
                     std::vector<Row> rows;
                     rows.push_back(Row{static_cast<std::uint32_t>(Hash64("") & kM32),
-                                       inter.StringEvenEmpty(""), t9s});
+                                       inter.StringEvenEmpty(sub), t9s});
                     std::string payload;
                     if (!MakeRecordTable(6, rows, true, payload, error)) return false;
                     AppendSlot(slots, 6, payload);
                 }
                 f1[i] = {nDep + static_cast<std::uint32_t>(catRank[i]) + 1u, t6s};
+                subHash[i] = Hash64(sub);
             }
+            std::vector<std::size_t> rowOrd(membElems.size());
+            for (std::size_t i = 0; i < rowOrd.size(); ++i) rowOrd[i] = i;
+            std::stable_sort(rowOrd.begin(), rowOrd.end(),
+                             [&subHash](std::size_t a, std::size_t b) {
+                                 return subHash[a] < subHash[b];
+                             });
             std::vector<Row> rows;
             rows.reserve(membElems.size());
-            for (std::size_t i = 0; i < membElems.size(); ++i) {
+            for (std::size_t i : rowOrd) {
                 rows.push_back(Row{static_cast<std::uint32_t>(
                                        Hash64(std::to_string(f1[i].first)) & kM32),
                                    f1[i].first, static_cast<std::uint32_t>(f1[i].second)});
@@ -1931,6 +2060,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             tbls.push_back(Slot{10, payload});
         } else if (key == 17 && !dirObjs.empty()) {
             std::vector<std::string> paths;
+            std::vector<std::uint32_t> pathHash;
             for (const DirObj& d : dirObjs) {
                 const auto dat = AttrsOf(elems[d.elem]);
                 const std::string imp = Attr(dat, "importPath");
@@ -1944,46 +2074,63 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                         target.payload[15] = static_cast<char>((ipath >> 24) & 0xFFu);
                     }
                 }
-                const std::string path = Attr(dat, "destinationPath");
-                paths.push_back(path);
+                paths.push_back(Attr(dat, "destinationPath"));
                 // key-17 的 f0 用 UTF-16 码点哈希（A..Z 折小写），不是按字节的 Hash64：
                 // 01104 的 37 个目录 f0 只有 Hash64CodePoints 能全中。
-                dirRows.push_back(Row{static_cast<std::uint32_t>(Hash64CodePoints(path) & kM32),
-                                      static_cast<std::uint32_t>(inter.String(path)),
-                                      static_cast<std::uint32_t>(d.slot)});
+                pathHash.push_back(static_cast<std::uint32_t>(Hash64CodePoints(paths.back()) & kM32));
             }
-            // count<7 时 f0 数组被省略，但行序仍按源表的完整 64 位 h64 % 桶数
-            // 迭代（01048：SR 桶 6、Lexicon 桶 0 → 参考实现先列 Lexicon）。
-            std::vector<Row> rows;
-            if (dirRows.size() >= 7) {
-                // count>=7 时表里随行输出 f0 数组，真机按 f0 升序排列
-                // （01104：37 个目录的 f0 严格升序，0x017c97e9 < 0x039f0ae1 < ...）。
-                rows = dirRows;
-                SortAsc(rows);
-            } else {
-                // count<7 时 f0 数组被省略，只能按 64 位 h64 % 桶排（01048：Lexicon 桶 0 在前）。
-                const std::uint32_t n = PoolN(dirRows.size());
-                std::vector<std::size_t> order(dirRows.size());
-                for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
-                std::stable_sort(order.begin(), order.end(),
-                                 [&paths, n](std::size_t a, std::size_t b) {
-                                     const std::uint64_t ha = Hash64CodePoints(paths[a]) % n;
-                                     const std::uint64_t hb = Hash64CodePoints(paths[b]) % n;
-                                     if (ha != hb) return ha < hb;
-                                     return a < b;
-                                 });
-                rows.reserve(dirRows.size());
-                for (std::size_t i : order) rows.push_back(dirRows[i]);
+            // 目录路径是**成批**入池的：参考实现的字符串表按自身桶序给这一批分配 id，
+            // 不是按文档序（01104：37 个目录的 id 5..41 正好等于
+            // SitOrder(Hash64CodePoints(path))）。已被文件记录提前入池的路径
+            // （01048 的 id 2/16）沿用旧 id，所以这里按批序调用 String 是安全的。
+            std::vector<std::uint32_t> pathIds(paths.size(), kNoId);
+            {
+                std::vector<std::uint64_t> keys;
+                std::vector<std::size_t> idx;
+                for (std::size_t i = 0; i < paths.size(); ++i) {
+                    if (paths[i].empty()) continue;
+                    keys.push_back(pathHash[i]);
+                    idx.push_back(i);
+                }
+                for (std::size_t o : SitOrder(keys)) {
+                    const std::size_t i = idx[o];
+                    pathIds[i] = static_cast<std::uint32_t>(inter.String(paths[i]));
+                }
             }
+            for (std::size_t i = 0; i < dirObjs.size(); ++i) {
+                dirRows.push_back(Row{pathHash[i], pathIds[i],
+                                      static_cast<std::uint32_t>(dirObjs[i].slot)});
+            }
+            // 行序与 count 无关：始终按 f0（Hash64CodePoints(path) 低 32 位）
+            // 升序。13/13 个目录数 ≥2 的样本都严格符合，包括 count<7 时 f0
+            // 数组落盘虽被省略、但行的相对次序仍由 f0 决定（01049/02104/02496/
+            // 02512 等）；此前按 64 位 h64 % 桶排是错的经验规则。
+            std::vector<Row> rows = dirRows;
+            SortAsc(rows);
             std::string payload;
             if (!MakeRecordTable(6, rows, true, payload, error)) return false;
             tbls.push_back(Slot{6, payload});
-        } else if (key == 666 && !cacheSlotsNoMig.empty()) {
+        } else if (key == 666 && !cacheRows.empty()) {
+            // 真机行序 = 记录 GUID 的 Data1（前 4 字节小端）升序；f1 = 该 GUID 在
+            // 头部 GUID 表里的下标，f2 = 记录槽。f0 只在 count>=7 落盘（语料里没有）。
+            std::vector<std::size_t> order(cacheRows.size());
+            for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+            std::stable_sort(order.begin(), order.end(),
+                             [&cacheRows, &cacheGuids](std::size_t a, std::size_t b) {
+                                 const std::uint32_t da =
+                                     GuidData1(cacheGuids[cacheRows[a].guidIdx]);
+                                 const std::uint32_t db =
+                                     GuidData1(cacheGuids[cacheRows[b].guidIdx]);
+                                 if (da != db) return da < db;
+                                 if (cacheRows[a].slot != cacheRows[b].slot)
+                                     return cacheRows[a].slot < cacheRows[b].slot;
+                                 return a < b;
+                             });
             std::vector<Row> rows;
-            rows.reserve(cacheSlotsNoMig.size());
-            for (std::size_t i = 0; i < cacheSlotsNoMig.size(); ++i) {
-                rows.push_back(Row{static_cast<std::uint32_t>(i),
-                                   static_cast<std::uint32_t>(i), cacheSlotsNoMig[i]});
+            rows.reserve(cacheRows.size());
+            for (std::size_t i = 0; i < order.size(); ++i) {
+                const CacheRow& cr = cacheRows[order[i]];
+                rows.push_back(Row{static_cast<std::uint32_t>(i), cr.guidIdx, cr.slot});
             }
             std::string payload;
             if (!MakeRecordTable(8, rows, false, payload, error)) return false;
@@ -2016,15 +2163,13 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                                              sid, it->second});
                     }
                 }
-                // 字符串 id 在 f0 % pool_n 的桶序里 interning（链内 = 文档序）；
-                // 行本身按 f0 升序发射（00545/00790）。
-                const std::uint32_t n = PoolN(pairs.size());
-                std::vector<std::size_t> order(pairs.size());
-                for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
-                std::stable_sort(order.begin(), order.end(),
-                                 [&pairs, n](std::size_t a, std::size_t b) {
-                                     return (pairs[a].f0 % n) < (pairs[b].f0 % n);
-                                 });
+                // 该组字符串 id 在 interner 池的桶序里分配（SitOrder over
+                // Hash64(id)&M32），不是文档序：02764/02797/02731/02716/02789/
+                // 02743 六样本按此顺序逐 id 对齐。行本身按 f0 升序发射。
+                std::vector<std::uint32_t> keys;
+                keys.reserve(pairs.size());
+                for (const Pair& p : pairs) keys.push_back(p.f0);
+                const std::vector<std::size_t> order = SitOrder(keys);
                 std::unordered_map<std::string, std::uint32_t> sidMap;
                 for (std::size_t i : order) {
                     sidMap[pairs[i].sid] = inter.StringEvenEmpty(pairs[i].sid);
@@ -2227,3 +2372,4 @@ bool PcmBuildFromManifest(const std::string& xmlUtf8, std::uint8_t b0Extra,
 }
 
 }  // namespace ocid
+
