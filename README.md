@@ -164,7 +164,9 @@ cab 容器（文件头、folder、`CFDATA`、文件落位）的读取，压缩�
 WU 的 container CAB（条目是数字 id，真实文件名与 `PA30` delta 都记在 `_manifest_.cix.xml` 里）现在也
 由读取器自己还原：`MobilePackageGen/Cabinet/ContainerCab.cs` 解析清单、按顺序把条目映射成真实文件，
 `PA30` 的基取自同柜另一条目的内容（清单只记目标哈希、不记基是哪一条，所以按内容逐一试并用清单哈希
-校验）。`Source/Managed/OcidCabinet/Pa30Delta.cs` 目前仍借 `msdelta.dll!ApplyDeltaB` 应用补丁，
+校验）。`PA30` 补丁由自研解码器（`Source/Managed/OcidCabinet/Delta/`，原生版
+`Source/Native/OcidServicing/src/Delta.cpp`）应用；只有差分体是 PE（`fileType != 1`）或少数多格式
+补丁时仍借 `msdelta.dll!ApplyDeltaB`，
 是自研 delta 解码器落地前的过渡实现。selfupdate 容器包按清单还原出 696 个文件，与 `expand.exe`
 的输出逐个 SHA-256 相同；`dummyrepairpackage_*.cab`（清单用 SHA-256、载荷为空）同样一致。
 
@@ -211,7 +213,7 @@ pwsh -NoProfile -File .\ocid-assemble.ps1 -ImageRoot 'Q:\' `
 | `f!`、`p!/s!/i!`、`S256H`、`CatalogThumbprint`、`Catalogs`、`f256!`、`MCP_*`、`CF` | 已解并落地 |
 | 验收（对微软原版逐键/逐值/逐字节） | 8061 x86 43,100 键/120,978 值；8061 ARM 613/1,408；8419 ARM 23,328/61,277；16299 amd64 73,535/215,978；9600 amd64 10,069/33,493 —— `cbs-diff` 均 0/0 |
 | 版本差异 | 按构建号分档（`CbsProfile`）：`>=9600` 起 DCM 清单 + `f!` 状态位，`>=16212` 起 `Drivers` 台账，`>=16299` 起载荷名折叠与 identity 归一；`--os-build` 可显式指定 |
-| 现代镜像（16299+） | `DCM` 紧凑清单（msdelta + `wcp.dll` 字典）已解；`f!` 改 DWORD 状态位、`f256!` 取清单声明哈希、`S256H` 取解压后 XML、新增 `Drivers` 台账 —— 全流程同样 0/0 |
+| 现代镜像（16299+） | `DCM` 紧凑清单（`PA30` 自研解码 + 独立字典文件）已解；`f!` 改 DWORD 状态位、`f256!` 取清单声明哈希、`S256H` 取解压后 XML、新增 `Drivers` 台账 —— 全流程同样 0/0 |
 | 安装历史类值 | 作为输入：`Extract-CbsInputs.ps1` 一条命令导出，`make-cbs-overrides.ps1` 生成覆盖表 |
 | `WinSxS\ManifestCache\*_blobs.bin`（PCM/CDF） | 容器层可逐字节重建（整文件一致率 62.1% → 99.6%，2,746/2,757），剩 11 份单样本形态（白名单 `Source/Native/OcidServicing/pcm-known-fails.txt`）；另接入 6.3.9600 第二套语料 2,784 对，T4 2,331（83.7%），差异已归类 |
 | 可开机镜像（P1 串联最后一公里） | `Build-OcidImage.ps1` 一条命令：建盘 → `dism /Apply-Image` → `bcdboot` → 换台账 → `cbs-scan`/`cbs-verify-store` → `dism /Get-Packages` 换前后对比 → 分离 |
@@ -337,7 +339,7 @@ SharpZipLib 与 XNA `LzxDecoder`。
    16299 amd64、9600 amd64）上与微软原版的 COMPONENTS 做到逐键/逐值/逐字节一致（`cbs-diff` 0/0）。尚未自带的只有
    `WinSxS\ManifestCache` 的 PCM/CDF 编码器（容器层已逐字节可复现；`src/PcmBuild.cpp` 直接由清单构建，全语料 99.6% 整文件一致）。
    cab 的 MSZIP/LZX 解压也已自有（`Source/Managed/OcidCabinet`，见上），WU container CAB 的 `cix`
-   清单还原也已接进读取器（`PA30` delta 目前仍借 `msdelta.dll`，是自研 delta 解码器前的过渡；
+   清单还原也已接进读取器（`PA30` delta 由自研解码器应用，仅 PE 载荷与少数多格式补丁回退 `msdelta.dll`；
    该格式的反编译结论已整理在 `Source/Native/OcidServicing/Delta-Format.md`，解码器本身尚未实现）；
    桌面侧默认进程内解包，只有 sparse CAB 与多卷包回退 `expand.exe`，不算能力缺口。
 2. **安装历史类信息必须作为输入。** 有些值（`f256` 多段的段序、identity 文化大小写、`c!` 归属、

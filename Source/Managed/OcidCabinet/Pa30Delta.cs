@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using OcidCabinet.Delta;
 
 namespace OcidCabinet
 {
@@ -7,14 +8,41 @@ namespace OcidCabinet
     /// Applies a PA30 delta to a basis buffer.
     /// </summary>
     /// <remarks>
-    /// This is a transitional shim: it forwards to the OS <c>msdelta.dll</c> so the container-cab
-    /// reader can be finished and verified against <c>expand.exe</c> while the project-owned PA30
-    /// decoder is still being written. Once <c>OcidDelta</c> lands this class must not touch
-    /// msdelta.dll any more; the API surface is intentionally tiny so the switch is a one-file change.
+    /// The project-owned decoder (<see cref="Pa30Decoder"/>) covers the payloads that the CBS/Tools
+    /// code paths need: file type RAW, single or multi format, no rift table. Windows Update container
+    /// cabinets additionally carry PE payloads (<c>fileType</c> 8 and friends) that need the PE
+    /// pre-processor and post-processor, and a handful of multi-format manifests whose format switch
+    /// is not reversed yet; those still fall back to <c>msdelta.dll</c> as a transitional step.
     /// </remarks>
     public static class Pa30Delta
     {
-        private const uint DeltaFlagNone = 0;
+        /// <summary>True when the buffer starts with the <c>PA30</c> delta signature.</summary>
+        public static bool IsPa30(ReadOnlySpan<byte> data)
+        {
+            return data.Length >= 4 && data[0] == (byte)'P' && data[1] == (byte)'A' && data[2] == (byte)'3' && data[3] == (byte)'0';
+        }
+
+        /// <summary>
+        /// Applies <paramref name="delta"/> to <paramref name="basis"/>.
+        /// Returns null when the delta does not accept the basis (the usual case while searching
+        /// for the right basis in a container cab) or when the payload is malformed.
+        /// </summary>
+        public static byte[]? TryApply(byte[] basis, byte[] delta)
+        {
+            if (basis == null)
+                throw new ArgumentNullException(nameof(basis));
+            if (delta == null)
+                throw new ArgumentNullException(nameof(delta));
+
+            if (!IsPa30(delta))
+                return null;
+
+            var owned = Pa30Decoder.TryApply(basis, delta);
+            if (owned != null)
+                return owned;
+
+            return OperatingSystem.IsWindows() ? ApplyWithMsDelta(basis, delta) : null;
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         private struct DeltaInput
@@ -31,69 +59,47 @@ namespace OcidCabinet
             public UIntPtr Size;
         }
 
-        [DllImport("msdelta.dll", SetLastError = true)]
+        [DllImport("msdelta.dll", ExactSpelling = true)]
         private static extern int ApplyDeltaB(uint flags, DeltaInput source, DeltaInput delta, out DeltaOutput target);
 
-        [DllImport("msdelta.dll")]
-        private static extern void DeltaFree(IntPtr memory);
+        [DllImport("msdelta.dll", ExactSpelling = true)]
+        private static extern void DeltaFree(IntPtr buffer);
 
-        /// <summary>True when the buffer starts with the <c>PA30</c> delta signature.</summary>
-        public static bool IsPa30(ReadOnlySpan<byte> data)
+        // Transitional path: PE payloads and the multi-format deltas still need msdelta.dll.
+        private static byte[]? ApplyWithMsDelta(byte[] basis, byte[] delta)
         {
-            return data.Length >= 4 && data[0] == (byte)'P' && data[1] == (byte)'A' && data[2] == (byte)'3' && data[3] == (byte)'0';
-        }
-
-        /// <summary>
-        /// Applies <paramref name="delta"/> to <paramref name="basis"/>.
-        /// Returns null when the delta rejects the basis (the usual case while searching for the
-        /// right basis in a container cab).
-        /// </summary>
-        public static byte[]? TryApply(byte[] basis, byte[] delta)
-        {
-            if (!OperatingSystem.IsWindows())
-                throw new PlatformNotSupportedException("PA30 deltas need msdelta.dll; this build only runs on Windows.");
-
-            byte[] source = basis.Length == 0 ? Array.Empty<byte>() : basis;
-            GCHandle sourceHandle = default;
-            GCHandle deltaHandle = default;
+            var source = new DeltaInput();
+            var patch = new DeltaInput();
+            var sourceHandle = GCHandle.Alloc(basis, GCHandleType.Pinned);
+            var deltaHandle = GCHandle.Alloc(delta, GCHandleType.Pinned);
             try
             {
-                sourceHandle = GCHandle.Alloc(source.Length == 0 ? new byte[1] : source, GCHandleType.Pinned);
-                deltaHandle = GCHandle.Alloc(delta, GCHandleType.Pinned);
+                source.Start = sourceHandle.AddrOfPinnedObject();
+                source.Size = (UIntPtr)(uint)basis.Length;
+                patch.Start = deltaHandle.AddrOfPinnedObject();
+                patch.Size = (UIntPtr)(uint)delta.Length;
 
-                var sourceInput = new DeltaInput
-                {
-                    Start = sourceHandle.AddrOfPinnedObject(),
-                    Size = (UIntPtr)(uint)source.Length,
-                    Editable = 0,
-                };
-                var deltaInput = new DeltaInput
-                {
-                    Start = deltaHandle.AddrOfPinnedObject(),
-                    Size = (UIntPtr)(uint)delta.Length,
-                    Editable = 0,
-                };
-
-                if (ApplyDeltaB(DeltaFlagNone, sourceInput, deltaInput, out DeltaOutput output) == 0 || output.Start == IntPtr.Zero)
+                if (ApplyDeltaB(0, source, patch, out var result) == 0 || result.Start == IntPtr.Zero)
                     return null;
 
                 try
                 {
-                    var result = new byte[(int)output.Size];
-                    Marshal.Copy(output.Start, result, 0, result.Length);
-                    return result;
+                    var length = checked((int)(long)result.Size);
+                    var target = new byte[length];
+                    Marshal.Copy(result.Start, target, 0, length);
+                    return target;
                 }
                 finally
                 {
-                    DeltaFree(output.Start);
+                    DeltaFree(result.Start);
                 }
             }
             finally
             {
-                if (sourceHandle.IsAllocated)
-                    sourceHandle.Free();
                 if (deltaHandle.IsAllocated)
                     deltaHandle.Free();
+                if (sourceHandle.IsAllocated)
+                    sourceHandle.Free();
             }
         }
     }

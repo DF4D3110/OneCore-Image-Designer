@@ -134,6 +134,7 @@ namespace {
             std::vector<std::uint8_t> decoded;
             std::string decodeError;
             if (!DcmDecodeManifest(compressed, g_manifestDictionary, decoded, decodeError)) {
+                std::fprintf(stderr, "DCM_DECODE_FAILED %ls :: %s\n", path.c_str(), decodeError.c_str());
                 err = L"DCM 清单解压失败：" + path;
                 return false;
             }

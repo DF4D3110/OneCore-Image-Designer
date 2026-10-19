@@ -180,8 +180,10 @@ libmspack port) across 3,628 files. Windows Update container CABs are expanded b
 to their real names and resolves each `PA30` delta against another entry of the same cabinet (the index
 stores the target hash but not which entry the basis is, so candidates are tried and checked against the
 index). The selfupdate container yields 696 files whose SHA-256 all match `expand.exe`, and so do the
-`dummyrepairpackage_*.cab` packages (SHA-256 index, empty payload). `Pa30Delta.cs` still calls
-`msdelta.dll!ApplyDeltaB`; that is the transitional step until the project-owned delta decoder lands. The
+`dummyrepairpackage_*.cab` packages (SHA-256 index, empty payload). The delta itself is applied by the
+project-owned decoder (`Source/Managed/OcidCabinet/Delta/`, native twin in
+`Source/Native/OcidServicing/src/Delta.cpp`); only PE payloads (`fileType != 1`) and a few multi-format
+patches still go through `msdelta.dll!ApplyDeltaB`. The
 format itself has been reversed and written down in `Source/Native/OcidServicing/Delta-Format.md` (header
 layout, rift table, pseudo-LZX symbol stream); the decoder is not implemented yet.
 

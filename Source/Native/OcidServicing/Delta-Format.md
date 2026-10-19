@@ -120,3 +120,27 @@ riftTable( SumRiftTables ): ...
   `E:\ocid_verify\cabtest\sparse\selfupdate.cab` + `cix` 哈希可做端到端校验。
 - trick：container CAB 里 PA30 的 basis 不写在清单里，需在柜内其余条目中试解并用清单哈希确认
   （见 `E:\ocid_verify\re\PA30-NOTES.md`）。
+
+## 实现与覆盖（2026-10-19）
+
+自研实现：
+
+- 原生：`src/Delta.cpp` + `include/ocid/Delta.h`（`ApplyPa30Delta`），`src/Dcm.cpp` 的
+  `DcmDecodeManifest` 先走它。
+- 托管：`Source/Managed/OcidCabinet/Delta/`（`BitReader`、`Huffman`、`IntFormat`、
+  `CompressionFormat`、`Pa30Decoder`），`Pa30Delta.TryApply` 对外仍是同一签名。
+
+验收数字：
+
+- 16299 全量清单：`cbs-plan-components` 22,167 份、`bad=0`、计划文件 22,299,528 字节，SHA-256
+  `293E2824BC219D96…`，与 `msdelta` 结果逐字节相同；其中 22,099 份由自研解码器直接解出。
+- 12 份 oracle 样例 + 200 份随机 DCM 清单：自研解码结果与 `ApplyDeltaB` 逐字节一致。
+- container CAB（WU selfupdate 包）：`ocid_cab verify` 696 个文件、10,186,062 字节，SHA-1 与清单全一致。
+
+尚未覆盖（当前回退 `msdelta.dll`，并在代码中注明是过渡）：
+
+- `fileType != 1` 的载荷（PE 差分，需要 `ApplyPreProcessSource_<mnemonic>` 与
+  `ApplyPostProcessTarget`，含 E8 变换）。
+- 少数多格式 `CompositeFormat` 补丁（22,167 份里 68 份）：格式边界取值为源大小、切换后符号流解错的
+  问题尚未定位；单格式分支已验证 200/200。
+- 非空 `RiftTable` 的 delta（目前见到的 DCM/container 载荷基表都为空）。

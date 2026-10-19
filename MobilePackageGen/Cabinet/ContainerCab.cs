@@ -240,6 +240,15 @@ namespace Cabinet
                 return result;
             }
 
+            // Some payloads are deltas against an empty basis (the cabinet stores the whole file as a
+            // delta instead of a raw entry).
+            byte[]? fromEmptyBasis = Pa30Delta.TryApply(Array.Empty<byte>(), delta);
+            if (fromEmptyBasis is not null &&
+                (file.Hash.Length == 0 || string.Equals(HashOf(fromEmptyBasis, file.HashAlgorithm), file.Hash, StringComparison.OrdinalIgnoreCase)))
+            {
+                return fromEmptyBasis;
+            }
+
             return null;
         }
 

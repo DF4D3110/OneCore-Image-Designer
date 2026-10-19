@@ -7,6 +7,8 @@
 
 #include <msdelta.h>
 
+#include "ocid/Delta.h"
+
 #pragma comment(lib, "msdelta.lib")
 
 namespace ocid {
@@ -134,23 +136,32 @@ bool DcmDecodeManifest(const std::vector<std::uint8_t>& compressed,
   const std::uint8_t* deltaStart = compressed.data() + 4;
   const std::size_t deltaSize = compressed.size() - 4;
   if (deltaSize < 4 || std::memcmp(deltaStart, "PA30", 4) != 0) {
-    error = "DCM payload is not an msdelta patch";
+    error = "DCM payload is not a PA30 delta";
     return false;
   }
 
+  std::vector<std::uint8_t> delta(deltaStart, deltaStart + deltaSize);
+  std::string deltaError;
+  if (ApplyPa30Delta(dictionary, delta, output, deltaError) && !output.empty()) {
+    return true;
+  }
+
+  // 过渡回退：容器包里的 PE 载荷（file type != RAW）与少数多格式补丁还没进自研解码器，
+  // 这里仍走 msdelta，保证镜像装配结果不变。自研解码器覆盖后必须删掉这段。
   DELTA_INPUT source{};
   source.lpStart = const_cast<void*>(reinterpret_cast<const void*>(dictionary.data()));
   source.uSize = static_cast<ULONG_PTR>(dictionary.size());
   source.Editable = FALSE;
 
-  DELTA_INPUT delta{};
-  delta.lpStart = const_cast<void*>(reinterpret_cast<const void*>(deltaStart));
-  delta.uSize = static_cast<ULONG_PTR>(deltaSize);
-  delta.Editable = FALSE;
+  DELTA_INPUT deltaInput{};
+  deltaInput.lpStart = const_cast<void*>(reinterpret_cast<const void*>(delta.data()));
+  deltaInput.uSize = static_cast<ULONG_PTR>(delta.size());
+  deltaInput.Editable = FALSE;
 
   DELTA_OUTPUT result{};
-  if (!::ApplyDeltaB(DELTA_FLAG_NONE, source, delta, &result)) {
-    error = "ApplyDeltaB failed for DCM manifest";
+
+  if (!::ApplyDeltaB(DELTA_FLAG_NONE, source, deltaInput, &result)) {
+    error = "PA30 delta failed (own decoder: " + deltaError + "; msdelta fallback also failed)";
     return false;
   }
   if (result.lpStart == nullptr || result.uSize == 0) {
