@@ -300,6 +300,17 @@ namespace OneCore_Image_Designer.Services
 
         static bool ExpandCab(string cab, string dest, List<string> log)
         {
+            // 进程内读取器优先；sparse / 多卷包退回 expand.exe。
+            try
+            {
+                CabExtraction.ExtractAll(cab, dest);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                log.Add($"  进程内解包不可用（{ex.Message}），回退 expand.exe");
+            }
+
             try
             {
                 var psi = new System.Diagnostics.ProcessStartInfo("expand.exe",

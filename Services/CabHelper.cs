@@ -9,7 +9,8 @@ using System.Text.RegularExpressions;
 namespace OneCore_Image_Designer.Services
 {
     /// <summary>
-    /// 基于 expand.exe 的轻量 CAB 读取器（列条目 + 抽单文件）。
+    /// 轻量 CAB 读取器（列条目 + 抽单文件），优先走进程内的
+    /// <see cref="CabExtraction"/>；遇到它不支持的包（sparse / 多卷）再退回 expand.exe。
     /// 结果按 CAB 路径缓存（LastWriteTime 参与键，文件变化自动失效）。
     /// </summary>
     public static class CabHelper
@@ -32,8 +33,15 @@ namespace OneCore_Image_Designer.Services
             return info;
         }
 
-        /// <summary>expand.exe -D 输出行: "path\to.cab: entryname"。条目名含路径分隔时归一。</summary>
         static List<(string, long)> ListEntriesRaw(string cab)
+        {
+            try { return CabExtraction.List(cab); }
+            catch { /* 回退 expand.exe */ }
+            return ListEntriesViaExpand(cab);
+        }
+
+        /// <summary>expand.exe -D 输出行: "path\to.cab: entryname"。</summary>
+        static List<(string, long)> ListEntriesViaExpand(string cab)
         {
             var list = new List<(string, long)>();
             var psi = new ProcessStartInfo
@@ -103,6 +111,20 @@ namespace OneCore_Image_Designer.Services
         public static byte[]? ExtractEntry(string cab, string entryName)
         {
             if (string.IsNullOrEmpty(entryName)) return null;
+
+            // 进程内优先：不落临时目录、不受 expand.exe 命名规则影响。
+            try
+            {
+                var bytes = CabExtraction.ReadEntry(cab, entryName);
+                if (bytes != null) return bytes;
+            }
+            catch { /* 不支持的容器：回退 expand.exe */ }
+
+            return ExtractEntryViaExpand(cab, entryName);
+        }
+
+        static byte[]? ExtractEntryViaExpand(string cab, string entryName)
+        {
             try
             {
                 string tmp = Path.Combine(Path.GetTempPath(),

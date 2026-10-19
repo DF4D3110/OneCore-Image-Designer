@@ -162,13 +162,22 @@ namespace OneCore_Image_Designer.Services
         }
 
         // ────────────────────────────────────────────────────────────────
-        // CAB 解出（用 Windows 自带 expand.exe，无需 libmspack）
+        // CAB 解出（进程内读取器优先；sparse / 多卷包退回 expand.exe）
         // ────────────────────────────────────────────────────────────────
 
-        /// <summary>列出 CAB 内容（`expand -D`）。</summary>
+        /// <summary>列出 CAB 内容。</summary>
         public static (bool ok, List<string> entries, string raw) ListCab(string cabPath)
         {
-            var entries = new List<string>();
+            try
+            {
+                var list = CabExtraction.List(cabPath);
+                var entries = list.Select(e => e.Name).ToList();
+                var raw = string.Join("\n", list.Select(e => $"{cabPath}: {e.Name}"));
+                return (true, entries, raw);
+            }
+            catch (Exception ex) { _ = ex; }
+
+            var fallbackEntries = new List<string>();
             var (ok, outp) = RunExpand($"-D \"{cabPath}\"");
             foreach (var raw in outp.Split('\n'))
             {
@@ -178,14 +187,21 @@ namespace OneCore_Image_Designer.Services
                 if (idx < 0 || l.StartsWith("Microsoft", StringComparison.OrdinalIgnoreCase)) continue;
                 if (l.Contains("files total")) continue;
                 string name = l[(idx + 2)..].Trim();
-                if (name.Length > 0) entries.Add(name);
+                if (name.Length > 0) fallbackEntries.Add(name);
             }
-            return (ok, entries, outp);
+            return (ok, fallbackEntries, outp);
         }
 
-        /// <summary>把 CAB 全部解到 outDir（`expand -F:* &lt;cab&gt; &lt;dir&gt;`）。</summary>
+        /// <summary>把 CAB 全部解到 outDir。</summary>
         public static (bool ok, string raw) ExtractCab(string cabPath, string outDir)
         {
+            try
+            {
+                CabExtraction.ExtractAll(cabPath, outDir);
+                return (true, $"expanded {cabPath} -> {outDir}");
+            }
+            catch (Exception ex) { _ = ex; }
+
             Directory.CreateDirectory(outDir);
             return RunExpand($"-F:* \"{cabPath}\" \"{outDir}\"");
         }

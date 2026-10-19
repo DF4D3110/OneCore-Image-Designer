@@ -206,6 +206,14 @@ namespace Cabinet
             volumes = ReadVolumes(InputStream);
             files = ReadVolumeFiles(InputStream);
 
+            // Sparse cabinets split one file across several entries and mark the
+            // continuation entries with the reserved folder ids 0xFFFD..0xFFFF.
+            // Supporting them means stitching the pieces back together, which this
+            // reader does not do yet - callers that must cope (the desktop's
+            // expand.exe fallback) can test this flag instead of getting silently
+            // truncated payloads.
+            IsSparse = files.Any(f => f.CabinetFileVolumeFile.iFolder >= 0xFFFD);
+
             for (int i = 0; i < volumes.Count; i++)
             {
                 CabinetVolume volume = volumes.ElementAt(i);
@@ -217,6 +225,12 @@ namespace Cabinet
         }
 
         public IReadOnlyCollection<CabinetFile> Files => files.Select(x => new CabinetFile(x)).ToList();
+
+        /// <summary>
+        /// True when the cabinet uses sparse continuation entries (folder ids
+        /// 0xFFFD..0xFFFF) that this reader cannot reconstruct yet.
+        /// </summary>
+        public bool IsSparse { get; }
 
         #region Reading Metadata
         private CabinetHeader ReadHeader(Stream cabinetStream)

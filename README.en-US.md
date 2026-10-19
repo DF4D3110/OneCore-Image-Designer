@@ -176,10 +176,12 @@ The reference is `expand.exe` (the Windows cabinet API): makecab-generated MSZIP
 (355 + 10 + 1 files) and the 96 MB MSZIP `BucketConfidenceData.cab` — **429 files, all byte-identical**.
 The replacement is also file-for-file identical to the previous implementation (SharpZipLib + the XNA
 libmspack port) across 3,628 files. `Tests/` covers it offline by generating the fixtures with makecab.
-The known container-level gap is sparse CABs whose files are split with the `iFolder` =
-`0xFFFD/0xFFFE/0xFFFF` convention: `expand.exe` stitches them, the current reader treats them as a
-plain folder — a container issue, unrelated to decompression. The desktop side still shells out to
-`expand.exe`; switching it to these decoders is follow-up work.
+The known container-level gaps are container CABs (Windows Update payloads whose entries are numbered
+ids: the real names and `PA30` deltas live in `_manifest_.cix.xml`, which only `expand.exe` applies) and
+sparse CABs whose files are split with the `iFolder` = `0xFFFD/0xFFFE/0xFFFF` convention; multi-volume
+cabinets fall back too. `Services/CabExtraction.cs` reports those as unsupported so the callers keep
+using `expand.exe`; every other desktop extraction path (`CabHelper`, `UpdatePackageService`,
+`DeviceLayoutService`, `CbsBuildService`, `CbsBuildViewModel`) now decodes in-process.
 
 ### CBS store writer (COMPONENTS)
 
@@ -332,8 +334,9 @@ This is an active work in progress. Three things are worth stating plainly:
    byte, key for key, value for value (`cbs-diff` reports 0/0). The only part not yet self-contained is
    the `WinSxS\ManifestCache` PCM/CDF encoder: its container layer already reproduces files exactly, the
    element-record tables are still being worked out. CAB decompression (MSZIP/LZX) is already
-   self-contained in `Source/Managed/OcidCabinet`; the desktop side's `expand.exe` calls are migration
-   debt, not a capability gap.
+   self-contained in `Source/Managed/OcidCabinet`; the desktop side decodes in-process by default and
+   only falls back to `expand.exe` for container CABs, sparse CABs and multi-volume cabinets, which is
+   not a capability gap.
 2. **Install-history information has to be supplied as input.** Some values (`f256` segment order,
    identity culture casing, `c!` attribution, catalog choice, `MCP_*` and version-node flag bits) come
    from the image's installation history and cannot be derived from a package set. `Extract-CbsInputs.ps1`

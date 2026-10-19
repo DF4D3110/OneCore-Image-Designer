@@ -110,30 +110,40 @@ namespace OneCore_Image_Designer.Services
 
                 try
                 {
-                    // 使用expand.exe解压CAB
-                    var startInfo = new System.Diagnostics.ProcessStartInfo
+                    // 先用进程内 CAB 读取器；sparse / 多卷包再退回 expand.exe。
+                    bool expanded = CabExtraction.TryExtractAll(cabPath, tempDir, out string cabError);
+                    if (expanded)
                     {
-                        FileName = "expand.exe",
-                        Arguments = $"-F:* \"{cabPath}\" \"{tempDir}\"",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        CreateNoWindow = true
-                    };
+                        Log($"进程内解包完成: {Path.GetFileName(cabPath)}");
+                    }
+                    else
+                    {
+                        Log($"进程内解包不可用（{cabError}），回退 expand.exe");
 
-                    Log($"执行命令: expand.exe -F:* \"{cabPath}\" \"{tempDir}\"");
+                        var startInfo = new System.Diagnostics.ProcessStartInfo
+                        {
+                            FileName = "expand.exe",
+                            Arguments = $"-F:* \"{cabPath}\" \"{tempDir}\"",
+                            UseShellExecute = false,
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
+                            CreateNoWindow = true
+                        };
 
-                    using var process = System.Diagnostics.Process.Start(startInfo);
-                    var output = process?.StandardOutput.ReadToEnd();
-                    var error = process?.StandardError.ReadToEnd();
-                    process?.WaitForExit();
-                    var exitCode = process?.ExitCode ?? -1;
+                        Log($"执行命令: expand.exe -F:* \"{cabPath}\" \"{tempDir}\"");
 
-                    Log($"expand.exe 退出码: {exitCode}");
-                    if (!string.IsNullOrEmpty(output))
-                        Log($"expand输出:\n{output}");
-                    if (!string.IsNullOrEmpty(error))
-                        Log($"expand错误:\n{error}");
+                        using var process = System.Diagnostics.Process.Start(startInfo);
+                        var output = process?.StandardOutput.ReadToEnd();
+                        var error = process?.StandardError.ReadToEnd();
+                        process?.WaitForExit();
+                        var exitCode = process?.ExitCode ?? -1;
+
+                        Log($"expand.exe 退出码: {exitCode}");
+                        if (!string.IsNullOrEmpty(output))
+                            Log($"expand输出:\n{output}");
+                        if (!string.IsNullOrEmpty(error))
+                            Log($"expand错误:\n{error}");
+                    }
 
                     // 列出解压后的所有文件
                     var allFiles = Directory.GetFiles(tempDir, "*", SearchOption.AllDirectories);

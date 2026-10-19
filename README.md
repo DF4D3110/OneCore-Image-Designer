@@ -158,9 +158,13 @@ cab 容器（文件头、folder、`CFDATA`、文件落位）的读取，压缩�
 夹具、8400 repair content 的 MSZIP 包、`C:\Windows\servicing` 下的 LZX 包（355 + 10 + 1 个文件）、
 96 MB 的 `BucketConfidenceData.cab`（MSZIP），共 **429 个文件逐字节一致**；与替换前的实现
 （SharpZipLib + XNA libmspack 移植）在 3,628 个文件上同样零差异。`Tests/` 里有对应的离线回归
-（用 makecab 现场造多块夹具）。容器层的已知缺口是 sparse CAB 的分段文件（`iFolder` 取
-`0xFFFD/0xFFFE/0xFFFF` 的约定），`expand.exe` 会拼接而当前读取器按普通 folder 处理——属容器问题，
-与解压无关。桌面侧目前仍通过 `expand.exe` 解包，后续可切到同一份解码器。
+（用 makecab 现场造多块夹具）。
+
+容器层有两类包超出当前读取器，`Services/CabExtraction.cs` 会把它们判为不支持并回退 `expand.exe`：
+container CAB（WU 更新包，条目按 id 编号，真实文件名与 `PA30` delta 记在 `_manifest_.cix.xml` 里，
+只有 `expand.exe` 会按清单还原）与 sparse CAB（`iFolder` 取 `0xFFFD/0xFFFE/0xFFFF` 的分段文件
+约定）；多卷包同样回退。桌面侧其它解包路径（`CabHelper`、`UpdatePackageService`、
+`DeviceLayoutService`、`CbsBuildService`、`CbsBuildViewModel`）都已改为进程内解包。
 
 ### CBS 台账写侧（COMPONENTS）
 
@@ -307,8 +311,8 @@ SharpZipLib 与 XNA `LzxDecoder`。
    `Source/Native/OcidServicing` 自己实现；CBS 写侧在四个真机镜像（8061 x86、8061 ARM、8419 ARM、
    16299 amd64、9600 amd64）上与微软原版的 COMPONENTS 做到逐键/逐值/逐字节一致（`cbs-diff` 0/0）。尚未自带的只有
    `WinSxS\ManifestCache` 的 PCM/CDF 编码器（容器层已逐字节可复现；`src/PcmBuild.cpp` 直接由清单构建，全语料 99.6% 整文件一致）。
-   cab 的 MSZIP/LZX 解压也已自有（`Source/Managed/OcidCabinet`，见上）；桌面侧的 `expand.exe` 调用是
-   迁移中遗留，不是能力缺口。
+   cab 的 MSZIP/LZX 解压也已自有（`Source/Managed/OcidCabinet`，见上）；桌面侧默认进程内解包，
+   只有 container CAB、sparse CAB 与多卷包回退 `expand.exe`，不算能力缺口。
 2. **安装历史类信息必须作为输入。** 有些值（`f256` 多段的段序、identity 文化大小写、`c!` 归属、
    catalog 选择、`MCP_*`/(default) 位图、现代 `f!` 的非 1 状态位）来自镜像的安装历史，不能从包集推导；
    `Extract-CbsInputs.ps1` 从参考镜像导出它们，`make-cbs-overrides.ps1` 生成覆盖表，组装时显式传入。

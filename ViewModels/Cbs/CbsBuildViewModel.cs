@@ -167,6 +167,13 @@ namespace OneCore_Image_Designer.ViewModels.Cbs
         {
             try
             {
+                Services.CabExtraction.ExtractAll(cab, dest);
+                return;
+            }
+            catch { /* sparse / 多卷：退回 expand.exe */ }
+
+            try
+            {
                 var psi = new System.Diagnostics.ProcessStartInfo("expand.exe", $"-F:* \"{cab}\" \"{dest}\"")
                 { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
                 System.Diagnostics.Process.Start(psi)?.WaitForExit(120_000);

@@ -32,6 +32,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ,("Ocid driver store lands package files and publishes the INF", () => { OcidDriverStoreLanding(); return Task.CompletedTask; })
     ,("Ocid DMI import lands files, publishes oemN.inf and writes the database in one pass", () => { OcidDmiImport(); return Task.CompletedTask; })
     ,("Cabinet decompressor round-trips MSZIP and LZX fixtures made by makecab", () => { CabinetDecompression(); return Task.CompletedTask; })
+    ,("CabExtraction matches expand.exe and refuses container cabinets", () => { CabExtractionAgainstExpand(); return Task.CompletedTask; })
 };
 
 var failures = new List<string>();
@@ -1438,6 +1439,86 @@ static void CabinetDecompression()
     {
         try { Directory.Delete(root, recursive: true); } catch { /* temp cleanup is best effort */ }
     }
+}
+
+// The desktop services extract cabinets in-process now (Services/CabExtraction.cs). This guard
+// compares that path with the Windows cabinet API via expand.exe on real packages; the corpora
+// live outside the repository, so the test is opt-in through environment variables and prints a
+// skip line otherwise. OCID_UNSUPPORTED_CAB points at a package the in-process reader must refuse
+// (a WU container cabinet, or a sparse one) so callers fall back to expand.exe instead of getting
+// silently renamed/truncated payloads.
+static void CabExtractionAgainstExpand()
+{
+    string? cabDir = Environment.GetEnvironmentVariable("OCID_CAB_TEST_DIR");
+    string? unsupportedCab = Environment.GetEnvironmentVariable("OCID_UNSUPPORTED_CAB");
+
+    if (string.IsNullOrEmpty(cabDir) && string.IsNullOrEmpty(unsupportedCab))
+    {
+        Console.WriteLine("  (skipped: set OCID_CAB_TEST_DIR / OCID_UNSUPPORTED_CAB to run against real packages)");
+        return;
+    }
+
+    if (!string.IsNullOrEmpty(unsupportedCab) && File.Exists(unsupportedCab))
+    {
+        True(!CabExtraction.IsSupported(unsupportedCab),
+            $"package should be reported as unsupported: {unsupportedCab}");
+        Throws<NotSupportedException>(() => CabExtraction.List(unsupportedCab));
+        Throws<NotSupportedException>(() => CabExtraction.ReadEntry(unsupportedCab, "0"));
+    }
+
+    if (string.IsNullOrEmpty(cabDir) || !Directory.Exists(cabDir)) return;
+
+    int compared = 0;
+    foreach (string cab in Directory.EnumerateFiles(cabDir, "*.cab")
+                                 .OrderBy(f => new FileInfo(f).Length))
+    {
+        // Container cabs (WU payloads with a cix manifest) are handled by expand.exe only.
+        if (!CabExtraction.IsSupported(cab)) continue;
+
+        string root = NewTempDirectory();
+        try
+        {
+            string ours = Path.Combine(root, "ours");
+            string theirs = Path.Combine(root, "expand");
+            Directory.CreateDirectory(ours);
+            Directory.CreateDirectory(theirs);
+
+            CabExtraction.ExtractAll(cab, ours);
+            RunTool("expand.exe", $"-F:* \"{cab}\" \"{theirs}\"", root);
+
+            var expected = HashTree(theirs);
+            var actual = HashTree(ours);
+            True(actual.Count > 0, $"no files extracted from {cab}");
+            Equal(expected.Count, actual.Count);
+            foreach (var (path, hash) in expected)
+            {
+                True(actual.TryGetValue(path, out string? got), $"{Path.GetFileName(cab)}: missing {path}");
+                Equal(hash, got);
+            }
+
+            compared++;
+            if (compared == 3) break;
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* temp cleanup is best effort */ }
+        }
+    }
+
+    True(compared > 0, $"no cabinet under {cabDir} is handled by the in-process reader");
+}
+
+static Dictionary<string, string> HashTree(string root)
+{
+    var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    foreach (string file in Directory.GetFiles(root, "*", SearchOption.AllDirectories))
+    {
+        string rel = Path.GetRelativePath(root, file);
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        using var fs = File.OpenRead(file);
+        map[rel] = Convert.ToHexString(sha.ComputeHash(fs));
+    }
+    return map;
 }
 
 static void RunTool(string fileName, string arguments, string workingDirectory)
