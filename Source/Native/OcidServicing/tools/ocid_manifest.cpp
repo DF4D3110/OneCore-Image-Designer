@@ -1462,6 +1462,11 @@ static int CmdDmiPlace(const std::wstring& planPath, const std::wstring& imageRo
         packages.push_back(std::move(pkg));
     }
 
+
+    // 根位图按真机裁到最小字节数：真机 oem0.inf 只存一个字节 0x80（bit7 = oem0），
+    // 不是 4099 字节全量。其余位在装配时按需扩展。
+    std::vector<std::uint8_t> rootBitmap(bitmap);
+    while (rootBitmap.size() > 1 && rootBitmap.back() == 0) rootBitmap.pop_back();
     // 第二轮：DriverDatabase 计划。根值（架构 + oem 位图）用**最终**位图，只发一次。
     std::vector<std::string> lines;
     if (!packages.empty()) {
@@ -1493,7 +1498,7 @@ static int CmdDmiPlace(const std::wstring& planPath, const std::wstring& imageRo
                 request.signerName = L"Microsoft Windows";
                 request.signerScore = 0x0D000003u;
             }
-            if (i == 0) request.rootOemBitmap = &bitmap;
+            if (i == 0) request.rootOemBitmap = &rootBitmap;
             const DriverLedgerPlan ledger = BuildDriverLedgerPlan(request);
             for (const auto& note : ledger.notes) Err("note: " + ToUtf8(packages[i].storeId) + ": " + ToUtf8(note));
             if (!ledger.ok) {
@@ -1502,7 +1507,7 @@ static int CmdDmiPlace(const std::wstring& planPath, const std::wstring& imageRo
                 continue;
             }
             for (const auto& key : ledger.keys) {
-                const std::string rel = "DriverDatabase\\" + ToUtf8(key.relativePath);
+                const std::string rel = key.relativePath.empty() ? std::string("DriverDatabase") : ("DriverDatabase\\" + ToUtf8(key.relativePath));
                 lines.push_back("K\t" + rel);
                 for (const auto& value : key.values) AppendLedgerPlanLine(rel, value, lines);
             }
