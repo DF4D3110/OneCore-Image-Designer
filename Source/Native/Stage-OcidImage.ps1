@@ -29,12 +29,14 @@ param(
     [string] $Exe,
     [switch] $NoAcl,
     [switch] $SkipPlace,
+    [switch] $SkipDrivers,
     [switch] $SkipLedger,
     [switch] $SkipSwap,
     [string] $Markers, [string] $Installed, [string] $Claims, [string] $Flags, [string] $Sessions,
     [string] $Buckets, [string] $Cache, [string] $Ct, [string] $VersionFlags, [string] $Mcp,
     [string] $SkeletonFamilies, [string] $RootInfo, [string] $Override, [string] $DiffAgainst,
     [string] $DcmDictionary, [string] $FileFlags, [string] $Pending, [string] $Time,
+    [string] $DriverOsVersion = '6.2', [string] $DriverSigner, [int] $DriverSignerScore = 0,
     [string[]] $StackEntries = @(),
     [switch] $Transactional, [switch] $RootMinimal, [switch] $Ccpinterface,
     [switch] $InstallersShortcut, [switch] $NoConfiguration, [switch] $NonCanonicalData,
@@ -91,6 +93,35 @@ if (-not $SkipPlace) {
     & $Exe csi-place $placeJsonl @aclArg
     if ($LASTEXITCODE -ne 0) { throw "csi-place 失败（exit=$LASTEXITCODE）" }
 } else { Write-Host '[stage] 跳过落位' }
+
+# ── 1.5) 驱动包落进镜像（FileRepository + Windows\INF\oemN.inf + DriverDatabase）──
+$driverPlan = Join-Path $OutDir 'drivers.jsonl'
+$driverDbPlan = Join-Path $OutDir 'driverdb.txt'
+if (-not $SkipDrivers) {
+    if (-not $Packages) {
+        Write-Host '[stage] 跳过驱动落位（没有 -Packages：驱动载荷不在清单目录里）'
+    } else {
+        $driverLines = & $Exe dmi-ops $Manifests --packages $Packages 2>&1 |
+                       Where-Object { $_ -like '{*' }
+        $driverLines | Set-Content -Path $driverPlan -Encoding UTF8
+        Write-Host ("[stage] dmi-ops lines={0}" -f @($driverLines).Count)
+        if (@($driverLines).Count -gt 0) {
+            $dp = @('dmi-place', $driverPlan, $root, '--packages', $Packages,
+                    '--plan-out', $driverDbPlan, '--os', $DriverOsVersion)
+            if ($DriverSigner) { $dp += @('--signer', $DriverSigner) }
+            if ($DriverSignerScore -ne 0) { $dp += @('--signer-score', [string]$DriverSignerScore) }
+            & $Exe @dp
+            if ($LASTEXITCODE -ne 0) { throw "dmi-place 失败（exit=$LASTEXITCODE）" }
+
+            # DriverDatabase 写进离线 SYSTEM hive（--append：目标已存在，只挂载不覆盖）。
+            $systemHive = Join-Path $winDir 'System32\config\SYSTEM'
+            $writeArgs = @('cbs-write', $driverDbPlan, $systemHive, '--append')
+            if ($Transactional) { $writeArgs += '--transactional' }
+            & $Exe @writeArgs
+            if ($LASTEXITCODE -ne 0) { throw "DriverDatabase 写入失败（exit=$LASTEXITCODE）" }
+        }
+    }
+}
 
 # ── 2) 台账组装 ─────────────────────────────────────────────────────────
 $ledgerDir = Join-Path $OutDir 'ledger'

@@ -167,8 +167,13 @@ pwsh -NoProfile -File .\ocid-assemble.ps1 -ImageRoot 'Q:\' `
 | 安装历史类值 | 作为输入：`Extract-CbsInputs.ps1` 一条命令导出，`make-cbs-overrides.ps1` 生成覆盖表 |
 | `WinSxS\ManifestCache\*_blobs.bin`（PCM/CDF） | 容器层可逐字节重建（整文件一致率 62.1% → 94.6%），元素记录表族仍在推进 |
 | 可开机镜像（P1 串联最后一公里） | `Build-OcidImage.ps1` 一条命令：建盘 → `dism /Apply-Image` → `bcdboot` → 换台账 → `cbs-scan`/`cbs-verify-store` → `dism /Get-Packages` 换前后对比 → 分离 |
+| 驱动包落位（DMI 台账） | `dmi-ops` → `dmi-place`（载荷进 `FileRepository`、INF 发布成 `Windows\INF\oemN.inf`、产出 `DriverDatabase` 计划）→ `cbs-write --append` 写进镜像的 SYSTEM hive；签名者信息作为输入（`--signer`/`--signer-score`） |
 
-架构、算法与复现命令见 `Source/Native/OcidServicing/CBS-Writer.md`。
+`Stage-OcidImage.ps1` 把三件事串成一条命令：CSI 落位（`place-ops` → `csi-place`）→ 驱动落位（DMI，
+上面那行）→ 台账组装并换进镜像。
+
+架构、算法与复现命令见 `Source/Native/OcidServicing/CBS-Writer.md` 与
+`Source/Native/OcidServicing/DMI-Writer.md`。
 
 同一份代码同时支撑控制台工具与主程序。托管侧经 `Services/OcidServicingNative.cs` 绑定，并在
 `Services/OcidSmiService.cs` 中应用决策。应用刻意**不**回退到托管版的值编码实现：原生库不可用时跳过该

@@ -175,8 +175,13 @@ component plan → deployment/catalog plan → versioned-index plan → root val
 | Install-history values | Taken as inputs: `Extract-CbsInputs.ps1` exports them, `make-cbs-overrides.ps1` builds the override table |
 | `WinSxS\ManifestCache\*_blobs.bin` (PCM/CDF) | Container layer reproduces byte-exactly (94.6% of whole files), element-record tables still in progress |
 | Bootable image (last mile of P1) | `Build-OcidImage.ps1` in one command: create disk -> `dism /Apply-Image` -> `bcdboot` -> swap the ledger -> `cbs-scan`/`cbs-verify-store` -> `dism /Get-Packages` before/after diff -> detach |
+| Driver package staging (DMI ledger) | `dmi-ops` -> `dmi-place` (payloads into `FileRepository`, INF published as `Windows\INF\oemN.inf`, `DriverDatabase` plan emitted) -> `cbs-write --append` writes it into the image's SYSTEM hive; signer info is an input (`--signer`/`--signer-score`) |
 
-Architecture, algorithms and repro commands: `Source/Native/OcidServicing/CBS-Writer.md`.
+`Stage-OcidImage.ps1` chains all three in one command: CSI staging (`place-ops` -> `csi-place`) ->
+driver staging (DMI, the row above) -> ledger assembly and swap into the image.
+
+Architecture, algorithms and repro commands: `Source/Native/OcidServicing/CBS-Writer.md` and
+`Source/Native/OcidServicing/DMI-Writer.md`.
 
 The same code backs both the console tool and the application. The managed side binds through
 `Services/OcidServicingNative.cs` and applies the decisions in `Services/OcidSmiService.cs`. The

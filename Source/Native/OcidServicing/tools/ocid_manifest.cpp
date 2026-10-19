@@ -1149,6 +1149,398 @@ static int CmdDmiLedger(const std::wstring& repoRoot,
 #endif
 }
 
+// ── dmi-place：驱动包真正落进镜像（FileRepository + Windows\INF\oemN.inf）──
+//
+// 输入是 `dmi-ops` 的 JSONL 计划。这里做三件真事，全部"不猜"：
+//   1) 把包展开目录里的载荷拷进
+//      `<image>\Windows\System32\DriverStore\FileRepository\<StoreId>\`；
+//      缺一个文件就整包失败，不做部分导入（半个驱动库比没有更糟）。
+//   2) 把那个 INF 发布成 `<image>\Windows\INF\oem<N>.inf`；inbox/OS INF 保留原名、
+//      不占位图（DriverPackage.h 的 kImportFlag* 就是 drvstore 的判据）。
+//   3) 把 DriverDatabase 的键/值写成 `cbs-write` 的计划行（相对 hive 根），
+//      由调用方写进离线 SYSTEM hive —— 本模块只算不写。
+//
+// 位图语义见 DriverPackage.h：4099 字节、MSB-first、置位=已占用；真机 oem 名就是
+// 从这个位图里取第一个 0 位。
+static bool JsonGetString(const std::string& line, const std::string& key, std::string& out)
+{
+    const std::string needle = "\"" + key + "\":\"";
+    size_t pos = line.find(needle);
+    if (pos == std::string::npos) return false;
+    pos += needle.size();
+    out.clear();
+    while (pos < line.size()) {
+        const char c = line[pos];
+        if (c == '"') return true;
+        if (c == '\\' && pos + 1 < line.size()) {
+            ++pos;
+            const char e = line[pos];
+            switch (e) {
+            case 'n': out.push_back('\n'); break;
+            case 't': out.push_back('\t'); break;
+            case 'r': out.push_back('\r'); break;
+            case '"': out.push_back('"'); break;
+            case '\\': out.push_back('\\'); break;
+            case '/': out.push_back('/'); break;
+            case 'u': {
+                if (pos + 4 >= line.size()) return true;
+                const unsigned int code =
+                    static_cast<unsigned int>(std::strtoul(line.substr(pos + 1, 4).c_str(), nullptr, 16));
+                if (code < 0x80) {
+                    out.push_back(static_cast<char>(code));
+                } else if (code < 0x800) {
+                    out.push_back(static_cast<char>(0xC0 | (code >> 6)));
+                    out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+                } else {
+                    out.push_back(static_cast<char>(0xE0 | (code >> 12)));
+                    out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+                    out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+                }
+                pos += 4;
+                break;
+            }
+            default: out.push_back(e); break;
+            }
+            ++pos;
+            continue;
+        }
+        out.push_back(c);
+        ++pos;
+    }
+    return false;
+}
+
+static bool EnsureDirectoryTree(const std::wstring& path)
+{
+    if (path.empty()) return false;
+    const DWORD attr = GetFileAttributesW(path.c_str());
+    if (attr != INVALID_FILE_ATTRIBUTES) return (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    const size_t slash = path.find_last_of(L"\\/");
+    if (slash != std::wstring::npos && slash > 2) EnsureDirectoryTree(path.substr(0, slash));
+    return CreateDirectoryW(path.c_str(), nullptr) != 0 || GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+// 载荷文件名大小写未必和清单一致（真机包库里两种都见过），找不到就当缺。
+static bool FindFileIgnoreCase(const std::wstring& dir, const std::wstring& name, std::wstring& found)
+{
+    const std::wstring direct = dir + L"\\" + name;
+    if (GetFileAttributesW(direct.c_str()) != INVALID_FILE_ATTRIBUTES) { found = direct; return true; }
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool ok = false;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (_wcsicmp(fd.cFileName, name.c_str()) == 0) {
+            found = dir + L"\\" + fd.cFileName;
+            ok = true;
+            break;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return ok;
+}
+
+static void AppendLedgerPlanLine(const std::string& relativePath, const LedgerValue& value,
+                                 std::vector<std::string>& lines)
+{
+    std::vector<std::uint8_t> data;
+    DWORD type = 3;
+    switch (value.type) {
+    case LedgerValueType::String: {
+        type = 1;
+        for (wchar_t ch : value.text) {
+            data.push_back(static_cast<std::uint8_t>(ch & 0xFF));
+            data.push_back(static_cast<std::uint8_t>((ch >> 8) & 0xFF));
+        }
+        data.push_back(0);
+        data.push_back(0);
+        break;
+    }
+    case LedgerValueType::MultiString: {
+        type = 7;
+        for (wchar_t ch : value.text) {
+            if (ch == L'\0') {
+                data.push_back(0);
+                data.push_back(0);
+                continue;
+            }
+            data.push_back(static_cast<std::uint8_t>(ch & 0xFF));
+            data.push_back(static_cast<std::uint8_t>((ch >> 8) & 0xFF));
+        }
+        data.push_back(0);
+        data.push_back(0);
+        break;
+    }
+    case LedgerValueType::DWord: {
+        type = 4;
+        data.push_back(static_cast<std::uint8_t>(value.dword & 0xFF));
+        data.push_back(static_cast<std::uint8_t>((value.dword >> 8) & 0xFF));
+        data.push_back(static_cast<std::uint8_t>((value.dword >> 16) & 0xFF));
+        data.push_back(static_cast<std::uint8_t>((value.dword >> 24) & 0xFF));
+        break;
+    }
+    case LedgerValueType::Binary:
+        type = 3;
+        data = value.binary;
+        break;
+    }
+    lines.push_back("V\t" + relativePath + "\t" + ToUtf8(value.name) + "\t" +
+                    std::to_string(type) + "\t" + HexOfBytes(data));
+}
+
+static int CmdDmiPlace(const std::wstring& planPath, const std::wstring& imageRoot,
+                       const std::wstring& packagesRoot, const std::wstring& planOut,
+                       const std::wstring& osVersion, const std::wstring& signerName,
+                       unsigned int signerScore, bool inbox, bool dryRun)
+#ifdef _WIN32
+{
+    std::wstring raw, readErr;
+    if (!ReadFileUtf8(planPath, raw, readErr)) { Err(ToUtf8(readErr)); return 2; }
+    const std::string text = ToUtf8(raw);
+
+    unsigned int osMajor = 6, osMinor = 2;
+    {
+        const size_t dot = osVersion.find(L'.');
+        if (dot != std::wstring::npos) {
+            osMajor = static_cast<unsigned int>(_wtoi(osVersion.substr(0, dot).c_str()));
+            osMinor = static_cast<unsigned int>(_wtoi(osVersion.substr(dot + 1).c_str()));
+        }
+    }
+
+    const std::wstring fileRepo = imageRoot + L"\\Windows\\System32\\DriverStore\\FileRepository";
+    const std::wstring infDir = imageRoot + L"\\Windows\\INF";
+
+    // oemN.inf 位图：从镜像里已有的 oemN.inf 重建（真机 first-install 也是这个位图）。
+    std::vector<std::uint8_t> bitmap(kOemDriverInfFileMapSize, 0);
+    unsigned int maxSeen = 0;
+    {
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((infDir + L"\\oem*.inf").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                unsigned int index = 0;
+                if (swscanf_s(fd.cFileName, L"oem%u.inf", &index) != 1) continue;
+                if (index >= kOemDriverInfFileMapSize * 8) continue;
+                bitmap[index / 8] = static_cast<std::uint8_t>(bitmap[index / 8] | (0x80u >> (index % 8)));
+                if (index + 1 > maxSeen) maxSeen = index + 1;
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+
+    struct Package { std::wstring componentDir, infName, storeId, infPath, publishedName; std::wstring infStored; unsigned int archId = 0; };
+    std::vector<Package> packages;
+    size_t planned = 0, copied = 0, published = 0, failed = 0, skipped = 0, missing = 0;
+
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        std::size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(pos, end - pos);
+        pos = end + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+
+        std::string compDir, archName, infName, storeId;
+        // `ok` 是 JSON 布尔（不是字符串），直接找字面量。
+        if (line.find("\"ok\":true") == std::string::npos) { ++skipped; continue; }
+        if (!JsonGetString(line, "componentDir", compDir) || !JsonGetString(line, "infName", infName) ||
+            !JsonGetString(line, "storeId", storeId) || !JsonGetString(line, "arch", archName)) {
+            Err("note: 计划行缺字段，跳过：" + line);
+            ++failed;
+            continue;
+        }
+        unsigned int archId = 0;
+        if (!ArchIdFromName(FromUtf8OrAnsi(archName.c_str()), archId)) {
+            Err("note: 架构串不认识（" + archName + "），跳过");
+            ++failed;
+            continue;
+        }
+
+        // 载荷逐个拷进 FileRepository 的 <StoreId> 子目录
+        const std::wstring compDirLocal = FromUtf8OrAnsi(compDir.c_str());
+        const std::wstring infNameW = FromUtf8OrAnsi(infName.c_str());
+        const std::wstring storeIdW = FromUtf8OrAnsi(storeId.c_str());
+        const std::wstring storeDir = fileRepo + L"\\" + storeIdW;
+        const std::wstring payloadRoot = packagesRoot + L"\\" + compDirLocal;
+
+        if (!dryRun) {
+            if (!EnsureDirectoryTree(storeDir)) {
+                Err("note: 建不了驱动库目录：" + ToUtf8(storeDir));
+                ++failed;
+                continue;
+            }
+        }
+
+        bool packageOk = true;
+        std::wstring storedInf;
+        for (int i = 0;; ++i) {
+            std::string nameUtf8;
+            if (!JsonGetString(line, "file" + std::to_string(i), nameUtf8)) break;
+            const std::wstring name = FromUtf8OrAnsi(nameUtf8.c_str());
+            std::wstring src;
+            if (!FindFileIgnoreCase(payloadRoot, name, src)) {
+                Err("note: 包里没有载荷（" + ToUtf8(name) + "）：" + ToUtf8(payloadRoot));
+                packageOk = false;
+                ++missing;
+                continue;
+            }
+            const std::wstring dst = storeDir + L"\\" + name;
+            if (!dryRun) {
+                if (!CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
+                    Err("note: 拷贝失败（" + ToUtf8(name) + "，err=" + std::to_string(GetLastError()) + "）");
+                    packageOk = false;
+                    continue;
+                }
+            }
+            ++copied;
+            if (_wcsicmp(name.c_str(), infNameW.c_str()) == 0) storedInf = dst;
+        }
+        if (storedInf.empty()) {
+            Err("note: 文件列表里没有 INF 本体（" + ToUtf8(infNameW) + "）");
+            packageOk = false;
+        }
+        if (!packageOk) { ++failed; continue; }
+
+        // StoreId 以 INF 字节为权威；计划里的目录名必须对得上（算错就当场暴露）。
+        std::vector<std::uint8_t> infBytes;
+        std::wstring infReadErr;
+        if (!ReadRawBytes(storedInf, infBytes, infReadErr)) {
+            Err("note: " + ToUtf8(infReadErr));
+            ++failed;
+            continue;
+        }
+        std::wstring computed, storeErr;
+        if (!BuildStoreId(storedInf, infBytes, archId, computed, storeErr)) {
+            Err("note: " + ToUtf8(storeErr));
+            ++failed;
+            continue;
+        }
+        if (_wcsicmp(computed.c_str(), storeIdW.c_str()) != 0) {
+            Err("note: StoreId 与目录名不一致（" + ToUtf8(computed) + " != " + ToUtf8(storeIdW) + "）");
+            ++failed;
+            continue;
+        }
+
+        // 发布 INF：inbox/OS INF 保留原名；其余从位图取首个空位。
+        Package pkg;
+        pkg.componentDir = compDirLocal;
+        pkg.infName = infNameW;
+        pkg.storeId = storeIdW;
+        pkg.infStored = storedInf;
+        pkg.archId = archId;
+        if (ImportKeepsOriginalInfName(inbox ? kImportFlagInbox : 0)) {
+            pkg.publishedName = infNameW;
+        } else {
+            OemInfAllocation alloc;
+            std::wstring allocErr;
+            if (!AcquireOemInfName(bitmap, alloc, allocErr)) {
+                Err("note: " + ToUtf8(allocErr));
+                ++failed;
+                continue;
+            }
+            pkg.publishedName = alloc.name;
+        }
+        if (!dryRun) {
+            if (!EnsureDirectoryTree(infDir)) {
+                Err("note: 建不了 Windows\\INF：" + ToUtf8(infDir));
+                ++failed;
+                continue;
+            }
+            const std::wstring publishedPath = infDir + L"\\" + pkg.publishedName;
+            if (!CopyFileW(storedInf.c_str(), publishedPath.c_str(), FALSE)) {
+                Err("note: 发布 INF 失败（" + ToUtf8(pkg.publishedName) + "，err=" +
+                    std::to_string(GetLastError()) + "）");
+                ++failed;
+                continue;
+            }
+            ++published;
+        }
+        ++planned;
+        packages.push_back(std::move(pkg));
+    }
+
+    // 第二轮：DriverDatabase 计划。根值（架构 + oem 位图）用**最终**位图，只发一次。
+    std::vector<std::string> lines;
+    if (!packages.empty()) {
+        for (size_t i = 0; i < packages.size(); ++i) {
+            std::vector<std::uint8_t> infBytes;
+            std::wstring infReadErr;
+            if (!ReadRawBytes(packages[i].infStored, infBytes, infReadErr)) {
+                Err("note: " + ToUtf8(infReadErr));
+                continue;
+            }
+            InfDocument inf;
+            std::wstring parseErr;
+            if (!ParseInf(infBytes, inf, parseErr)) {
+                Err("note: INF 解析失败（" + ToUtf8(parseErr) + "）：" + ToUtf8(packages[i].infStored));
+                continue;
+            }
+            DriverLedgerRequest request;
+            request.inf = &inf;
+            request.storeId = packages[i].storeId;
+            request.infFileName = packages[i].infName;
+            request.architecture = packages[i].archId;
+            request.osMajor = osMajor;
+            request.osMinor = osMinor;
+            if (!signerName.empty()) {
+                request.signerName = signerName;
+                request.signerScore = signerScore;
+            } else if (inbox) {
+                request.importFlags = kImportFlagInbox | kImportFlagUseOriginalInfName;
+                request.signerName = L"Microsoft Windows";
+                request.signerScore = 0x0D000003u;
+            }
+            if (i == 0) request.rootOemBitmap = &bitmap;
+            const DriverLedgerPlan ledger = BuildDriverLedgerPlan(request);
+            for (const auto& note : ledger.notes) Err("note: " + ToUtf8(packages[i].storeId) + ": " + ToUtf8(note));
+            if (!ledger.ok) {
+                Err("note: 驱动库记录算不出来（" + ToUtf8(packages[i].storeId) + "）：" + ToUtf8(ledger.error));
+                ++failed;
+                continue;
+            }
+            for (const auto& key : ledger.keys) {
+                const std::string rel = "DriverDatabase\\" + ToUtf8(key.relativePath);
+                lines.push_back("K\t" + rel);
+                for (const auto& value : key.values) AppendLedgerPlanLine(rel, value, lines);
+            }
+        }
+        std::sort(lines.begin(), lines.end());
+        lines.erase(std::unique(lines.begin(), lines.end()), lines.end());
+    }
+
+    if (!planOut.empty()) {
+        if (!dryRun) {
+            const size_t slash = planOut.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) EnsureDirectoryTree(planOut.substr(0, slash));
+            FILE* f = nullptr;
+            if (_wfopen_s(&f, planOut.c_str(), L"wb") != 0 || f == nullptr) {
+                Err("写不了计划：" + ToUtf8(planOut));
+                return 2;
+            }
+            for (const auto& line : lines) {
+                fwrite(line.data(), 1, line.size(), f);
+                fwrite("\n", 1, 1, f);
+            }
+            fclose(f);
+        }
+    }
+
+    OutLn("placed packages=" + std::to_string(packages.size()) + " copied=" + std::to_string(copied) +
+          " published=" + std::to_string(published) + " planLines=" + std::to_string(lines.size()) +
+          " failed=" + std::to_string(failed) + " skipped=" + std::to_string(skipped) +
+          " missingFiles=" + std::to_string(missing) + " oemBitmapBytes=" + std::to_string(bitmap.size()) +
+          (dryRun ? " dryRun=yes" : ""));
+    return failed == 0 ? 0 : 1;
+#else
+    (void)planPath; (void)imageRoot; (void)packagesRoot; (void)planOut; (void)osVersion;
+    (void)inbox; (void)dryRun;
+    return 2;
+#endif
+}
+
 // ── CBS 台账清点（cbs-scan）──────────────────────────────────────────────
 //
 // 读一个**已挂载**的 COMPONENTS hive，把每条记录按 CbsStore 的语义解码，再原样
@@ -2252,7 +2644,7 @@ HKEY EnsureKeyCached(HKEY root, const std::string& relUtf8, std::map<std::string
 #endif
 
 static int CmdCbsWrite(const std::wstring& planPath, const std::wstring& hivePath,
-                       bool transactional)
+                       bool transactional, bool append)
 {
 #ifdef _WIN32
     std::wstring raw, err;
@@ -2267,24 +2659,39 @@ static int CmdCbsWrite(const std::wstring& planPath, const std::wstring& hivePat
         return 2;
     }
 
-    // 1) 空壳 hive 文件
-    const wchar_t* kSeed = L"SOFTWARE\\OCIDHiveSeed";
-    RegDeleteTreeW(HKEY_LOCAL_MACHINE, kSeed);
-    HKEY seed = nullptr;
-    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kSeed, 0, nullptr, 0, KEY_ALL_ACCESS, nullptr,
-                        &seed, nullptr) != ERROR_SUCCESS)
+    // 1) 目标 hive 文件
+    //
+    // 缺省：造一个空壳（种子键 → RegSaveKey）——用于从零生成 COMPONENTS 这种整库。
+    // --append：目标文件必须已存在（例如镜像里的 SYSTEM hive），只挂载不覆盖。
+    if (append)
     {
-        Err("造临时种子键失败（需要管理员）");
-        return 2;
+        const DWORD attr = GetFileAttributesW(hivePath.c_str());
+        if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        {
+            Err("--append 的目标 hive 不存在：" + ToUtf8(hivePath));
+            return 2;
+        }
     }
-    DeleteFileW(hivePath.c_str());
-    const LSTATUS saveRc = RegSaveKeyW(seed, hivePath.c_str(), nullptr);
-    RegCloseKey(seed);
-    RegDeleteTreeW(HKEY_LOCAL_MACHINE, kSeed);
-    if (saveRc != ERROR_SUCCESS)
+    else
     {
-        Err("RegSaveKey 失败：" + std::to_string(saveRc));
-        return 2;
+        const wchar_t* kSeed = L"SOFTWARE\\OCIDHiveSeed";
+        RegDeleteTreeW(HKEY_LOCAL_MACHINE, kSeed);
+        HKEY seed = nullptr;
+        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kSeed, 0, nullptr, 0, KEY_ALL_ACCESS, nullptr,
+                            &seed, nullptr) != ERROR_SUCCESS)
+        {
+            Err("造临时种子键失败（需要管理员）");
+            return 2;
+        }
+        DeleteFileW(hivePath.c_str());
+        const LSTATUS saveRc = RegSaveKeyW(seed, hivePath.c_str(), nullptr);
+        RegCloseKey(seed);
+        RegDeleteTreeW(HKEY_LOCAL_MACHINE, kSeed);
+        if (saveRc != ERROR_SUCCESS)
+        {
+            Err("RegSaveKey 失败：" + std::to_string(saveRc));
+            return 2;
+        }
     }
 
     // 2) 挂起来写
@@ -2910,6 +3317,7 @@ static void Usage()
     OutLn("  ocid_manifest csi-place <plan.jsonl> [--no-acl]   execute a place-ops plan (payload copy + hardlink + SDDL)");
     OutLn("  ocid_manifest dmi-ops --list <pathsFile> [--packages <root>]   driver import plan as JSONL");
     OutLn("  ocid_manifest dmi-ledger <fileRepoDir> [--list <dirsFile>] [--arch x86] [--inbox]   DriverDatabase records as JSONL");
+    OutLn("  ocid_manifest dmi-place <planJsonl> <imageRoot> --packages <root> [--plan-out <driverdb.txt>] [--os 6.2] [--inbox] [--dry-run]   copy driver packages into an offline image and emit the DriverDatabase plan");
     OutLn("      --image-arch: arm|arm64|amd64|x86|none（默认自动探测 ntoskrnl.exe；none = 不红移）");
     OutLn("  ocid_manifest verify-names <dir> [maxFiles]   (check component names against real file names)");
     OutLn("  ocid_manifest expand <windowsDir> <text...>   expand $(runtime.*); --paths to also show base paths");
@@ -5383,6 +5791,29 @@ int main(int argc, char** argv)
         return CmdDmiOps(dir, listFile, pkgRoot, mx);
     }
 
+    if (cmd == L"dmi-place" && argc >= 4) {
+        const std::wstring planPath = FromUtf8OrAnsi(argv[2]);
+        const std::wstring imageRoot = FromUtf8OrAnsi(argv[3]);
+        std::wstring packagesRoot, planOut, osVersion = L"6.2", signerName;
+        unsigned int signerScore = 0;
+        bool inbox = false, dryRun = false;
+        for (int i = 4; i < argc; ++i) {
+            const std::string a = argv[i];
+            if (a == "--packages" && i + 1 < argc)          { packagesRoot = FromUtf8OrAnsi(argv[++i]); }
+            else if (a == "--plan-out" && i + 1 < argc)      { planOut = FromUtf8OrAnsi(argv[++i]); }
+            else if (a == "--os" && i + 1 < argc)            { osVersion = FromUtf8OrAnsi(argv[++i]); }
+            else if (a == "--signer" && i + 1 < argc)        { signerName = FromUtf8OrAnsi(argv[++i]); }
+            else if (a == "--signer-score" && i + 1 < argc)  { signerScore = (unsigned int)std::strtoul(argv[++i], nullptr, 0); }
+            else if (a == "--inbox")                         { inbox = true; }
+            else if (a == "--dry-run")                       { dryRun = true; }
+        }
+        if (packagesRoot.empty()) {
+            Err("dmi-place 需要 --packages <包展开根>（载荷所在目录）");
+            return 2;
+        }
+        return CmdDmiPlace(planPath, imageRoot, packagesRoot, planOut, osVersion, signerName, signerScore, inbox, dryRun);
+    }
+
     if (cmd == L"dmi-ledger") {
         std::wstring dir, listFile, arch;
         bool inbox = false;
@@ -5565,10 +5996,14 @@ int main(int argc, char** argv)
     // cbs-write <planFile> <hivePath> [--transactional]：把计划文本落成 hive 文件
     if (cmd == L"cbs-write" && argc >= 4) {
         bool transactional = false;
+        bool append = false;
         for (int i = 4; i < argc; ++i) {
-            if (FromUtf8OrAnsi(argv[i]) == L"--transactional") transactional = true;
+            const std::wstring option = FromUtf8OrAnsi(argv[i]);
+            if (option == L"--transactional") transactional = true;
+            else if (option == L"--append") append = true;
         }
-        return CmdCbsWrite(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]), transactional);
+        return CmdCbsWrite(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]), transactional,
+                           append);
     }
 
     // cbs-hash：算身份折叠 / 值名后缀用的 H39 文本哈希（调试用）。
