@@ -96,6 +96,11 @@ ocid_manifest.exe cbs-write <driverdb.txt> <镜像>\Windows\System32\config\SYST
   `DriverDatabase\DriverPackages\1394.inf_x86_85b894cb1410e75c` 对拍 **9/11 个值一致**，
   差的正是 `0007`/`0008`（签名者）。
 - `Windows\INF\oemN.inf` 与仓库 INF 逐字节相同这一点已用 SHA-256 核对。
+- 收件箱驱动（如 8061 的 `1394.inf`）走 `--inbox`：`0005` 写 1、签名者 `0007/0008` 落值、
+  INF 保留原名（`Windows\INF\1394.inf`，不占 `oemN` 号）；`DriverInfFiles\1394.inf` 的
+  `0002`/`0003`/`0004` 与真机逐字节一致。
+- `DriverDatabase` 根上的 `0003`/`0004`（架构、`oemN` 位图）由 `dmi-place` 按镜像里已有的
+  `oem*.inf` 重建后随第一个包发出；因此"只装一个包"的样本与真机差在其它包的位是正常的。
 - 尚未做：`DriverDatabase` 的 `Properties` 子键走查（`cbs-dump` 在该子树会失败，
   `打不开子键：Properties`），所以对拍目前按 key 逐点读；以及"替换已有 oemN.inf 时清理旧文件"
   的策略（现在是取第一个空闲位，不覆盖）。

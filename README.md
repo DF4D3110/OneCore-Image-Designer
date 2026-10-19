@@ -181,7 +181,7 @@ pwsh -NoProfile -File .\ocid-assemble.ps1 -ImageRoot 'Q:\' `
 
 `Source/Native/OcidServicing/tools/ocid_manifest.cpp` 构建出 `ocid_manifest.exe`，这是查看与导出同一
 批决策的控制台入口（`info`、`ops`、`scan`、`export-ops`、`verify-names`、`expand`、`macros`、
-`dump-xsd`），用于全语料验证。
+`dump-xsd`），用于全语料验证。全部命令的用法、选项与示例见 `ocid_manifest help`（单条命令用 `ocid_manifest help <命令>`），默认中文说明。
 
 `Source/Native/OcidRegHook/` 是一个独立的 x86 DLL，它给 `wcp.dll` 的导入表打补丁，使上游服务栈发出的
 注册表调用可以被观察——并可选地重定向到离线 hive——而不是直接落到宿主注册表。它只被遗留的、由

@@ -3303,53 +3303,284 @@ static int CmdCsiPlace(const std::wstring& jsonlPath, bool applyAcl)
 #endif
 }
 
+// ── 命令说明（help）────────────────────────────────────────────────────────
+//
+// `ocid_manifest help` 列出全部命令与一句话说明，`ocid_manifest help <命令>`
+// 给出用法、选项、输入格式与示例。默认中文（zh-CN）；命令名保持英文，脚本可直接用。
+//
+// 这是命令清单唯一的人读来源：新增命令时在 kCommandDocs 里补一条，总览与单条帮助
+// 都从这张表生成，不会出现"Usage 里有、代码里没有"的脱节。
+struct CommandDoc
+{
+    const char* name;
+    const char* group;
+    const char* summary;
+    const char* usage;
+    const char* notes;
+};
+
+static const CommandDoc kCommandDocs[] = {
+    // ── 清单与落位 ──────────────────────────────────────────────────────
+    {"info", "清单与落位",
+     "打印一份组件清单的解析结果（身份、文件、注册表声明、依赖）。",
+     "ocid_manifest info <manifest>",
+     "输入：一份 .manifest（明文；16299+ 的 DCM 压缩清单需要全局 --dcm-dictionary <wcp.dll>）。\n"
+     "输出：身份文本、层级、<file> 清单、registryKeys/configurationSchema 数、依赖。\n"
+     "例：ocid_manifest info Q:\\Windows\\WinSxS\\Manifests\\x86_1394.inf_*.manifest"},
+    {"ops", "清单与落位",
+     "把清单展开成文件/注册表操作列表（人读或 JSON）。",
+     "ocid_manifest ops <manifest> [--json]",
+     "输出：每个操作一行；--json 时每行一个 JSON 对象，便于 C# 端消费。\n"
+     "例：ocid_manifest ops x86_1394.inf_*.manifest --json > ops.jsonl"},
+    {"scan", "清单与落位",
+     "批量扫一个清单目录，统计解析成功/失败与操作数。",
+     "ocid_manifest scan <dir> [maxFiles]",
+     "用来快速确认整目录清单都能解析（不需要镜像）。\n"
+     "例：ocid_manifest scan Q:\\Windows\\WinSxS\\Manifests 200"},
+    {"dump-xsd", "清单与落位",
+     "导出清单里内嵌的配置 schema（XSD）到文件。",
+     "ocid_manifest dump-xsd <manifest> <outFile>",
+     "例：ocid_manifest dump-xsd some.manifest some.xsd"},
+    {"export-ops", "清单与落位",
+     "目录里每份清单的操作按 JSONL 输出（给 C# 服务消费）。",
+     "ocid_manifest export-ops <dir> [maxFiles] [--list <pathsFile>]",
+     "--list：用文件列表代替扫目录，每行一个 .manifest 路径。\n"
+     "例：ocid_manifest export-ops Q:\\Windows\\WinSxS\\Manifests > ops.jsonl"},
+    {"place-ops", "清单与落位",
+     "生成文件落位计划（JSONL）：载荷 → WinSxS 正本 → 落点。",
+     "ocid_manifest place-ops --windows <winDir> (--list <pathsFile> | <dir>) [maxFiles] [--packages <root>] [--image-arch <arch>]",
+     "--windows：离线镜像的 Windows 目录（算落点用）。\n"
+     "--packages：载荷根（通常是 <image>\\Windows\\WinSxS）。\n"
+     "--image-arch：arm|arm64|amd64|x86|none；缺省按 ntoskrnl.exe 探测，none = 不做架构红移。\n"
+     "输出每行：componentDir/identity/kind/path/storePath/destinationPath/payloadPath/sddl 等。\n"
+     "例：ocid_manifest place-ops --windows W:\\Windows --packages W:\\Windows\\WinSxS W:\\Windows\\WinSxS\\Manifests > place.jsonl"},
+    {"csi-place", "清单与落位",
+     "执行 place-ops 计划：载荷复制进正本、落点建硬链接、最后套 SDDL。",
+     "ocid_manifest csi-place <plan.jsonl> [--no-acl]",
+     "顺序：先进正本（CopyFileW）、再硬链接落点（失败退化复制）、最后给文件/目录上锁。\n"
+     "--no-acl：跳过 SDDL（只做文件落位，调试用）。\n"
+     "未展开宏（$(...)）的行会跳过并计数，不瞎猜。\n"
+     "例：ocid_manifest csi-place place.jsonl"},
+    {"verify-names", "清单与落位",
+     "用真实文件名反查组件名推导规则是否正确。",
+     "ocid_manifest verify-names <dir> [maxFiles]",
+     "例：ocid_manifest verify-names Q:\\Windows\\WinSxS 500"},
+    {"expand", "清单与落位",
+     "展开文本里的 $(runtime.*) 宏。",
+     "ocid_manifest expand <windowsDir> <文本...> [--paths]",
+     "--paths：同时打印每个宏对应的基准路径。\n"
+     "例：ocid_manifest expand W:\\Windows \"$(runtime.system32)\\\\drivers\" --paths"},
+    {"macros", "清单与落位",
+     "列出已知的 $(runtime.*) 宏名。",
+     "ocid_manifest macros",
+     "例：ocid_manifest macros"},
+
+    // ── 驱动包（DMI）────────────────────────────────────────────────────
+    {"dmi-ops", "驱动包（DMI）",
+     "驱动包导入计划（JSONL）：每行一个驱动包（componentDir/StoreId/载荷清单）。",
+     "ocid_manifest dmi-ops (--list <pathsFile> | <manifestDir>) [maxFiles] [--packages <root>]",
+     "只输出 Type=driverUpdate 的包；--packages 用来检查载荷是否齐（缺文件 ok=false）。\n"
+     "例：ocid_manifest dmi-ops Q:\\Windows\\WinSxS\\Manifests --packages Q:\\Windows\\WinSxS > drv.jsonl"},
+    {"dmi-ledger", "驱动包（DMI）",
+     "从已存在的 FileRepository 目录生成 DriverDatabase 记录（JSONL）。",
+     "ocid_manifest dmi-ledger <fileRepoDir> [--list <dirsFile>] [--arch x86] [--inbox] [maxFiles]",
+     "用途：镜像里已经有驱动仓库、只缺台账时用它补；会重算 StoreId 校验目录名。\n"
+     "例：ocid_manifest dmi-ledger W:\\Windows\\System32\\DriverStore\\FileRepository --arch x86"},
+    {"dmi-place", "驱动包（DMI）",
+     "把驱动包真正落进离线镜像：FileRepository + Windows\\INF\\oemN.inf + DriverDatabase 计划。",
+     "ocid_manifest dmi-place <plan.jsonl> <imageRoot> --packages <root> [--plan-out <txt>] [--os 6.2] [--signer <名>] [--signer-score <dword>] [--inbox] [--dry-run]",
+     "--packages：载荷根（必须给）。--plan-out：产出的 DriverDatabase 台账计划，喂 cbs-write。\n"
+     "--inbox：收件箱驱动，INF 保留原名、不占 oemN，0005 写 1。\n"
+     "--signer/--signer-score：0007/0008 两个值（清单推不出，需 .cat 验签结果作为输入）。\n"
+     "--dry-run：只算不写。\n"
+     "例：ocid_manifest dmi-place drv.jsonl W:\\ --packages Q:\\Windows\\WinSxS --plan-out driverdb.txt --inbox"},
+
+    // ── CBS 台账（读与校验）──────────────────────────────────────────────
+    {"cbs-scan", "CBS 台账（读与校验）",
+     "把 COMPONENTS 台账全量解码再编码，逐值比对（读侧自证）。",
+     "ocid_manifest cbs-scan <hiveSpec> [--limit N]",
+     "hiveSpec：HKLM\\OCIDCOMP 这种已挂载路径。\n"
+     "输出：组件/部署/catalog 计数与 mismatch 数，result: OK 才算过。\n"
+     "例：ocid_manifest cbs-scan HKLM\\OCIDCOMP"},
+    {"cbs-keys", "CBS 台账（读与校验）",
+     "用真机导出的 key,identity CSV 核对伪键后缀或完整键名。",
+     "ocid_manifest cbs-keys <csvFile> [--names component|deployment]",
+     "CSV 两列带引号：\"<键名>\",\"<身份文本>\"。--names 时不比后缀，比完整键名。\n"
+     "例：ocid_manifest cbs-keys components_all.csv"},
+    {"cbs-families", "CBS 台账（读与校验）",
+     "核对由组件身份算出的家庭键是否真的出现在真机 VersionedIndex 家庭集合里。",
+     "ocid_manifest cbs-families <componentsCsv> <familiesFile>",
+     "familiesFile 每行一个家庭键。\n"
+     "例：ocid_manifest cbs-families components_all.csv families.txt"},
+    {"cbs-dump", "CBS 台账（读与校验）",
+     "把整个台账导出成规范排序文本（对拍基准）。",
+     "ocid_manifest cbs-dump <hiveSpec> <outFile>",
+     "行格式：K<TAB>路径 / V<TAB>路径<TAB>值名<TAB>类型<TAB>hex。\n"
+     "例：ocid_manifest cbs-dump HKLM\\OCIDCOMP truth.txt"},
+    {"cbs-diff", "CBS 台账（读与校验）",
+     "比较两份 cbs-dump 文本（逐键/逐值）。",
+     "ocid_manifest cbs-diff <a.txt> <b.txt> [--limit N]",
+     "输出 only-in-a / only-in-b 的键数与值数，以及前 N 条差异；全 0 才算一致。\n"
+     "例：ocid_manifest cbs-diff ours.txt truth.txt --limit 20"},
+    {"cbs-verify-store", "CBS 台账（读与校验）",
+     "台账自洽校验（不需要参考样本）。",
+     "ocid_manifest cbs-verify-store <hiveSpec>",
+     "检查：根值、组件/部署/catalog 交叉引用、家庭/版本节点、存储 ID 形态。\n"
+     "例：ocid_manifest cbs-verify-store HKLM\\OCIDCOMP"},
+    {"cbs-verify-files", "CBS 台账（读与校验）",
+     "校验组件计划里每个 f! 值的文件是否真的在镜像里（提交前防漏落位）。",
+     "ocid_manifest cbs-verify-files <plan.txt> <winSxsDir>",
+     "例：ocid_manifest cbs-verify-files plan-components.txt W:\\Windows\\WinSxS"},
+
+    // ── CBS 台账（生成与写入）────────────────────────────────────────────
+    {"cbs-plan-components", "CBS 台账（生成与写入）",
+     "生成组件记录（DerivedData\\Components）：S256H、identity、f!、c!、CF 等。",
+     "ocid_manifest cbs-plan-components <manifestDir> <outFile> [--staged <winSxsDir>] [--limit N]",
+     "--staged：镜像的 WinSxS，用来决定哪些文件真的在盘上（f! 值）。\n"
+     "可选全局开关：--dcm-dictionary（现代镜像）、--file-flags <csv>（现代 f! 状态位）、\n"
+     "--dcm-dictionary 同时决定「现代规则」是否启用。\n"
+     "例：ocid_manifest cbs-plan-components W:\\Windows\\WinSxS\\Manifests plan-c.txt --staged W:\\Windows\\WinSxS"},
+    {"cbs-plan-deployments", "CBS 台账（生成与写入）",
+     "生成部署记录与 catalog 标记（CanonicalData\\Deployments / Catalogs）。",
+     "ocid_manifest cbs-plan-deployments <packagesDir> <manifestDir> <outFile> [--markers <csv>] [--installed <csv>] [--claims <csv>] [--flags <csv>] [--sessions <dir>]",
+     "--installed：包身份|CurrentState（bit 0x40 = installed）。\n"
+     "--claims：组件键|部署键（c! 归属；安装计划输入）。\n"
+     "--flags：组件键|CF 十进制（组件标志位）。\n"
+     "--markers：部署键|appid|CatalogThumbprint|marks（p!/s!/i! 标记，安装/启用状态）。\n"
+     "--sessions：<win>\\Windows\\servicing\\Sessions（按 <Resolve> 决定 CatalogThumbprint）。\n"
+     "例：ocid_manifest cbs-plan-deployments W:\\Windows\\servicing\\Packages W:\\Windows\\WinSxS\\Manifests plan-d.txt --installed installed.csv"},
+    {"cbs-plan-versioned", "CBS 台账（生成与写入）",
+     "生成版本索引（DerivedData\\VersionedIndex）：家庭键、版本节点、f256!、CT、MCP。",
+     "ocid_manifest cbs-plan-versioned <manifestDir> <packagesDir> <stagedDir> <stackVersion> <outFile> [--buckets <csv>] [--cache <csv>] [--ct <csv>] [--version-flags <csv>] [--mcp <csv>] [--skeleton-families <csv>]",
+     "--buckets：家庭键|桶文本（安装历史：组件留在更早服务栈的桶里）。\n"
+     "--cache：桶文本|ManifestCacheIdentifier|UtilizedSpace。\n"
+     "--mcp：桶文本|familyKey|versionKey|offset|length（ManifestCache 槽表）。\n"
+     "--ct：家庭键|版本|组件键|CT（版本节点 CatalogThumbprint）。\n"
+     "--version-flags：家庭键|版本|(default) 位图。\n"
+     "--skeleton-families：只发家庭键/空版本节点/SomeUnparsedVersionsExist。\n"
+     "例：ocid_manifest cbs-plan-versioned W:\\Windows\\WinSxS\\Manifests W:\\Windows\\servicing\\Packages W:\\Windows\\WinSxS \"6.2.8061.0 (fbl_core1_soc.110803-1830)\" plan-v.txt"},
+    {"cbs-plan-root", "CBS 台账（生成与写入）",
+     "生成台账根值（格式版本、架构、执行态、Configuration/CCPInterface 等形态开关）。",
+     "ocid_manifest cbs-plan-root <arch> <stackVersion> <outFile> [--pending <32hex>] [--time <文本>] [--minimal] [--stack-entry <name>|<text>] [--ccpinterface-name <名>] [--no-configuration] [--noncanonical-data] [--transform-settings] [--installers-root] [--installers-shortcut]",
+     "arch：x86|arm|arm64|amd64|ia64。\n"
+     "--minimal：只发最小根值（现代镜像用）。\n"
+     "--stack-entry：ServicingStackVersions 条目（可多次）。\n"
+     "例：ocid_manifest cbs-plan-root x86 \"6.2.8061.0 (fbl_core1_soc.110803-1830)\" plan-root.txt --ccpinterface"},
+    {"cbs-plan-drivers", "CBS 台账（生成与写入）",
+     "生成现代镜像的 Drivers 台账（Drivers\\<arch>\\<INF>\\<base64(SHA-256(INF))>）。",
+     "ocid_manifest cbs-plan-drivers <packagesDir> <winSxsDir> <outFile> [--installed <csv>]",
+     "值名：<包身份>~<update 名>，数据 DWORD 0；架构取驱动自身声明，dual 目录逐候选试。\n"
+     "只在现代镜像（16299+，清单是 DCM）装配时使用。\n"
+     "例：ocid_manifest cbs-plan-drivers W:\\Windows\\servicing\\Packages W:\\Windows\\WinSxS plan-drv.txt --installed installed.csv"},
+    {"cbs-write", "CBS 台账（生成与写入）",
+     "把计划文本落成 hive 文件（或追加进已有 hive）。",
+     "ocid_manifest cbs-write <plan.txt> <hivePath> [--transactional] [--append]",
+     "缺省：造空壳再写（RegSaveKey 种子键 + RegLoadKey）。\n"
+     "--append：挂在已存在的 hive 上追加写（例如往镜像的 SYSTEM hive 写 DriverDatabase）。\n"
+     "--transactional：整包写入放进 KTM 事务，失败回滚。\n"
+     "例：ocid_manifest cbs-write plan.txt COMPONENTS.hiv --transactional"},
+    {"cbs-dcm-decode", "CBS 台账（生成与写入）",
+     "解 DCM 紧凑清单（16299+）成明文 XML。",
+     "ocid_manifest cbs-dcm-decode <inDcm> <outXml> --dcm-dictionary <wcp.dll>",
+     "字典来自镜像 servicing stack 的 wcp.dll（资源 type 614 id 1）。\n"
+     "例：ocid_manifest cbs-dcm-decode a.manifest a.xml --dcm-dictionary W:\\Windows\\WinSxS\\x86_microsoft-windows-servicingstack_*\\wcp.dll"},
+
+    // ── ManifestCache（PCM/微 DOM）────────────────────────────────────────
+    {"cbs-pcm-tables", "ManifestCache（PCM/CDF）",
+     "列出 PcmH 的表目录（35 项）与槽详情。",
+     "ocid_manifest cbs-pcm-tables <pcmFile>",
+     "例：ocid_manifest cbs-pcm-tables small_pcm.bin"},
+    {"cbs-pcm-reencode", "ManifestCache（PCM/CDF）",
+     "拆 PcmH 再按容器语义重编码，报是否逐字节一致。",
+     "ocid_manifest cbs-pcm-reencode <realPcm> <outPcm>",
+     "例：ocid_manifest cbs-pcm-reencode real.pcm out.pcm"},
+    {"cbs-pcm-build", "ManifestCache（PCM/CDF）",
+     "从一份清单 XML 构建 PCM 块（PcmH）。",
+     "ocid_manifest cbs-pcm-build <manifest.xml> <out.pcm> [b0Extra]",
+     "b0Extra：容器头 b0 的附加位（0..7）；缺省 0。\n"
+     "例：ocid_manifest cbs-pcm-build a.manifest a.pcm 2"},
+    {"cbs-pcm-diff", "ManifestCache（PCM/CDF）",
+     "PCM 构建器对语料的回归统计：T1 槽数 / T2 type+len / T3 payload / T4 整文件。",
+     "ocid_manifest cbs-pcm-diff <realDir> <builtDir> [--limit N]",
+     "两份目录里按同名文件配对（builtMissing 报缺）。\n"
+     "例：ocid_manifest cbs-pcm-diff real_all built_all --limit 50"},
+    {"cbs-microdom", "ManifestCache（PCM/CDF）",
+     "清单 XML → MdHd 微 DOM 段（和真机 ManifestCache 的 MdHd 表对拍）。",
+     "ocid_manifest cbs-microdom <manifest.xml> <outFile>",
+     "例：ocid_manifest cbs-microdom a.manifest a.mdhd"},
+
+    // ── 工具 ────────────────────────────────────────────────────────────
+    {"cbs-hash", "工具",
+     "算 H39 文本哈希（伪键折叠/值名后缀用的那个）。",
+     "ocid_manifest cbs-hash <文本...>",
+     "例：ocid_manifest cbs-hash \"x86_microsoft-windows-servicingstack_31bf3856ad364e35_6.2.8061.0_none\""},
+    {"help", "工具",
+     "命令说明：不带参数列全部命令，带命令名看细节。",
+     "ocid_manifest help [命令]",
+     "例：ocid_manifest help cbs-plan-components"},
+};
+
+static const CommandDoc* FindCommandDoc(const std::string& name)
+{
+    for (const CommandDoc& doc : kCommandDocs)
+        if (name == doc.name) return &doc;
+    return nullptr;
+}
+
+static void PrintCommandHelp(const CommandDoc& doc)
+{
+    OutLn(std::string("命令：") + doc.name + "（" + doc.group + "）");
+    OutLn("");
+    OutLn("用途：");
+    OutLn(std::string("  ") + doc.summary);
+    OutLn("");
+    OutLn("用法：");
+    OutLn(std::string("  ") + doc.usage);
+    if (doc.notes != nullptr && doc.notes[0] != '\0') {
+        OutLn("");
+        OutLn("选项与说明：");
+        // notes 里用 \n 分行，逐行加缩进
+        std::string text = doc.notes;
+        std::size_t pos = 0;
+        while (pos <= text.size()) {
+            std::size_t nl = text.find('\n', pos);
+            const std::string line = (nl == std::string::npos) ? text.substr(pos) : text.substr(pos, nl - pos);
+            OutLn(std::string("  ") + line);
+            if (nl == std::string::npos) break;
+            pos = nl + 1;
+        }
+    }
+}
+
 static void Usage()
 {
-    OutLn("OCID servicing console");
+    OutLn("OCID servicing console —— 命令说明");
     OutLn("");
-    OutLn("  ocid_manifest info <manifest>");
-    OutLn("  ocid_manifest ops  <manifest> [--json]");
-    OutLn("  ocid_manifest scan <dir> [maxFiles]");
-    OutLn("  ocid_manifest dump-xsd <manifest> <outFile>");
-    OutLn("  ocid_manifest export-ops <dir> [maxFiles]    registry ops as JSONL (C# consumer)");
-    OutLn("  ocid_manifest place-ops --windows <winDir> --list <pathsFile> [--packages <root>] [--image-arch <arch>]");
-    OutLn("  ocid_manifest place-ops --windows <winDir> <dir> [maxFiles]");
-    OutLn("  ocid_manifest csi-place <plan.jsonl> [--no-acl]   execute a place-ops plan (payload copy + hardlink + SDDL)");
-    OutLn("  ocid_manifest dmi-ops --list <pathsFile> [--packages <root>]   driver import plan as JSONL");
-    OutLn("  ocid_manifest dmi-ledger <fileRepoDir> [--list <dirsFile>] [--arch x86] [--inbox]   DriverDatabase records as JSONL");
-    OutLn("  ocid_manifest dmi-place <planJsonl> <imageRoot> --packages <root> [--plan-out <driverdb.txt>] [--os 6.2] [--inbox] [--dry-run]   copy driver packages into an offline image and emit the DriverDatabase plan");
-    OutLn("      --image-arch: arm|arm64|amd64|x86|none（默认自动探测 ntoskrnl.exe；none = 不红移）");
-    OutLn("  ocid_manifest verify-names <dir> [maxFiles]   (check component names against real file names)");
-    OutLn("  ocid_manifest expand <windowsDir> <text...>   expand $(runtime.*); --paths to also show base paths");
-    OutLn("  ocid_manifest macros                          list known $(runtime.*) macro names");
-    OutLn("  ocid_manifest cbs-scan HKLM\\OCIDCOMP [--limit N]   decode+re-encode every store record");
-    OutLn("  ocid_manifest cbs-keys <csvFile> [--names component|deployment]   check pseudo-key suffix / full key name");
-    OutLn("  ocid_manifest cbs-dump HKLM\\OCIDCOMP <outFile>   canonical (sorted) dump of the whole store");
-    OutLn("  ocid_manifest cbs-plan-components <manifestDir> <outFile> [--staged <winSxsDir>] [--limit N]");
-    OutLn("  ocid_manifest cbs-plan-deployments <packagesDir> <manifestDir> <outFile> [--markers <csv>]");
-    OutLn("      [--installed <csv>] [--claims <csv>] [--flags <csv>] [--sessions <dir>]");
-    OutLn("      --claims: 组件键|部署键（c! 归属，安装计划输入）；--flags: 组件键|CF 十进制");
-    OutLn("      --sessions: Windows\\servicing\\Sessions（按 <Resolve> 顺序决定 CatalogThumbprint）");
-    OutLn("  ocid_manifest cbs-plan-versioned <manifestDir> <packagesDir> <stagedDir> <stackVersion> <outFile>");
-    OutLn("      [--buckets <csv>] [--cache <csv>] [--ct <csv>] [--version-flags <csv>] [--mcp <csv>]");
-    OutLn("      [--skeleton-families <csv>]  家庭键列表：只发家庭键/空版本节点/SomeUnparsedVersionsExist");
-    OutLn("      --buckets: 家庭键|桶文本（安装历史：被更早服务栈暂存的组件留在那个桶）");
-    OutLn("      --cache: 桶文本|缓存 id 8hex|已用字节（ManifestCacheIdentifier/UtilizedSpace）");
-    OutLn("  ocid_manifest cbs-plan-root <x86|arm|arm64|amd64|ia64> <stackVersion> <outFile>");
-    OutLn("      [--pending <32hex>] [--time <timestamp 文本>]  根键值（会话态可显式给）");
-    OutLn("      [--minimal] [--ccpinterface] [--installers-shortcut]  根键形态开关");
-    OutLn("      --markers: key|appid|thumb|markers（真机导出的安装/启用状态，决定 p!/s!/i!）");
-    OutLn("  ocid_manifest cbs-plan-drivers <packagesDir> <winSxsDir> <outFile>");
-    OutLn("      现代镜像的 Drivers 台账（Drivers\\<arch>\\<inf>\\<base64 SHA-256(INF)> → <包身份>~<update 名>）");
-    OutLn("  ocid_manifest cbs-diff <a.txt> <b.txt> [--limit N]   compare two cbs-dump files");
-    OutLn("  ocid_manifest cbs-dcm-decode <inDcm> <outXml> --dcm-dictionary <wcp.dll>");
-    OutLn("  ocid_manifest cbs-verify-files <plan.txt> <winSxsDir>   check every f! value has its file staged");
-    OutLn("  ocid_manifest cbs-verify-store <hiveSpec>   self-consistency of a COMPONENTS hive (no reference needed)");
-    OutLn("  ocid_manifest cbs-write <plan.txt> <hivePath> [--transactional]   rebuild a hive file from a cbs-dump text");
-    OutLn("  ocid_manifest cbs-pcm-build <manifest.xml> <out.pcm> [b0extra]   build one WinSxS ManifestCache PcmH block");
-    OutLn("  ocid_manifest cbs-pcm-diff <realDir> <builtDir> [--limit N]   T1..T4 corpus regression for the PCM builder");
+    OutLn("用法：ocid_manifest <命令> [参数...]");
+    OutLn("      ocid_manifest help            列出全部命令");
+    OutLn("      ocid_manifest help <命令>     看某个命令的用法、选项与示例");
     OutLn("");
-    OutLn("Data goes to stdout, diagnostics to stderr.");
+    const char* groups[] = {
+        "清单与落位",
+        "驱动包（DMI）",
+        "CBS 台账（读与校验）",
+        "CBS 台账（生成与写入）",
+        "ManifestCache（PCM/CDF）",
+        "工具",
+    };
+    for (const char* group : groups) {
+        bool first = true;
+        for (const CommandDoc& doc : kCommandDocs) {
+            if (std::string(group) != doc.group) continue;
+            if (first) { OutLn(std::string("【") + group + "】"); first = false; }
+            char pad[32];
+            std::snprintf(pad, sizeof(pad), "%-22s", doc.name);
+            OutLn(std::string("  ") + pad + " " + doc.summary);
+        }
+        if (!first) OutLn("");
+    }
+    OutLn("全局开关：--dcm-dictionary <wcp.dll>（16299+ 的 DCM 清单）、--file-flags <csv>（现代 f! 状态位）。");
+    OutLn("数据走 stdout，诊断走 stderr。");
 }
 
 // ── 组件键伪键校验（cbs-keys）────────────────────────────────────────────
@@ -5721,9 +5952,25 @@ int main(int argc, char** argv)
         argv = stripped.data();
     }
 
-    if (argc < 2) { Usage(); return 1; }
+    if (argc < 2) { Usage(); return 0; }
 
     std::wstring cmd = FromUtf8OrAnsi(argv[1]);
+
+    // ── help：不带参数列全部命令，带命令名看细节（默认中文）。
+    if (cmd == L"help" || cmd == L"--help" || cmd == L"-h" || cmd == L"-?" || cmd == L"/?") {
+        if (argc >= 3) {
+            const CommandDoc* doc = FindCommandDoc(argv[2]);
+            if (doc == nullptr) {
+                Err(std::string("没有这个命令：") + argv[2]);
+                Err("运行 ocid_manifest help 看全部命令。");
+                return 2;
+            }
+            PrintCommandHelp(*doc);
+            return 0;
+        }
+        Usage();
+        return 0;
+    }
 
     if (cmd == L"info" && argc >= 3)
         return CmdInfo(FromUtf8OrAnsi(argv[2]));

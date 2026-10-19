@@ -191,7 +191,7 @@ image is worse than a reported failure.
 
 `Source/Native/OcidServicing/tools/ocid_manifest.cpp` builds `ocid_manifest.exe`, a console entry
 point for inspecting and exporting the same decisions (`info`, `ops`, `scan`, `export-ops`,
-`verify-names`, `expand`, `macros`, `dump-xsd`), used for corpus-wide verification.
+`verify-names`, `expand`, `macros`, `dump-xsd`), used for corpus-wide verification. Every command documents its usage, options and examples: run `ocid_manifest help` (or `ocid_manifest help <command>`); descriptions are Chinese by default.
 
 `Source/Native/OcidRegHook/` is a separate x86 DLL that patches `wcp.dll`'s import table so the
 registry calls the upstream servicing stack makes can be observed — and optionally redirected to an
