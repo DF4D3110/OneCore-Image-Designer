@@ -105,7 +105,7 @@
    - **`CatalogThumbprint` 的会话选择**：现代镜像的 `Sessions` 目录为空，多候选时只能按声明集合
      的最后出现顺序选；少数据会话历史。
 
-## 5. 与真机对拍结果（2026-10，四个镜像都做到 0 差异）
+## 5. 与真机对拍结果（2026-10，五个镜像都做到 0 差异）
 
 把"安装历史"那一组输入喂满（`--markers/--installed/--claims/--flags/--buckets/--cache/
 --ct/--version-flags/--mcp/--sessions`）之后，再对残余套一层**覆盖表**（`-Override`，
@@ -116,15 +116,17 @@
 | 8061 x86（`Q:`） | 43,100 键 / 120,978 值 | 43,100 键 / 120,978 值 | **only-in-a 0 / 0、only-in-b 0 / 0** | 54 行 |
 | 8061 ARM（`P:`） | 613 键 / 1,408 值 | 613 键 / 1,408 值 | **only-in-a 0 / 0、only-in-b 0 / 0** | 73 行 |
 | 8419 ARM（`E:\ocid_verify\mnt8419`） | 23,328 键 / 61,277 值 | 23,328 键 / 61,277 值 | **only-in-a 0 / 0、only-in-b 0 / 0** | 289 行 |
-| 16299 amd64（挂载的 WIM） | 73,535 键 / 215,978 值 | 73,535 键 / 215,978 值 | **only-in-a 0 / 0、only-in-b 0 / 0** | 889 行 |
+| 16299 amd64（挂载的 WIM） | 73,535 键 / 215,978 值 | 73,535 键 / 215,978 值 | **only-in-a 0 / 0、only-in-b 0 / 0** | 865 行 |
+| 9600 amd64（Win8.1，挂载的 wim） | 10,069 键 / 33,493 值 | 10,069 键 / 33,493 值 | **only-in-a 0 / 0、only-in-b 0 / 0** | 71 行 |
 
-四个镜像的 `cbs-verify-store` 也全部 `result=OK`（8419：`components=7350 deployments=911
+五个镜像的 `cbs-verify-store` 也全部 `result=OK`（8419：`components=7350 deployments=911
 catalogs=393 families=7310`）。
 
 **没有覆盖表时**（纯清单 + 安装历史输入）的差额：x86 `only-in-a 1 键 / 42 值`、
 `only-in-b 0 键 / 42 值`；ARM `only-in-a 0 键 / 20 值`、`only-in-b 0 键 / 53 值`；
 8419 `only-in-a 2 键 / 89 值`、`only-in-b 0 键 / 253 值`；
-16299 `only-in-a 30 键 / 779 值`、`only-in-b 2 键 / 420 值`。
+16299 `only-in-a 30 键 / 779 值`、`only-in-b 2 键 / 420 值`；
+9600 `only-in-a 16 键 / 55 值`、`only-in-b 0 键 / 28 值`。
 按成因分（x86）：f256 段序 24/25、identity 大小写 8/8、appid 大小写 5/5、多余 CT 3、
 `UnstagedFiles` 2、多余 `c!` 1、多余 `CatalogThumbprint` 1、多余 Catalogs 键 1 ——
 **全部落在上面第 4 节的不可推导清单里**，没有一项属于算法缺口。
@@ -135,7 +137,7 @@ ARM 侧多出的 33 条 `p!/s!/i!` 是因为 ARM 镜像只有 4 个包、没有 
 Foundation 交付 payload"复刻）。8419 的 253 条里最大一类是"骨架家庭"（已由
 `--skeleton-families` 消掉 216 条），其余是第 4 节第 8 条那些安装历史。
 
-覆盖表规模：x86 54 行、ARM 73 行、8419 289 行、16299 889 行（含 `set`/`remove`/`add-key`/`remove-key`）。
+覆盖表规模：x86 54 行、ARM 73 行、8419 289 行、16299 865 行、9600 71 行（含 `set`/`remove`/`add-key`/`remove-key`）。
 它只承担第 4 节那几类历史事实，不含任何"本可以推导"的值。
 
 两个桶的规则（`--buckets` 把家庭指到更早的服务栈桶时）：真机在**两个桶**里都有这个家庭——
@@ -530,3 +532,40 @@ Drivers\<arch>\<INF 名>\<base64(SHA-256(INF 文件字节))>
 
 
 
+
+## 9. 版本兼容矩阵（按构建号分档）
+
+同一份台账格式在 Windows 7 → 11 之间改了好几轮，**不能用一个"现代/老"开关糊过去**：
+6.3（Win8.1）就已经是 DCM 清单 + `f!` 写状态位，10.0.16212 才有 `Drivers` 台账，
+10.0.16299 才把载荷值名折叠 `__`、把 identity 归一。`CbsProfile`（`include/ocid/CbsProfile.h`）
+把这些差异做成一张按构建号取档位的表，所有计划命令开头都会打印当前档位：
+
+```
+版本档位：build=9600 family=win81 dcm=on f!dword=on cf32=on drvthumb=on drvledger=off payload-collapse=on identity-modern=off
+```
+
+| 构建号 | 清单 | `f!` | `CF` | `Drivers` | 其他 | 覆盖表 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 6.1.7268 | 明文 | 字符串 | 无 | 无 | 有 `ccpinterface`/`Installers`/`ServicingStackVersions` | 未组装 |
+| 6.2.8061 | 明文 | 字符串（带 `_<H39>` 后缀） | `4`/`5`/`12`（≤0x3F） | 无 | 无 `NonCanonicalData` | 54 / 73 |
+| 6.2.8220 / 8400 / 8419 | 明文 | 字符串 | `5` 为主 | 无 | 8220 有 `LastScavengeCookie` | 289（8419） |
+| 6.3.9600 | **DCM** | **DWORD 状态位** | 有 `0x100` 等超过 0x3F 的位 | 无 | 无 `ccpinterface`，identity 原文大小写 | 71 |
+| 10.0.10586 / 14357 | DCM | DWORD | 同上 | 无 | 有 `NonCanonicalData` | 未组装 |
+| 10.0.16212 | DCM | DWORD | 同上 | **有（骨架）** | `CCPInterface`（大写）、`TransformSettingsVersion` | 未组装 |
+| 10.0.16299 | DCM | DWORD | 同上 | 1,374 键 | 载荷名折叠 `__`、identity 归一 | 865 |
+
+档位阈值（`CbsProfileForBuild`）：
+
+* `>= 9600`：`dcmManifests`、`fileValuesAreFlags`、`configFlagsFullDword`、`catalogForDrivers`、
+  `sha256OfDecodedManifest`、`f256FromDigestValue`、`payloadNameCollapse`；
+* `>= 16212`：`driversLedger`（`Drivers\<arch>\<INF>\<base64>` 台账）；
+* `>= 16299`：`modernIdentity`（`.inf.resources` 整名小写、`en-us`→`en-US`）。
+
+构建号来源（按优先级）：`--os-build <N>` → 镜像里的 `Windows\System32\ntoskrnl.exe` 版本资源 →
+`--dcm-dictionary` 指向的 wcp.dll → 退化成"有字典当 9600、否则当 legacy"。
+WinSxS 里没有 `ntoskrnl.exe` 时用 `--os-build` 明说。
+
+**接一张新镜像的流程**：`Extract-CbsInputs.ps1` 抽输入（它会读 `ntoskrnl.exe` 写进
+`root_info.json`）→ `ocid-assemble.ps1 -ImageRoot <挂载点> -InputsDir <输入> -AutoOverrides`。
+若差额集中在某一整类值（例如所有 `f!`、所有 `S256H`），先核对打印出来的档位是否对得上这张
+镜像的世代，再决定是补一条规则还是当安装历史写进覆盖表。

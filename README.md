@@ -162,7 +162,8 @@ pwsh -NoProfile -File .\ocid-assemble.ps1 -ImageRoot 'Q:\' `
 | 读侧全库 decode→re-encode（`cbs-scan`） | 0 不一致 |
 | 组件/部署/家庭键、伪键折叠 | 13,325/13,325 与 2,283/2,283 命中 |
 | `f!`、`p!/s!/i!`、`S256H`、`CatalogThumbprint`、`Catalogs`、`f256!`、`MCP_*`、`CF` | 已解并落地 |
-| 验收（对微软原版逐键/逐值/逐字节） | 8061 x86 43,100 键/120,978 值；8061 ARM 613/1,408；8419 ARM 23,328/61,277；16299 amd64 73,535 键/215,978 值 —— `cbs-diff` 均 0/0 |
+| 验收（对微软原版逐键/逐值/逐字节） | 8061 x86 43,100 键/120,978 值；8061 ARM 613/1,408；8419 ARM 23,328/61,277；16299 amd64 73,535/215,978；9600 amd64 10,069/33,493 —— `cbs-diff` 均 0/0 |
+| 版本差异 | 按构建号分档（`CbsProfile`）：`>=9600` 起 DCM 清单 + `f!` 状态位，`>=16212` 起 `Drivers` 台账，`>=16299` 起载荷名折叠与 identity 归一；`--os-build` 可显式指定 |
 | 现代镜像（16299+） | `DCM` 紧凑清单（msdelta + `wcp.dll` 字典）已解；`f!` 改 DWORD 状态位、`f256!` 取清单声明哈希、`S256H` 取解压后 XML、新增 `Drivers` 台账 —— 全流程同样 0/0 |
 | 安装历史类值 | 作为输入：`Extract-CbsInputs.ps1` 一条命令导出，`make-cbs-overrides.ps1` 生成覆盖表 |
 | `WinSxS\ManifestCache\*_blobs.bin`（PCM/CDF） | 容器层可逐字节重建（整文件一致率 62.1% → 98.4%，2,712/2,757），剩余元素记录表形状在收尾 |
@@ -281,7 +282,7 @@ DotnetPackaging.Msix、DeflateBlockCompressor、LibSxS、Img2Ffu、StorageSpace�
 1. **服务栈的重写已完成一半以上，且已完成的部分是自带的。** SMI（WCM 声明与值编码）、CMI 合并决策、
    DMI（驱动库导入）、CSI（文件落位）、CBS（COMPONENTS 台账的读与写）以及离线 ACL/TI 处理都已由
    `Source/Native/OcidServicing` 自己实现；CBS 写侧在四个真机镜像（8061 x86、8061 ARM、8419 ARM、
-   16299 amd64）上与微软原版的 COMPONENTS 做到逐键/逐值/逐字节一致（`cbs-diff` 0/0）。尚未自带的只有
+   16299 amd64、9600 amd64）上与微软原版的 COMPONENTS 做到逐键/逐值/逐字节一致（`cbs-diff` 0/0）。尚未自带的只有
    `WinSxS\ManifestCache` 的 PCM/CDF 编码器（容器层已逐字节可复现；`src/PcmBuild.cpp` 直接由清单构建，全语料 98.4% 整文件一致）。
 2. **安装历史类信息必须作为输入。** 有些值（`f256` 多段的段序、identity 文化大小写、`c!` 归属、
    catalog 选择、`MCP_*`/(default) 位图、现代 `f!` 的非 1 状态位）来自镜像的安装历史，不能从包集推导；

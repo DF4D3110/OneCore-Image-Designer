@@ -171,7 +171,7 @@ component plan → deployment/catalog plan → versioned-index plan → root val
 | Decode → re-encode of a whole store (`cbs-scan`) | 0 mismatches |
 | Component/deployment/family keys, pseudo-key fold | 13,325/13,325 and 2,283/2,283 |
 | `f!`, `p!/s!/i!`, `S256H`, `CatalogThumbprint`, `Catalogs`, `f256!`, `MCP_*`, `CF` | solved and implemented |
-| Acceptance (per key/value/byte vs. Microsoft's store) | 8061 x86 43,100 keys/120,978 values; 8061 ARM 613/1,408; 8419 ARM 23,328/61,277; 16299 amd64 73,535 keys/215,978 values — `cbs-diff` is 0/0 for all four |
+| Acceptance (per key/value/byte vs. Microsoft's store) | 8061 x86 43,100 keys/120,978 values; 8061 ARM 613/1,408; 8419 ARM 23,328/61,277; 16299 amd64 73,535 keys/215,978 values; 9600 amd64 10,069 keys/33,493 values — `cbs-diff` is 0/0 for all five |
 | Install-history values | Taken as inputs: `Extract-CbsInputs.ps1` exports them, `make-cbs-overrides.ps1` builds the override table |
 | `WinSxS\ManifestCache\*_blobs.bin` (PCM/CDF) | Container layer reproduces byte-exactly (98.4% of whole files), element-record tables still in progress |
 | Bootable image (last mile of P1) | `Build-OcidImage.ps1` in one command: create disk -> `dism /Apply-Image` -> `bcdboot` -> swap the ledger -> `cbs-scan`/`cbs-verify-store` -> `dism /Get-Packages` before/after diff -> detach |
@@ -304,7 +304,7 @@ This is an active work in progress. Three things are worth stating plainly:
    SMI (WCM declarations and value encoding), the CMI merge decisions, DMI (driver store import),
    CSI (file placement), CBS (reading *and* writing the COMPONENTS store) and offline ACL/TrustedInstaller
    handling are all implemented in `Source/Native/OcidServicing`. For CBS, the store written for four
-   reference images (8061 x86, 8061 ARM, 8419 ARM, 16299 amd64) matches Microsoft's own COMPONENTS store byte for
+   reference images (8061 x86, 8061 ARM, 8419 ARM, 16299 amd64, 9600 amd64) matches Microsoft's own COMPONENTS store byte for
    byte, key for key, value for value (`cbs-diff` reports 0/0). The only part not yet self-contained is
    the `WinSxS\ManifestCache` PCM/CDF encoder: its container layer already reproduces files exactly, the
    element-record tables are still being worked out.
