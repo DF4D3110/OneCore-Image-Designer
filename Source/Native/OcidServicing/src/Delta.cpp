@@ -545,6 +545,11 @@ class CompositeFormat {
     }
 
     const int count = static_cast<int>(reader.ReadBit());
+    if (count > 1) {
+      // Multi-format patches still evade the reversed format switch; leave them to the msdelta
+      // fallback instead of risking a silently wrong decode.
+      throw DeltaFailure("PA30: multi-format patches are not decoded yet");
+    }
     std::int64_t accumulated = 0;
     for (int i = 0; i < count; ++i) {
       accumulated += static_cast<std::int64_t>(reader.ReadBit());

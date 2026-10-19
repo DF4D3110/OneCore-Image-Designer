@@ -210,6 +210,13 @@ namespace OcidCabinet.Delta
             }
 
             int count = (int)reader.ReadBit();
+            if (count > 1)
+            {
+                // Multi-format patches still evade the reversed format switch; the caller falls back
+                // to msdelta rather than risking a silently wrong decode.
+                throw new InvalidDataException("PA30: multi-format patches are not decoded yet");
+            }
+
             long accumulated = 0;
             var bounds = new List<long>(count);
             for (int i = 0; i < count; i++)
