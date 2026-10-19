@@ -188,6 +188,33 @@ pwsh -NoProfile -File .\ocid-assemble.ps1 `
 
 参数含义：`-SourceHive` 触发 `Extract-CbsInputs.ps1`（也可用 `-InputsDir` 复用已导出的输入，或逐个传 `-Markers/-Claims/...`）；`-ExtractDefaultBucket` 缺省取 `-StackVersion`（当前栈桶即默认桶）；`-AutoOverrides` 会用 pass 1 的 `hive-dump.txt` 与 `-DiffAgainst`（缺省 `inputs\truth.txt`）生成覆盖表再跑 pass 2；`-Transactional` 把注册表写入包进 KTM 事务。
 
+### 6.0.1 打包成可开机镜像（P1 串联的最后一公里）
+
+`Build-OcidImage.ps1` 把"台账 → 能开机的盘"做成一条命令：建 GPT 盘（ESP+MSR+NTFS）→ `dism /Apply-Image` → `bcdboot` → 备份并替换 `Windows\System32\config\COMPONENTS` → `reg load` 后 `cbs-scan`/`cbs-verify-store` → `dism /Get-Packages` 换前/换后逐条对比 → 分离磁盘。
+
+```powershell
+cd D:\GitHub_Projects\OneCore-Image-Designer\Source\Native
+
+# 新建盘（8061 x86，ISO 里就是 staged 状态）
+pwsh -NoProfile -File .\Build-OcidImage.ps1 `
+    -Wim 'G:\sources\install.wim' -Index 1 `
+    -VhdPath 'E:\ocid_verify\p5\ocid-8061-x86.vhdx' `
+    -LedgerHive 'E:\ocid_verify\oneX86\final\COMPONENTS.hiv'
+
+# 已有盘换台账（8061 ARM 那种 unstaged 盘）
+pwsh -NoProfile -File .\Build-OcidImage.ps1 `
+    -BaseVhd 'E:\ocid_verify\p5\arm-unstaged.vhd' `
+    -VhdPath 'E:\ocid_verify\p5\arm-check.vhd' `
+    -LedgerHive 'E:\ocid_verify\oneARM\final\COMPONENTS.hiv'
+```
+
+验证口径：`cbs-scan` 必须 `result: OK`；`cbs-verify-store` 必须 `result=OK`；`dism /Get-Packages` 换前/换后必须逐条相同（不同即台账的包状态与镜像不一致，会以警告退出 1）。`-BaseVhd` 是差分链时父盘要一起拷走，否则挂载失败。
+
+注意：**同一磁盘签名的 VHD 不能同时挂着**（差分盘与它的源盘就是这种情况）。两个同签名磁盘同时 attach 时 DISM 会对镜像路径报
+`Error: 87 / Offline image specified is the running system`，`dism /Get-Packages` 直接拒绝工作；脚本会把它当警告报出来。
+做法是先 detach 源盘再跑（`diskpart`: `select vdisk file="…" detach vdisk`）。
+
+
 ### 6.1 手工分步（首次用 6.0 已经不需要；保留用于逐步排障）
 
 ```powershell

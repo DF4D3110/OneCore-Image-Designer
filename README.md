@@ -166,6 +166,7 @@ pwsh -NoProfile -File .\ocid-assemble.ps1 -ImageRoot 'Q:\' `
 | 现代镜像（16299+） | `DCM` 紧凑清单（msdelta + `wcp.dll` 字典）已解；`f!` 改 DWORD 状态位、`f256!` 取清单声明哈希、`S256H` 取解压后 XML、新增 `Drivers` 台账 —— 全流程同样 0/0 |
 | 安装历史类值 | 作为输入：`Extract-CbsInputs.ps1` 一条命令导出，`make-cbs-overrides.ps1` 生成覆盖表 |
 | `WinSxS\ManifestCache\*_blobs.bin`（PCM/CDF） | 容器层可逐字节重建（整文件一致率 62.1% → 94.6%），元素记录表族仍在推进 |
+| 可开机镜像（P1 串联最后一公里） | `Build-OcidImage.ps1` 一条命令：建盘 → `dism /Apply-Image` → `bcdboot` → 换台账 → `cbs-scan`/`cbs-verify-store` → `dism /Get-Packages` 换前后对比 → 分离 |
 
 架构、算法与复现命令见 `Source/Native/OcidServicing/CBS-Writer.md`。
 
