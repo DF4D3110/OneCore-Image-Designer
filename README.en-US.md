@@ -173,7 +173,7 @@ component plan → deployment/catalog plan → versioned-index plan → root val
 | `f!`, `p!/s!/i!`, `S256H`, `CatalogThumbprint`, `Catalogs`, `f256!`, `MCP_*`, `CF` | solved and implemented |
 | Acceptance (per key/value/byte vs. Microsoft's store) | 8061 x86 43,100 keys/120,978 values; 8061 ARM 613/1,408; 8419 ARM 23,328/61,277; 16299 amd64 73,535 keys/215,978 values — `cbs-diff` is 0/0 for all four |
 | Install-history values | Taken as inputs: `Extract-CbsInputs.ps1` exports them, `make-cbs-overrides.ps1` builds the override table |
-| `WinSxS\ManifestCache\*_blobs.bin` (PCM/CDF) | Container layer reproduces byte-exactly (94.6% of whole files), element-record tables still in progress |
+| `WinSxS\ManifestCache\*_blobs.bin` (PCM/CDF) | Container layer reproduces byte-exactly (98.4% of whole files), element-record tables still in progress |
 | Bootable image (last mile of P1) | `Build-OcidImage.ps1` in one command: create disk -> `dism /Apply-Image` -> `bcdboot` -> swap the ledger -> `cbs-scan`/`cbs-verify-store` -> `dism /Get-Packages` before/after diff -> detach |
 | Driver package staging (DMI ledger) | `dmi-ops` -> `dmi-place` (payloads into `FileRepository`, INF published as `Windows\INF\oemN.inf`, `DriverDatabase` plan emitted) -> `cbs-write --append` writes it into the image's SYSTEM hive; signer info is an input (`--signer`/`--signer-score`) |
 

@@ -35,7 +35,7 @@
 | 键名段 | 小写、只留 `[a-z0-9._-]`（空格/括号被删）；超长省略为"前 half + `..` + 后 half"：组件名 40、部署名 24、culture 段 8 | 15,608 条全命中 |
 | `f!` 值名 | 形态 = 小写 + 非法字符转 `_` + 连续 `_` 合并；形态含 `_` 或长度 >25 ⇒ `f!<前25>_<H(原始名)>`，否则 `f!<形态>` | 19,006 条零例外 |
 | `f!` 值数据 | 仅当"值名后缀 ≠ 原始文件名"时写原始大小写 UTF-16LE；否则空（9,010 条空） | 同上 |
-| `p!/s!/i!` 值名 | `<前缀>CBS_<包身份小写截断64>_<H(包身份)>`，数据 = 8 字节小端长度前缀 + ASCII | 4,892/4,892 |
+| `p!/s!/i!` 值名 | `<前缀>CBS_<包身份小写截断64>_<H(包身份)>`，数据 = 8 字节小端长度前缀 + ASCII（16299+：连续 `_` 先折叠成一个，总长仍 64）| 4,892/4,892 + 16299 全量 |
 | `identity` | 清单 identity 的 `name, K=V, …`；`culture` 空/`*`⇒`neutral`、`en-*` 照抄清单大小写、其他小写；`versionScope` 规范成 `NonSxS` | 13,317/13,325（余 8 条见 §4） |
 | `S256H` | 组件清单文件的 SHA-256 | 13,325/13,325 |
 | `Catalogs\<key>` | 包 `.cat` 文件的 SHA-256；`CatalogThumbprint` 是同一 64 hex 的 REG_SZ 文本 | 792 键 + 1,703 thumb |
@@ -385,9 +385,9 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
 | 检查 | 规则 |
 |---|---|
 | 组件键名 | `键名 == CbsComponentKeyName(记录里的 identity)` |
-| `f!` 值名 | `值名 == CbsFileValueName(原始大小写文件名)` |
+| `f!` 值名 | `值名 == CbsFileValueName(原始大小写文件名)`；16299+ 的 `f!` 是 REG_DWORD 文件状态位（1/0x21/0x41/0x61），只统计成 `modern-file-flags`，不按文件名推导 |
 | 部署键名 | `键名 == CbsDeploymentKeyName(appid)` |
-| `p!/s!/i!` 值名 | `值名 == CbsPayloadValueName(前缀, 载荷身份)` |
+| `p!/s!/i!` 值名 | `值名 == CbsPayloadValueName(前缀, 载荷身份)`；出现 `modern-file-flags` 时按 16299+ 规则（连续 `_` 折叠、总长 64）|
 | `c!` 引用闭合 | 每个 `c!<部署键>` 指向的部署键必须存在 |
 | 部署 → 组件 | 每个部署的 appid 身份都有一条同名（同 pseudo-key）组件记录 |
 | Catalogs | 键都是 64 个小写 hex |
@@ -426,26 +426,33 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
      SHA-256）、36 B（`<gac>`）布局全部解出，删除对应 XML 即整条消失（knockout 证实）。
    - 仍不可推导：MdHd `b0` bit4..6（未初始化栈字节）、type6 flags.bit0、外层 28 B 包装头
      h0/h8/h10。
-   - 后续任务（"路线四"，已推进到 4b）：读 `GeneratePCM` 的 intern helpers + ladder 实验，做到"无 oracle"
-     的整份 PCM 重建。**当前进度**（严格 200 对验证集 T0..T4 = 199/200 不回退；全语料 2,757 对）：
-     T1 槽数相同 2,105（76.4%）、T2 type+len 2,012（73.0%）、T3 payload 全同 1,711（62.1%）、
-     T4 整文件同 1,711（62.1%，容器物理序修好后由 26.6% 提升；T3 通过者现在全部整文件一致）。已实现：表槽插入序 = `PCM_KEYS` 序（1,2,9,17,666,210…）、
-     `f2` = 前置记录槽号定律、sdddef 16B / `<directory>` 20B / `<memberships>` / `<string>` /
-     `<rescache>` / `<file><hash>` 16B 记录布局、表头 flags（0x10/0x20/0x40/0x01）与两个 intern 时序修正。
-     **卡点①已解（容器物理布局）**：entry 哈希表不是"固定 7/72/722 阶梯"，而是**增长模型**——
-初始 7 桶 / capacity 35；每插入一项后若 `count > capacity` 则 `newN = 2*count`、
-`capacity = 5*newN`，旧桶**按桶序 tail-append** 重建；最终物理序 = 桶 0..N-1 依次展开。
-桶索引 = `RtlHashLBlob(payload)` 的**低 32 位** mod N（`h = h*0x1FFFFFFF7 + word_le32`）。
-实测 3,041 份真实 PCM：**2,969 份（97.6%）物理序完全一致**；剩 72 份（n 恰好刚过 36 的样本）
-的差异是"缓存重写历史"——它们的 TOC 槽号（插入序）与物理序不同源，属安装历史，不可由清单推导。
-这也解释了路线四 4b 的误判：它用固定阶梯近似增长模型，对刚好跨越增长的样本等价于"桶内逆序"。
-中间产物在 `E:\ocid_verify\pcm_route3\`（`buildpcm_self.py`）、`E:\ocid_verify\pcm_route4\`
-（`buildpcm_self2.py`、`pcm_route4b.md`）与 `E:\ocid_verify\pcm_schema_route2.md`。
-仓库侧 `src/Pcm.cpp` 的 `BucketOrder()` 从一开始就是增长模型，可直接对拍（本次已用 Python 复核）。
-**仍开放**：② MdHd `b0` bit4..6 是写侧未初始化栈字节（卡 684 份，只差这 1 字节，已反编译
-`MicrodomWriterImplementation` 六个函数确认二进制里没有对它的位组合，属真 UB）；
-③ count≥7 时落盘的表 `f0` 哈希函数仍有反例（卡 110+ 份）；④ 元素记录（`<file>`/`<registryKeys>`/
-`<membership>`/`<localization>`）驱动的 key `1/2/9/16/17/201/210/666/34` 表内容（大族 0%）。
+   - 后续任务（"路线四"，已完成到 C++ 构建器）：读 `GeneratePCM` 的 intern helpers + ladder 实验，做到"无 oracle"
+     的整份 PCM 重建。**当前进度**：C++ 构建器 `src/PcmBuild.cpp`（`ocid_manifest cbs-pcm-build`）
+     直接由清单 XML 产出整份 `PcmH`，回归闸门是 `ocid_manifest cbs-pcm-diff`（T1 槽数 / T2 type+len /
+     T3 payload / T4 整文件）。全语料 2,757 对：
+     **T1 2,745（99.6%）、T2 2,737（99.3%）、T3 2,715（98.5%）、T4 整文件 2,712（98.4%）**，
+     剩余 45 份按形状分 6 族（`MCP` t8 行序 9、小表/type6/10 表行序 7、cache 记录条数 12、
+     记录字段/串池内容 13、头部串 id 表序 3、`<gac>` 位置 1）。
+     **已实现**：表槽插入序 = `PCM_KEYS` 序（1,2,9,17,666,210…）、`f2` = 前置记录槽号定律、
+     sdddef 16B / `<directory>` 20B / `<memberships>` / `<string>` / `<rescache>` / `<file><hash>` 16B
+     记录布局、表头 flags（0x10/0x20/0x40/0x01）、两个 intern 时序修正、`<signatureInfo>` 8B
+     `[flags,0]` 记录、96B `[14]`=自身槽号−1（3,244/3,244 实证）、96B `[19]`/16B hnum 槽号、
+     依赖记录前置与 `<gac>` 位置、`<firewallRule>` 聚合、key-17 `f0`=`Hash64CodePoints`。
+     **容器物理布局**：entry 哈希表不是固定 7/72/722 阶梯，而是增长模型——初始 7 桶 / capacity 35；
+     每插入一项后若 `count > capacity` 则 `newN = 2*count`、`capacity = 5*newN`，旧桶按桶序
+     tail-append 重建；物理序 = 桶 0..N-1 依次展开。桶索引 = `RtlHashLBlob(payload)` 的低 32 位
+     mod N（`h = h*0x1FFFFFFF7 + word_le32`）。
+     **唯一不能推导的输入**：文档第 0 元素记录的 `b0` bit4..6 来自真机未初始化栈字节
+     （0..7 都出现，2,757 份里 984 份只有给对 `b0_extra` 才逐字节一致）⇒ `cbs-pcm-build` 的
+     第三个参数就是它，按输入处理，不做猜测。
+     中间产物：`E:\ocid_verify\pcm_route8\report.md`（逐条规则 + 真机字节依据 + 剩余族）、
+     `E:\ocid_verify\pcm_route7\`（Python 参考实现 `buildpcm_self*.py`、`build_all.py` 语料回归）。
+   - **仍开放（45 份，6 族）**：① key-666 `t8` 行序 9 份 —— 86/90 符合"cache GUID 的 64 位哈希升序"，
+     其余 4 份（含 instrumentation/rootDevices）疑走 56 项 kinds 表的秩，表还没定；② 小表与 type6/10
+     表行序 7 份（count<7 的桶序、01104 的 f1 配对）；③ cache 记录条数 ±1..3 共 12 份（各元素发几条、
+     `systemData` ≥2 条多一条 16B uidx 列表）；④ 记录字段/串池内容 13 份；⑤ 槽全同但头部串 id/ident
+     表序不同 3 份；⑥ `<gac>` 位置边界 1 份（01742，样本唯一，未特判）。这 6 族都需要新逆向
+     （桶表顺序、kinds 表键值、串池 intern 顺序），不是靠现有规则调参能过的。
    - 注意**PCM 不影响 COMPONENTS**（`MCP_*`/`(default)` 已经走 `--mcp`/`--version-flags` 输入）。
 2. 覆盖表瘦身：第 4 节剩下的行已逐条试过推导（f256 段序试了架构/文化/CF/组件键哈希序，
    只能解释 56/60 的顺序且方向不定；CT 的归属包不在 `.mum` 声明集合里）⇒ 保留为输入。
@@ -467,6 +474,7 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
 | `f!` 值 | 类型 3，数据是原始大小写文件名的 UTF-16LE | **类型 4（REG_DWORD）文件状态位**：1（29,725）/0x21（3,521）/0x41（1,038）/0x61（1）；非 1 由 `--file-flags` 输入 |
 | `f256!` 值 | SHA-256(磁盘文件字节) 的 base64 | **清单里 `<dsig:DigestValue>` 声明哈希**的 base64（落位文件被补丁/压缩过时两者不同） |
 | `CF` | 掩码 0x3F（sparsed/corrupt/closure） | 出现 0x3F 之外的新位（如 0x200）⇒ 全 DWORD 照写 |
+| `p!/s!/i!` 值名 | 截 64，保留连续 `_` | **连续 `_` 先折叠成一个**，再截 64（例 `Product-onecore__…` → `product-onecore_…`） |
 | `Sessions` | 有 `<Resolve>` 安装会话 | 常常是空目录 ⇒ 不是错误，退回声明集合选 catalog |
 
 DCM 解码（`src/Dcm.cpp`）：字典 = `wcp.dll` 资源 type 614（0x266）id 1（`MANIFESTDICTIONARY`），
