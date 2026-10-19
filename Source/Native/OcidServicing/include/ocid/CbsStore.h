@@ -111,7 +111,9 @@ std::uint64_t CbsHashEncodedText(const std::string& text);
 // 按真机规则造值名（4,892 条 p!/s!/i! 全命中）：
 //   `<前缀>CBS_<身份文本 ASCII 小写，截断到 64 字符>_<16 个 hex 的 CbsHashEncodedText>`
 // 例：p!CBS_microsoft-windows-common-drivers-package-drivers~31bf3856ad3_c1a886620aabcbe2
-std::string CbsPayloadValueName(const std::string& prefix, const std::string& identity);
+// modern=true 时按 16299+ 的形态：先把连续 `_` 折叠成一个，再截断到 60 字符。
+std::string CbsPayloadValueName(const std::string& prefix, const std::string& identity,
+                                bool modern = false);
 
 // 按真机规则造值名：文件名（ASCII 小写）不超过 25 字符时是 `f!<小写文件名>`；更长时
 // 是 `f!<前 25 个字符>_<16 个 hex 的哈希>`。哈希的输入始终是**原始大小写**的文件名，

@@ -98,8 +98,8 @@ if (-not $SkipPlace) {
 $driverPlan = Join-Path $OutDir 'drivers.jsonl'
 $driverDbPlan = Join-Path $OutDir 'driverdb.txt'
 if (-not $SkipDrivers) {
-    if (-not $Packages) {
-        Write-Host '[stage] 跳过驱动落位（没有 -Packages：驱动载荷不在清单目录里）'
+    if (-not $Packages -or -not $Manifests) {
+        Write-Host '[stage] 跳过驱动落位（需要同时给 -Packages 和 -Manifests）'
     } else {
         $driverLines = & $Exe dmi-ops $Manifests --packages $Packages 2>&1 |
                        Where-Object { $_ -like '{*' }

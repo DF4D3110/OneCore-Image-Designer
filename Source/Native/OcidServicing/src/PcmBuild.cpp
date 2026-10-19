@@ -711,9 +711,9 @@ std::string BuildIdentTable(Interner& inter,
 // ---------------------------------------------------------------------------
 // 元素记录
 // ---------------------------------------------------------------------------
-std::string BuildFileRecord(Interner& inter, const Elem& e, int sddBlob, int ordinal,
-                            int hashAttrBlob, std::size_t nDep, bool hasTrust, int gacBlob,
-                            const std::string& sddName) {
+std::string BuildFileRecord(Interner& inter, const Elem& e, int sddBlob, std::uint32_t targets,
+                            int hashAttrBlob, int gacBlob, const std::string& sddName,
+                            std::uint32_t writeType, std::uint32_t attrFlags, int sigBlob = -1) {
     const auto a = AttrsOf(e);
     // AddFile 的 interning 顺序：sdd 名、name、loadFrom、""、""、destinationPath、
     // sourceName、sourcePath、importPath。空串返回 -1 且不入池。
@@ -728,13 +728,11 @@ std::string BuildFileRecord(Interner& inter, const Elem& e, int sddBlob, int ord
     const int idImpPath = inter.String(Attr(a, "importPath"));
     (void)nSdd;
 
-    // [14] 是生成期的 "targets" 伪 blob id：两个 blob 属于每个根依赖，
-    // trustInfo 占 1；没有 trustInfo 时 gac 记录顶替它的位置。
-    const std::uint32_t targets =
-        2u + 2u * static_cast<std::uint32_t>(nDep) + (hasTrust ? 1u : 0u) +
-        4u * static_cast<std::uint32_t>(ordinal) +
-        ((gacBlob >= 0 && !hasTrust) ? 1u : 0u) +
-        ((hashAttrBlob >= 0) ? 1u : 0u);
+    // [14] 是生成期的 "targets" 伪 blob id，等于**本条 96B 文件记录自己的
+    // blob 号减一**：真机 3244 条 96B 记录全部满足 [14] == slotIndex-1
+    // （8419 全语料，含 01368/01849 这些依赖/信任/摘要各异的样本）。
+    // 之前的 2+2*nDep+trust+4*ordinal 只是它的常见情形近似：每文件恰好
+    // 新建 4 个 blob 时两者相等，blob 被共享（同 sdd/同 digest）时就偏大。
 
     return PackU32({
         1u,                                               // [0]  writeableType
@@ -748,15 +746,16 @@ std::string BuildFileRecord(Interner& inter, const Elem& e, int sddBlob, int ord
         kNoId,                                            // [10]
         0u,                                               // [11] 属性字（语料上恒 0）
         kNoId,                                            // [12]
-        1u,                                               // [13] 常量 1
+        writeType,                                        // [13] writeableType：缺省 1、systemData 3
         targets,                                          // [14]
         static_cast<std::uint32_t>(idDest),               // [15] destinationPath
         e.uidx,                                           // [16] 微 DOM 节点索引
         static_cast<std::uint32_t>(gacBlob),              // [17] 36B <gac> 记录 blob id
         static_cast<std::uint32_t>(idName),               // [18] name
         static_cast<std::uint32_t>(sddBlob),              // [19] 8B <securityDescriptor> blob id
-        160u,                                             // [20]
-        kNoId, kNoId, 0u,                                 // [21][22][23]
+        attrFlags,                                        // [20] FILE_ATTRIBUTE 位（缺省 0xA0）
+        static_cast<std::uint32_t>(sigBlob),               // [21] <signatureInfo> 8B blob id
+        kNoId, 0u,                                         // [22][23]
     });
 }
 
@@ -793,14 +792,56 @@ std::string BuildDepRecord(std::uint32_t ordinal, bool wild) {
                     kNoId, ordinal});
 }
 
-std::string BuildDepChild(std::uint32_t ordinal, bool discoverable, const std::string& lang) {
+// 依赖子记录（16B）的 flag 只跟依赖清单里的 language 有关，跟 discoverable /
+// resourceType 都无关：全语料 2206 条依赖的统计是
+//   language="neutral"        → 0x10
+//   language="*"              → 0x90 (0x80 表示通配，同时带 0x10)
+//   其它（en-US/en-us/en-GB…）→ 0x00
+// （02701/02768/02714 的 discoverable="yes"+neutral = 0x10，02543 的 "*" = 0x90。）
+std::string BuildDepChild(std::uint32_t ordinal, const std::string& lang) {
     const bool wild = lang == "*";
-    std::uint32_t flags = discoverable ? 0u : 0x10u;
+    std::uint32_t flags = 0;
+    if (wild || lang == "neutral") flags |= 0x10u;
     if (wild) flags |= 0x80u;
     return PackU32({flags, kNoId, 2u * ordinal, wild ? 2u : 1u});
 }
 
 std::string BuildHash20() { return PackU32({kNoId, kNoId, 16u, 0u, 0x00020001u}); }
+
+// `<directory attributes="...">` / `<file attributes="...">` → 真机记录里的
+// FILE_ATTRIBUTE 位。语料只出现四种文本：缺省、`system`、`readOnly`、
+// `hidden system`。目录记录的缺省值是 FILE_ATTRIBUTE_NORMAL(0x80)，文件记录
+// 的缺省值是 NORMAL|ARCHIVE(0xA0)，所以缺省值由调用方通过 fallback 传入
+// （02963/02983 的 `hidden system` 文件 = 0x2|0x4 = 6）。
+std::uint32_t AttrFlagsFromText(const std::string& text, std::uint32_t fallback) {
+    std::uint32_t flags = 0;
+    std::size_t i = 0;
+    while (i < text.size()) {
+        while (i < text.size() &&
+               (IsSpaceByte(text[i]) || text[i] == ',' || text[i] == ';'))
+            ++i;
+        const std::size_t b = i;
+        while (i < text.size() && !IsSpaceByte(text[i]) && text[i] != ',' &&
+               text[i] != ';')
+            ++i;
+        if (i == b) break;
+        const std::string tok = LowerAscii(text.substr(b, i - b));
+        if (tok == "readonly") flags |= 0x001u;
+        else if (tok == "hidden") flags |= 0x002u;
+        else if (tok == "system") flags |= 0x004u;
+        else if (tok == "directory") flags |= 0x010u;
+        else if (tok == "archive") flags |= 0x020u;
+        else if (tok == "normal") flags |= 0x080u;
+        else if (tok == "temporary") flags |= 0x100u;
+        else if (tok == "sparsefile") flags |= 0x200u;
+        else if (tok == "reparsepoint") flags |= 0x400u;
+        else if (tok == "compressed") flags |= 0x800u;
+        else if (tok == "offline") flags |= 0x1000u;
+        else if (tok == "notcontentindexed") flags |= 0x2000u;
+        else if (tok == "encrypted") flags |= 0x4000u;
+    }
+    return flags != 0 ? flags : fallback;
+}
 
 // ---------------------------------------------------------------------------
 // 二分 / 十六进制 / base64（照 Python 的宽松语义：非法输入 → 空）
@@ -1130,6 +1171,9 @@ const char* const kCacheGuidTimezone = "2a702873068d40498cd5e33ddaffd52b";
 const char* const kCacheGuidServiceData = "ad04d55168484c46a504e6cc8a210a97";
 const char* const kCacheGuidSecurityDescriptor = "60da5f28f4317c4194072f7655a965fc";
 const char* const kCacheGuidTaskScheduler = "11596b389eb62d4da3ab796d2ec6af38";
+// <firewallRule> 全族共用一个 cache 记录（uidx 列表）和一个 GUID；
+// 该 GUID 从 02969/03001 的头部 GUID 表（offset 0x90）直接读出。
+const char* const kCacheGuidFirewallRule = "698dce68ae269f4fbea750613e7ab5c1";
 
 bool IsCacheRecordElement(const std::string& local) {
     return local == "lodctr" || local == "bfsvc" || local == "rescache" ||
@@ -1146,6 +1190,7 @@ int CacheRank(const std::string& local) {
     if (local == "migration") return -1;
     if (local == "serviceData") return 0;
     if (local == "securityDescriptor") return 1;
+    if (local == "firewallRule") return 2;
     if (local == "ngen") return 3;
     if (local == "sppInstaller") return 6;
     if (local == "rootDevices") return 7;
@@ -1341,17 +1386,40 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     std::unordered_map<std::uint32_t, std::size_t> locSlot;      // string elem → 4B slot
     std::unordered_map<std::int32_t, std::size_t> strValSlot;    // interned value id → 4B slot
     std::unordered_map<std::int32_t, std::size_t> sddSlot;       // interned sdd name id
-    std::unordered_set<std::int32_t> sddBlobSeen;
     std::unordered_map<std::int32_t, std::size_t> dirSddSlot;
     std::uint32_t hseq = (hasTrust || gacEl >= 0) ? 1u : 0u;
-    std::unordered_map<std::string, std::uint32_t> hashSeqSeen;  // DigestValue 文本
-    std::unordered_map<std::string, std::uint32_t> digestBlobSlot;  // 原始摘要字节
+    std::unordered_map<std::string, std::uint32_t> digestBlobSlot;  // 原始摘要字节 → 32B 槽号
+    std::unordered_map<std::uint32_t, std::uint32_t> sigBlobSlot;  // signatureDescriptor 位 → blob id
 
-    // ---- 3. <gac> 引导记录（36B，排在所有元素记录之前）-------------------
+    // ---- 3. 根 <dependency> 记录（文档序，永远排在最前）--------------------
     //
-    // 41/41 个带 <gac> 的样本里它都是 slot 0；dw0 只取决于两个可选属性：
+    // 依赖记录（48B + 16B）先于所有其它记录发出：00009/00018/02543 等 713 个
+    // 带 <dependency> 的样本都是 slot 0/1、2/3… 成对开头。早期把它们放在
+    // 元素循环里"顺便"发，遇到带 <gac> 的样本就错位（02543）。
+    const std::size_t nDepTotal = deps.size();
+    {
+        std::uint32_t depOrd = 0;
+        for (std::uint32_t d : deps) {
+            const std::int32_t de = depIdentity(d);
+            const std::string lang =
+                de >= 0 ? Attr(AttrsOf(elems[static_cast<std::size_t>(de)]), "language")
+                        : std::string();
+            const bool wild = lang == "*";
+            AppendSlot(slots, 1, BuildDepRecord(depOrd, wild));
+            AppendSlot(slots, 1, BuildDepChild(depOrd, lang));
+            ++depOrd;
+            hseq += 2;
+        }
+    }
+
+    // ---- 3b. <gac> 引导记录（36B）-----------------------------------------
+    //
+    // 位置不是固定的 slot 0：41 个带 <gac> 的样本里 36 个在 0、4 个在 2
+    // （02543/02544/02547/02550，恰好各有 1 条根 <dependency> = 2 个槽）、
+    // 01742 在 5（该样本第一条 <file> 没有 [17] 引用，第二条才有）。
+    // 即：它排在**依赖记录之后、第一个文件组之前**。dw0 只取决于两个可选属性：
     //   clrversion + managedculture → 22，managedculture → 6，clrversion → 31。
-    // 它还会作为 blob 先入池，所以后续 blob id（尤其 [14]）整体 +1。
+    // 它作为 blob 与槽同时入池（id == 槽号），文件记录 [17] 直接引用该槽号。
     std::int32_t gacBlob = -1;
     if (gacEl >= 0) {
         const auto ga = AttrsOf(elems[static_cast<std::size_t>(gacEl)]);
@@ -1392,34 +1460,41 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
         } else {
             blob = PackU32({0u, mvi, 0u, 0u, kNoId, 0u, 0u, 1u, kNoId});
         }
-        gacBlob = static_cast<std::int32_t>(inter.Blob(blob));
         AppendSlot(slots, 1, blob);
+        gacBlob = static_cast<std::int32_t>(slots.size() - 1u);
+    }
+
+    // ---- 3c. <ngen parameter> 进串池 --------------------------------------
+    // 5 个带 parameter 属性的样本（02543/02544/02547/02550/03005）真机串池里
+    // 都有该字符串，且它的 id 排在 gac 的 clrversion 之后、文件属性串之前
+    // （02543：0="4.0"、1="/NoDependencies /queue:1"、2=文件名）。它不被任何
+    // 记录引用，只是参与池，所以这里按文档序把值串入池即可。
+    for (const Elem& e : elems) {
+        if (e.local != "ngen") continue;
+        const std::string prm = Attr(AttrsOf(e), "parameter");
+        if (!prm.empty()) inter.String(prm);
     }
 
     // ---- 4. 元素记录（文档序）--------------------------------------------
-    const std::size_t nDepTotal = deps.size();
-    std::uint32_t depOrd = 0, fileOrd = 0;
+    std::uint32_t fileOrd = 0;
     for (std::size_t i = 0; i < elems.size(); ++i) {
         const Elem& e = elems[i];
         const std::uint32_t idx = static_cast<std::uint32_t>(i);
         if (e.local == "dependency" && e.parent == 0) {
-            const std::int32_t de = depIdentity(idx);
-            const std::string lang =
-                de >= 0 ? Attr(AttrsOf(elems[static_cast<std::size_t>(de)]), "language")
-                        : std::string();
-            const bool wild = lang == "*";
-            AppendSlot(slots, 1, BuildDepRecord(depOrd, wild));
-            const auto dat = AttrsOf(e);
-            AppendSlot(slots, 1,
-                       BuildDepChild(depOrd, Attr(dat, "discoverable") != "no", lang));
-            ++depOrd;
-            hseq += 2;
+            continue;  // 已在第 3 节统一发出
         } else if (e.local == "file" && e.parent == 0) {
             std::string sddName;
             std::string digest;
             bool haveDigest = false;
             const Elem* hashEl = nullptr;
             bool hGac = false;
+            // <signatureInfo><signatureDescriptor .../>：真机在 16B hash 记录之后、
+            // 该 hash 的 type-9 辅助表之前多发一条 8B 记录 [flags, 0]。
+            // flags 是属性位或：pageHash=2、PETrust=4（4 个样本：00486/02530/02532/02787）。
+            // 相同 flags 只发一次（02532 两个 file 的 descriptor 都是 pageHash → 仅 1 条）。
+            std::uint32_t sigFlags = 0;
+            bool haveSig = false;
+            std::int32_t sigBlob = -1;
             for (std::uint32_t k : e.kids) {
                 if (elems[k].local == "gac") hGac = true;
                 else if (elems[k].local == "securityDescriptor") {
@@ -1432,21 +1507,29 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                             haveDigest = !digest.empty();
                         }
                     }
+                } else if (elems[k].local == "signatureInfo") {
+                    for (std::uint32_t kk : elems[k].kids) {
+                        if (elems[kk].local != "signatureDescriptor") continue;
+                        const auto sa = AttrsOf(elems[kk]);
+                        haveSig = true;
+                        if (Attr(sa, "pageHash") == "true") sigFlags |= 2u;
+                        if (Attr(sa, "PETrust") == "true") sigFlags |= 4u;
+                    }
                 }
             }
 
             // [19]：真机先按 sdd 名各入池一个 8B blob（影响后续 blob id），
-            // 但 [19] 本身恒等于 2*依赖数（1 个依赖 → 2；153 样本）。
+            // [19] 就是这个 8B 记录的 blob 号（=槽号）。只有一个 sdd 名时它
+            // 恰好等于 2*依赖数；02963/02983 有两个 sdd 名（#DefaultAdminSd 与
+            // WRP_FILE_DEFAULT_SDDL），第二个 file 的 [19] 就是槽 5，不再是 0。
             std::int32_t sddBlob = -1;
             if (!sddName.empty()) {
                 const std::int32_t nid = inter.String(sddName);
-                if (sddBlobSeen.insert(nid).second) inter.Blob(PackU32({static_cast<std::uint32_t>(nid),
-                                                                       kNoId}));
-                sddBlob = static_cast<std::int32_t>(2 * nDepTotal);
                 if (sddSlot.find(nid) == sddSlot.end()) {
                     sddSlot[nid] = slots.size();
                     AppendSlot(slots, 1, PackU32({static_cast<std::uint32_t>(nid), kNoId}));
                 }
+                sddBlob = static_cast<std::int32_t>(sddSlot[nid]);
             }
 
             std::int32_t hashAttrBlob = -1;
@@ -1455,8 +1538,10 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                 std::string raw;
                 HexDecode(hAttr, raw);
                 if (!raw.empty()) {
-                    hashAttrBlob = static_cast<std::int32_t>(inter.Blob(raw));
+                    // [6] �� `<file hash="...">` ԭʼֽڵ� blob �ţ��ڱ��������� blob ��
+                    // ���ںţ�����ֱ��ȡ�۸�01001 �� [6]=1 ���Ǹ� 20B ���ڵ��±ꡣ
                     AppendSlot(slots, 1, raw);
+                    hashAttrBlob = static_cast<std::int32_t>(slots.size() - 1u);
                     ++hseq;
                 }
             }
@@ -1470,8 +1555,8 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                     if (it != digestBlobSlot.end()) {
                         hashBlob = static_cast<std::int32_t>(it->second);
                     } else {
-                        hashBlob = static_cast<std::int32_t>(inter.Blob(rawDigest));
                         AppendSlot(slots, 1, rawDigest);
+                        hashBlob = static_cast<std::int32_t>(slots.size() - 1u);
                         digestBlobSlot.emplace(rawDigest,
                                                static_cast<std::uint32_t>(hashBlob));
                     }
@@ -1486,15 +1571,20 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                 }
                 const std::uint32_t dw0 =
                     0x00010000u | (hasDigestMethod ? 0x02000000u : 0x01000000u);
+                // 16B 记录的 dword2 是 32B 摘要 blob 的 blob 号（=槽号）：
+                // 02963 三条 hnum 1/6/10 正对摘要槽 1/6/10，01849 是 1/1/8。
+                // 同一摘要重复出现时指向同一槽（01849 两个 file → hnum 都是 1）。
+                // 没有 <DigestValue> 时退回老的 hseq 经验值。
                 std::uint32_t hnum = 0;
-                if (haveDigest && hashSeqSeen.find(digest) != hashSeqSeen.end()) {
-                    hnum = hashSeqSeen[digest];
+                if (hashBlob >= 0) {
+                    hnum = static_cast<std::uint32_t>(hashBlob);
                 } else {
                     hnum = hseq;
-                    if (haveDigest) hashSeqSeen.emplace(digest, hnum);
-                    // hseq 按 <hash> 子树的"元素后代数"推进（不含 hash 自身）：
-                    // 常见 Transforms/Transform/DigestMethod/DigestValue 共 4 个，
-                    // 这就是 16B 记录 dword2 的序列号来源（经验规则，2017 样本 1992 命中）。
+                }
+                // hseq 按 <hash> 子树的"元素后代数"推进（不含 hash 自身）：
+                // 常见 Transforms/Transform/DigestMethod/DigestValue 共 4 个，
+                // 这是无摘要时 dword2 的经验来源（2017 样本 1992 命中）。
+                {
                     std::function<std::uint32_t(std::uint32_t)> ndesc =
                         [&](std::uint32_t node) -> std::uint32_t {
                         std::uint32_t n = 0;
@@ -1505,6 +1595,17 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                 }
                 const std::uint32_t h16 = static_cast<std::uint32_t>(slots.size());
                 AppendSlot(slots, 1, PackU32({dw0, kNoId, hnum, hashEl->uidx}));
+                if (haveSig) {
+                    const auto sit = sigBlobSlot.find(sigFlags);
+                    if (sit != sigBlobSlot.end()) {
+                        sigBlob = static_cast<std::int32_t>(sit->second);
+                    } else {
+                        sigBlob = static_cast<std::int32_t>(slots.size());
+                        AppendSlot(slots, 1, PackU32({sigFlags, 0u}));
+                        sigBlobSlot.emplace(sigFlags, static_cast<std::uint32_t>(sigBlob));
+                        ++hseq;  // 8B signature 记录同样占一个 hash 序列号
+                    }
+                }
                 std::vector<Row> hashRows;
                 hashRows.push_back(Row{0u, 0u, h16});
                 std::string hashPayload;
@@ -1525,9 +1626,18 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             fileRows.push_back(Row{
                 static_cast<std::uint32_t>(Hash64(LowerAscii(Attr(AttrsOf(e), "name"))) & kM32),
                 static_cast<std::uint32_t>(nameId), static_cast<std::uint32_t>(slots.size())});
+            // [14] targets = 本条记录自己的 blob 号减一 = 追加前的槽数减一。
+            const std::uint32_t targets =
+                slots.empty() ? 0u : static_cast<std::uint32_t>(slots.size() - 1u);
+            // [13] writeableType：语料只有缺省(1) 与 `systemData`(3) 两种；
+            // [20] FILE_ATTRIBUTE：缺省 NORMAL|ARCHIVE = 0xA0，`hidden system` = 6。
+            const std::uint32_t writeType =
+                Attr(AttrsOf(e), "writeableType") == "systemData" ? 3u : 1u;
+            const std::uint32_t attrFlags =
+                AttrFlagsFromText(Attr(AttrsOf(e), "attributes"), 0x0A0u);
             AppendSlot(slots, 1,
-                       BuildFileRecord(inter, e, sddBlob, static_cast<int>(fileOrd),
-                                       hashAttrBlob, nDepTotal, hasTrust, gblob, sddName));
+                       BuildFileRecord(inter, e, sddBlob, targets, hashAttrBlob, gblob, sddName,
+                                       writeType, attrFlags, sigBlob));
             ++fileOrd;
         } else if (e.local == "securityDescriptorDefinition") {
             const auto at = AttrsOf(e);
@@ -1581,7 +1691,8 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                                  Attr(dat, "owner") == "1")
                                     ? 1u
                                     : 0u,
-                                0u, kNoId, ref, 0x80u}));
+                                0u, kNoId, ref,
+                                AttrFlagsFromText(Attr(dat, "attributes"), 0x080u)}));
             dirObjs.push_back(DirObj{dslot, idx});
         } else if (e.local == "string" && strPath.find(idx) != strPath.end()) {
             const std::string val = Attr(AttrsOf(e), "value");
@@ -1637,10 +1748,15 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             isCache = elems[i].parent != kNoId &&
                       elems[elems[i].parent].local == "serviceData";
         }
-        if (ln == "events" && elems[i].parent != kNoId &&
-            elems[elems[i].parent].local == "instrumentation") {
-            isCache = false;
+        // events 的 cache 记录由 <instrumentation> 分支代表（用其 events 子节点的
+        // uidx）；events 只要祖先里有 <instrumentation> 就不再单独发射
+        // （02970 等 *-events 清单的 <provider><events> 嵌套层比真机多 1 个槽）。
+        if (ln == "events") {
+            for (std::uint32_t p = elems[i].parent; p != kNoId; p = elems[p].parent) {
+                if (elems[p].local == "instrumentation") { isCache = false; break; }
+            }
         }
+        if (ln == "firewallRule") isCache = true;
         if (isCache) celist.push_back(i);
     }
     std::sort(celist.begin(), celist.end(), [&elems](std::size_t a, std::size_t b) {
@@ -1650,6 +1766,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     });
     std::size_t migrSlot = kNoId;
     bool mofSeen = false;
+    bool fwSeen = false;
     for (std::size_t i : celist) {
         const Elem& e = elems[i];
         const std::string& ln = e.local;
@@ -1675,6 +1792,19 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             cacheSlots.push_back(static_cast<std::uint32_t>(slots.size()));
             AppendSlot(slots, 1, PackU32({e.uidx}));
             cacheGuids.push_back(GuidBytes(kCacheGuidInstrumentation));
+        } else if (ln == "firewallRule") {
+            // <firewallRule> 全族合成**一个** uidx 列表槽（02969：7 条规则 → 28B；
+            // 03001：2 条 → 8B；02972：14 条 → 56B），且不贡献 GUID
+            // （真机 t4 ident 表与本实现一致，只是 key-666 多了这一行）。
+            if (fwSeen) continue;
+            fwSeen = true;
+            cacheSlots.push_back(static_cast<std::uint32_t>(slots.size()));
+            std::string record;
+            for (const Elem& w : elems) {
+                if (w.local == "firewallRule") record += PackU32({w.uidx});
+            }
+            AppendSlot(slots, 1, record);
+            cacheGuids.push_back(GuidBytes(kCacheGuidFirewallRule));
         } else {
             const std::size_t slot = slots.size();
             cacheSlots.push_back(static_cast<std::uint32_t>(slot));
@@ -1816,25 +1946,35 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                 }
                 const std::string path = Attr(dat, "destinationPath");
                 paths.push_back(path);
-                dirRows.push_back(Row{static_cast<std::uint32_t>(Hash64(path) & kM32),
+                // key-17 的 f0 用 UTF-16 码点哈希（A..Z 折小写），不是按字节的 Hash64：
+                // 01104 的 37 个目录 f0 只有 Hash64CodePoints 能全中。
+                dirRows.push_back(Row{static_cast<std::uint32_t>(Hash64CodePoints(path) & kM32),
                                       static_cast<std::uint32_t>(inter.String(path)),
                                       static_cast<std::uint32_t>(d.slot)});
             }
             // count<7 时 f0 数组被省略，但行序仍按源表的完整 64 位 h64 % 桶数
             // 迭代（01048：SR 桶 6、Lexicon 桶 0 → 参考实现先列 Lexicon）。
-            const std::uint32_t n = dirRows.empty() ? 7u : PoolN(dirRows.size());
-            std::vector<std::size_t> order(dirRows.size());
-            for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
-            std::stable_sort(order.begin(), order.end(),
-                             [&paths, n](std::size_t a, std::size_t b) {
-                                 const std::uint64_t ha = Hash64(paths[a]) % n;
-                                 const std::uint64_t hb = Hash64(paths[b]) % n;
-                                 if (ha != hb) return ha < hb;
-                                 return a < b;
-                             });
             std::vector<Row> rows;
-            rows.reserve(dirRows.size());
-            for (std::size_t i : order) rows.push_back(dirRows[i]);
+            if (dirRows.size() >= 7) {
+                // count>=7 时表里随行输出 f0 数组，真机按 f0 升序排列
+                // （01104：37 个目录的 f0 严格升序，0x017c97e9 < 0x039f0ae1 < ...）。
+                rows = dirRows;
+                SortAsc(rows);
+            } else {
+                // count<7 时 f0 数组被省略，只能按 64 位 h64 % 桶排（01048：Lexicon 桶 0 在前）。
+                const std::uint32_t n = PoolN(dirRows.size());
+                std::vector<std::size_t> order(dirRows.size());
+                for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+                std::stable_sort(order.begin(), order.end(),
+                                 [&paths, n](std::size_t a, std::size_t b) {
+                                     const std::uint64_t ha = Hash64CodePoints(paths[a]) % n;
+                                     const std::uint64_t hb = Hash64CodePoints(paths[b]) % n;
+                                     if (ha != hb) return ha < hb;
+                                     return a < b;
+                                 });
+                rows.reserve(dirRows.size());
+                for (std::size_t i : order) rows.push_back(dirRows[i]);
+            }
             std::string payload;
             if (!MakeRecordTable(6, rows, true, payload, error)) return false;
             tbls.push_back(Slot{6, payload});

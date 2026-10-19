@@ -2079,6 +2079,7 @@ static int CmdCbsVerifyStore(const std::wstring& hiveSpec)
 
     std::size_t componentCount = 0, deploymentCount = 0, catalogCount = 0, familyCount = 0;
     std::size_t badComponentKey = 0, badFileName = 0, badDeploymentKey = 0, badPayloadName = 0;
+    std::size_t modernFileFlags = 0;
     std::size_t missingMarkTarget = 0, missingAppIdComponent = 0, badCatalogKey = 0, orphanFamily = 0;
     std::vector<std::string> samples;
 
@@ -2132,6 +2133,10 @@ static int CmdCbsVerifyStore(const std::wstring& hiveSpec)
                     for (const CbsFile& file : record.files)
                     {
                         if (file.fileName.empty()) continue;
+                        // 现代镜像（16299+）的 f! 值是 REG_DWORD 文件状态位（1/0x21/0x41/0x61）。
+                        // 4 字节数据按 UTF-16 读出来正是"1 个字符 + 结尾 NUL"，文件名推导
+                        // 规则不适用；这里只统计，不参与 fname 校验。
+                        if (file.fileName.size() == 2 && file.fileName[1] == L'\0') { ++modernFileFlags; continue; }
                         if (CbsFileValueName(file.fileName) != file.valueName)
                         {
                             ++badFileName;
@@ -2185,7 +2190,7 @@ static int CmdCbsVerifyStore(const std::wstring& hiveSpec)
 
                     for (const CbsPayload& payload : record.payloads)
                     {
-                        if (CbsPayloadValueName(payload.prefix, payload.identity) != payload.valueName)
+                        if (CbsPayloadValueName(payload.prefix, payload.identity, modernFileFlags != 0) != payload.valueName)
                         {
                             ++badPayloadName;
                             note("payload " + keyName + " " + payload.valueName);
@@ -2290,6 +2295,7 @@ static int CmdCbsVerifyStore(const std::wstring& hiveSpec)
 
     report("bad-component-key", badComponentKey);
     report("bad-file-name", badFileName);
+    if (modernFileFlags != 0) OutLn("  modern-file-flags: " + std::to_string(modernFileFlags));
     report("bad-deployment-key", badDeploymentKey);
     report("bad-payload-name", badPayloadName);
     report("missing-mark-target", missingMarkTarget);
@@ -4799,7 +4805,7 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
             {
                 if (markerList.find(prefix) == std::string::npos) continue;
                 const std::string valueName =
-                    CbsPayloadValueName(std::string(1, prefix) + "!", payloadText);
+                    CbsPayloadValueName(std::string(1, prefix) + "!", payloadText, !g_manifestDictionary.empty());
                 lines.insert("V\t" + deploymentPath + "\t" + valueName + "\t3\t" + payloadHex);
                 ++payloads;
             }

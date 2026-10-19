@@ -287,6 +287,19 @@ static void ComponentRecord()
         CheckAscii(CbsPayloadValueName("i!", payloadIdentity),
                    "i!CBS_microsoft-windows-common-drivers-package-drivers~31bf3856ad3_c1a886620aabcbe2",
                    "CbsPayloadValueName 对 i!/s! 同样适用");
+        // 16299+: collapse consecutive underscores first, then truncate to 64 total.
+        const std::string modernPayload =
+            "Product-onecore__Microsoft-Windows-Network-Security-MPSSVC-Package~31bf3856ad364e35~amd64~~10.0.16299.15.a75bbe84c92c77a8ad55def125f7c0eb";
+        char modernHash[32] = {0};
+        std::snprintf(modernHash, sizeof(modernHash), "%016llx",
+                      static_cast<unsigned long long>(CbsHashEncodedText(modernPayload)));
+        CheckAscii(modernHash, "4cf6374e841b3a8f", "modern payload identity suffix");
+        CheckAscii(CbsPayloadValueName("p!", modernPayload, true),
+                   "p!CBS_product-onecore_microsoft-windows-network-security-mpssvc-pa_4cf6374e841b3a8f",
+                   "modern payload name (16299+)");
+        CheckAscii(CbsPayloadValueName("s!", modernPayload, true),
+                   "s!CBS_product-onecore_microsoft-windows-network-security-mpssvc-pa_4cf6374e841b3a8f",
+                   "modern payload name applies to s! too");
         CheckAscii(CbsFileValueName(L"PrintAdvancedInstaller.dll"),
                    "f!printadvancedinstaller.dl_b7ff1ded0fdd6573",
                    "文件名超过 25 字符 => 前 25 + _ + 16 hex");

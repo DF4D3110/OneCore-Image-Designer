@@ -115,9 +115,22 @@ std::uint64_t CbsHashEncodedText(const std::string& text) {
     return value;
 }
 
-std::string CbsPayloadValueName(const std::string& prefix, const std::string& identity) {
+std::string CbsPayloadValueName(const std::string& prefix, const std::string& identity,
+                                bool modern) {
     std::string description = "CBS_" + LowerAscii(identity);
-    if (description.size() > 64) {
+    if (modern) {
+        // 16299+ 实测：连续 `_` 先折叠成一个；总长仍截到 64（"CBS_" 占 4，身份留 60）。
+        // 例：Product-onecore__Microsoft-…-Package~… →
+        //     CBS_product-onecore_microsoft-…-package~31bf3856ad364e_<16hex>。
+        std::string collapsed;
+        collapsed.reserve(description.size());
+        for (char c : description) {
+            if (c == L'_' && !collapsed.empty() && collapsed.back() == L'_') continue;
+            collapsed.push_back(c);
+        }
+        description.swap(collapsed);
+        if (description.size() > 64) description.resize(64);
+    } else if (description.size() > 64) {
         description.resize(64);
     }
     return prefix + description + "_" + Hex16(CbsHashEncodedText(identity));
