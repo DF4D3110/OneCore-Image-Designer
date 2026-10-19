@@ -15,12 +15,14 @@
 
 #include "ocid/ConsoleUtf8.h"
 #include "ocid/CbsStore.h"
+#include "ocid/CsiPlace.h"
 #include "ocid/DriverPackage.h"
 #include "ocid/DriverInf.h"
 #include "ocid/FilePlacement.h"
 #include "ocid/MacroExpander.h"
 #include "ocid/Manifest.h"
 #include "ocid/Pcm.h"
+#include "ocid/PcmBuild.h"
 #include "ocid/Dcm.h"
 #include "ocid/Microdom.h"
 #include "ocid/RegistryValue.h"
@@ -2619,6 +2621,190 @@ static int CmdCbsPcmReencode(const std::wstring& pcmPath, const std::wstring& ou
 
 // 16299+ 的组件清单是 DCM 压缩容器（"DCM\x01" + msdelta PA30 补丁）。
 // 这个命令把一份 DCM 清单解回原始 XML，方便取证；日常路径里 ReadFileUtf8 会透明解码。
+// cbs-pcm-build：单份清单 → 一份 PcmH。这是 PCM 表构建器（PcmBuild.cpp）的命令行
+// 入口；b0extra 是微 DOM 第一个元素记录 b0 的 bit4..6（真机是未初始化栈字节，仅逐字节
+// 对拍时需要显式给值；不给则按 0 处理）。
+static int CmdCbsPcmBuild(const std::wstring& manifestPath, const std::wstring& outPath, int b0Extra)
+{
+    std::wstring xml;
+    std::wstring readError;
+    if (!ReadFileUtf8(manifestPath, xml, readError))
+    {
+        OutLn("读不了清单：" + ToUtf8(readError));
+        return 1;
+    }
+    std::vector<std::uint8_t> pcm;
+    std::string buildError;
+    if (!ocid::PcmBuildFromManifest(ToUtf8(xml),
+                                    static_cast<std::uint8_t>(b0Extra & 7), pcm, buildError))
+    {
+        OutLn("PCM 构建失败：" + buildError);
+        return 1;
+    }
+    FILE* out = nullptr;
+    if (_wfopen_s(&out, outPath.c_str(), L"wb") != 0 || out == nullptr)
+    {
+        OutLn("写不了文件：" + ToUtf8(outPath));
+        return 1;
+    }
+    const bool written = pcm.empty() ||
+                         std::fwrite(pcm.data(), 1, pcm.size(), out) == pcm.size();
+    std::fclose(out);
+    if (!written)
+    {
+        OutLn("写文件失败：" + ToUtf8(outPath));
+        return 1;
+    }
+    OutLn("pcm bytes=" + std::to_string(pcm.size()));
+    return 0;
+}
+
+// cbs-pcm-diff <realDir> <builtDir> [--limit N]：把"我们自己构建的 PcmH"与真机语料
+// 逐份对比，按 T1..T4 四档统计（T1 槽数、T2 槽 type+len、T3 每槽载荷字节、T4 整文件）。
+// 这是 PCM 表构建器的回归闸门：改规则后跑一遍就知道命中率有没有退步。
+struct PcmSlotView
+{
+    std::uint8_t type = 0;
+    std::uint32_t length = 0;
+    std::vector<std::uint8_t> payload;
+};
+
+static bool ReadPcmSlotViews(const std::wstring& path, std::vector<PcmSlotView>& slots,
+                             std::vector<std::uint8_t>& raw, std::string& error)
+{
+    FILE* in = nullptr;
+    if (_wfopen_s(&in, path.c_str(), L"rb") != 0 || in == nullptr)
+    {
+        error = "打不开文件";
+        return false;
+    }
+    std::fseek(in, 0, SEEK_END);
+    const long size = std::ftell(in);
+    std::fseek(in, 0, SEEK_SET);
+    if (size <= 0)
+    {
+        std::fclose(in);
+        error = "空文件";
+        return false;
+    }
+    raw.resize(static_cast<std::size_t>(size));
+    const std::size_t read = std::fread(raw.data(), 1, raw.size(), in);
+    std::fclose(in);
+    if (read != raw.size())
+    {
+        error = "读文件失败";
+        return false;
+    }
+    std::uint32_t tableCount = 0, tocOffset = 0;
+    if (!ocid::PcmReadHeader(raw, tableCount, tocOffset, error)) return false;
+    const auto readU32 = [&raw](std::size_t offset) {
+        return static_cast<std::uint32_t>(raw[offset]) |
+               (static_cast<std::uint32_t>(raw[offset + 1]) << 8) |
+               (static_cast<std::uint32_t>(raw[offset + 2]) << 16) |
+               (static_cast<std::uint32_t>(raw[offset + 3]) << 24);
+    };
+    slots.clear();
+    slots.reserve(tableCount);
+    for (std::uint32_t i = 0; i < tableCount; ++i)
+    {
+        const std::uint32_t header = readU32(tocOffset + 8ull * i);
+        const std::uint32_t offset = readU32(tocOffset + 8ull * i + 4);
+        PcmSlotView slot;
+        slot.type = static_cast<std::uint8_t>(header >> 24);
+        slot.length = header & 0xFFFFFFu;
+        if (offset > raw.size() || slot.length > raw.size() - offset)
+        {
+            error = "TOC 越界";
+            return false;
+        }
+        slot.payload.assign(raw.begin() + offset, raw.begin() + offset + slot.length);
+        slots.push_back(std::move(slot));
+    }
+    return true;
+}
+
+static int CmdCbsPcmDiff(const std::wstring& realDir, const std::wstring& builtDir, long long limit)
+{
+#ifdef _WIN32
+    WIN32_FIND_DATAW found{};
+    HANDLE find = FindFirstFileW((realDir + L"\\*.pcm").c_str(), &found);
+    if (find == INVALID_HANDLE_VALUE)
+    {
+        OutLn("真机目录里没有 .pcm：" + ToUtf8(realDir));
+        return 1;
+    }
+    long long files = 0, builtMissing = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0;
+    long long firstFailures = 0;
+    do
+    {
+        if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+        if (limit > 0 && files >= limit) break;
+        ++files;
+        const std::wstring name = found.cFileName;
+        std::vector<PcmSlotView> realSlots, builtSlots;
+        std::vector<std::uint8_t> realRaw, builtRaw;
+        std::string error;
+        if (!ReadPcmSlotViews(realDir + L"\\" + name, realSlots, realRaw, error))
+        {
+            OutLn("真机样本解析失败：" + ToUtf8(name) + " " + error);
+            continue;
+        }
+        if (!ReadPcmSlotViews(builtDir + L"\\" + name, builtSlots, builtRaw, error))
+        {
+            ++builtMissing;
+            continue;
+        }
+        const bool sameCount = realSlots.size() == builtSlots.size();
+        bool sameSeq = sameCount;
+        // T3 必须蕴含 T2：先 type+len 全同，才谈得上 payload 全同。早先初值是 sameCount，
+        // 会把「槽数相同、type+len 不同」的文件也误算进 T3（实测多算 7 个）。
+        bool samePayload = false;
+        if (sameCount)
+        {
+            for (std::size_t i = 0; i < realSlots.size(); ++i)
+            {
+                if (realSlots[i].type != builtSlots[i].type ||
+                    realSlots[i].length != builtSlots[i].length)
+                {
+                    sameSeq = false;
+                    break;
+                }
+            }
+            if (sameSeq)
+            {
+                samePayload = true;
+                for (std::size_t i = 0; i < realSlots.size(); ++i)
+                {
+                    if (realSlots[i].payload != builtSlots[i].payload)
+                    {
+                        samePayload = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if (sameCount) ++t1;
+        if (sameSeq) ++t2;
+        if (samePayload) ++t3;
+        if (realRaw == builtRaw) ++t4;
+        if (!realRaw.empty() && realRaw != builtRaw && firstFailures < 5)
+        {
+            ++firstFailures;
+            OutLn("  diff: " + ToUtf8(name) + " realSlots=" + std::to_string(realSlots.size()) +
+                  " builtSlots=" + std::to_string(builtSlots.size()));
+        }
+    } while (FindNextFileW(find, &found) != 0);
+    FindClose(find);
+    OutLn("files=" + std::to_string(files) + " builtMissing=" + std::to_string(builtMissing) +
+          " T1=" + std::to_string(t1) + " T2=" + std::to_string(t2) + " T3=" + std::to_string(t3) +
+          " T4=" + std::to_string(t4));
+    return 0;
+#else
+    (void)realDir; (void)builtDir; (void)limit;
+    return 1;
+#endif
+}
+
 static int CmdCbsDcmDecode(const std::wstring& inPath, const std::wstring& outPath)
 {
 #ifdef _WIN32
@@ -2654,6 +2840,62 @@ static int CmdCbsDcmDecode(const std::wstring& inPath, const std::wstring& outPa
 #endif
 }
 
+// csi-place：执行 `place-ops` 的 JSONL（载荷 → 正本复制 → 落点硬链接 → SDDL）。
+//
+// 为什么单独一层：`place-ops` 只算计划（也可 `--list` 只出计划），真正动磁盘是
+// "复制进正本 + 硬链接落点 + 最后统一上锁"三步，顺序不能颠倒（见 `CsiPlace.h`）。
+// 统计里的 `placed` 只算"正本存在且落点确实是链接"的项 —— 写进去不算完成。
+static int CmdCsiPlace(const std::wstring& jsonlPath, bool applyAcl)
+{
+#ifdef _WIN32
+    std::wstring raw, readErr;
+    if (!ReadFileUtf8(jsonlPath, raw, readErr)) { Err(ToUtf8(readErr)); return 2; }
+    const std::string text = ToUtf8(raw);
+
+    std::vector<CsiPlaceOp> ops;
+    long long badLines = 0;
+    long long lineNo = 0;
+    std::size_t pos = 0;
+    while (pos < text.size())
+    {
+        std::size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(pos, end - pos);
+        pos = end + 1;
+        ++lineNo;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        if (line.size() >= 5 && line.compare(0, 5, "note:") == 0) continue;
+        CsiPlaceOp op;
+        std::string perr;
+        if (!ParseCsiPlaceJsonLine(line, op, perr)) {
+            Err("第 " + std::to_string(lineNo) + " 行解析失败：" + perr);
+            ++badLines;
+            continue;
+        }
+        ops.push_back(std::move(op));
+    }
+
+    if (applyAcl) {
+        std::string perr;
+        if (!EnableCsiPlacePrivileges(perr))
+            Err("提示：特权未全部启用（" + perr + "），落位可能因 DACL 失败");
+    }
+
+    const CsiPlaceResult r = PlaceCsiOps(ops, applyAcl);
+    OutLn(r.Summary());
+    for (std::size_t i = 0; i < r.notes.size() && i < 20; ++i) Err("  note: " + r.notes[i]);
+    if (r.notes.size() > 20)
+        Err("  ... 还有 " + std::to_string(r.notes.size() - 20) + " 条 note");
+    if (badLines != 0) return 1;
+    return r.failed == 0 ? 0 : 1;
+#else
+    (void)jsonlPath; (void)applyAcl;
+    Err("仅支持 Windows");
+    return 2;
+#endif
+}
+
 static void Usage()
 {
     OutLn("OCID servicing console");
@@ -2665,6 +2907,7 @@ static void Usage()
     OutLn("  ocid_manifest export-ops <dir> [maxFiles]    registry ops as JSONL (C# consumer)");
     OutLn("  ocid_manifest place-ops --windows <winDir> --list <pathsFile> [--packages <root>] [--image-arch <arch>]");
     OutLn("  ocid_manifest place-ops --windows <winDir> <dir> [maxFiles]");
+    OutLn("  ocid_manifest csi-place <plan.jsonl> [--no-acl]   execute a place-ops plan (payload copy + hardlink + SDDL)");
     OutLn("  ocid_manifest dmi-ops --list <pathsFile> [--packages <root>]   driver import plan as JSONL");
     OutLn("  ocid_manifest dmi-ledger <fileRepoDir> [--list <dirsFile>] [--arch x86] [--inbox]   DriverDatabase records as JSONL");
     OutLn("      --image-arch: arm|arm64|amd64|x86|none（默认自动探测 ntoskrnl.exe；none = 不红移）");
@@ -2695,6 +2938,8 @@ static void Usage()
     OutLn("  ocid_manifest cbs-verify-files <plan.txt> <winSxsDir>   check every f! value has its file staged");
     OutLn("  ocid_manifest cbs-verify-store <hiveSpec>   self-consistency of a COMPONENTS hive (no reference needed)");
     OutLn("  ocid_manifest cbs-write <plan.txt> <hivePath> [--transactional]   rebuild a hive file from a cbs-dump text");
+    OutLn("  ocid_manifest cbs-pcm-build <manifest.xml> <out.pcm> [b0extra]   build one WinSxS ManifestCache PcmH block");
+    OutLn("  ocid_manifest cbs-pcm-diff <realDir> <builtDir> [--limit N]   T1..T4 corpus regression for the PCM builder");
     OutLn("");
     OutLn("Data goes to stdout, diagnostics to stderr.");
 }
@@ -5115,6 +5360,14 @@ int main(int argc, char** argv)
         }
         return CmdPlaceOps(dir, listFile, winDir, pkgRoot, imageArch, mx);
     }
+    if (cmd == L"csi-place" && argc >= 3) {
+        bool applyAcl = true;
+        for (int i = 3; i < argc; ++i) {
+            const std::string a = argv[i];
+            if (a == "--no-acl") applyAcl = false;
+        }
+        return CmdCsiPlace(FromUtf8OrAnsi(argv[2]), applyAcl);
+    }
 
     if (cmd == L"dmi-ops") {
         std::wstring dir, listFile, pkgRoot;
@@ -5338,6 +5591,22 @@ int main(int argc, char** argv)
 
     if (cmd == L"cbs-pcm-reencode" && argc >= 4) {
         return CmdCbsPcmReencode(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]));
+    }
+
+    // cbs-pcm-build：单份清单 → 一份 PcmH（PCM 表构建器）。
+    if (cmd == L"cbs-pcm-build" && argc >= 4) {
+        int b0Extra = 0;
+        if (argc >= 5) b0Extra = std::atoi(argv[4]);
+        return CmdCbsPcmBuild(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]), b0Extra);
+    }
+
+    // cbs-pcm-diff：自建 PcmH 对真机语料的 T1..T4 回归统计。
+    if (cmd == L"cbs-pcm-diff" && argc >= 4) {
+        long long limit = 0;
+        for (int i = 4; i + 1 < argc; ++i) {
+            if (std::string(argv[i]) == "--limit") limit = std::atoll(argv[i + 1]);
+        }
+        return CmdCbsPcmDiff(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]), limit);
     }
 
     // cbs-microdom：清单 XML → MdHd 段（和真机 ManifestCache 的 t11 表对拍）。

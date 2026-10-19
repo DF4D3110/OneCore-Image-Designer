@@ -215,6 +215,35 @@ pwsh -NoProfile -File .\Build-OcidImage.ps1 `
 做法是先 detach 源盘再跑（`diskpart`: `select vdisk file="…" detach vdisk`）。
 
 
+### 6.0.2 CSI 落位执行（`csi-place`）
+
+台账之外还有"文件落位"这条腿：`place-ops` 只把清单算成计划（JSONL），`csi-place` 负责真正动磁盘——
+**载荷 → 正本（复制）→ 落点（硬链接）→ 最后统一上锁**。顺序不能颠倒，依据是实测：
+
+* 真机 `fsutil hardlink list Windows\System32\basesrv.dll` 给出两条链接（落点 + `WinSxS\<组件键>\`），
+  而 `packages\<组件键>\basesrv.dll` 只有一条 ⇒ CBS 把载荷**复制**进组件存储，落点才是链接；
+* `WinSxS` 归 `TrustedInstaller`，管理员也只有读+执行，`CreateDirectory` 直接 Access denied ⇒
+  必须启 **SeRestorePrivilege**（写侧绕过 DACL 检查）；
+* 新建组件目录一旦先套上 `WinSxS` 的所有者/DACL，后续复制连管理员也写不进 ⇒ 先落文件、最后上锁。
+
+```powershell
+# 1) 把清单算成落位计划（--windows 要传 Windows 目录，不是盘根；--image-arch 可显式指定）
+ocid_manifest place-ops --windows 'R:\Windows' --packages 'R:\Windows\WinSxS' --image-arch arm 'R:\Windows\WinSxS\Manifests' > place.jsonl
+
+# 2) 执行（默认写 SDDL；排障可加 --no-acl 只看文件）
+ocid_manifest csi-place place.jsonl
+#   planned=1 placed=1 copied=1 linked=1 dirs=1 acl=1 storeDirSecured=1 already=0 skipped=0 missingPayload=0 failed=0
+```
+
+统计口径是"写进去不算完成"：`placed` 只统计**正本存在且落点确实是硬链接**的项（`csi-place` 用
+`GetFileInformationByHandle` 比文件索引验证，`fsutil hardlink list` 也给出两条链接）。三种情况不会瞎猜：
+含未展开宏（`unresolved` 非空）⇒ 跳过；载荷不存在 ⇒ `missingPayload` 记账、不建空文件；
+正本与落点都在 ⇒ `already=1`、不重复复制（幂等）。
+
+测试：`ocid_place_tests.exe` 118/118（新增 `TestCsiPlace`：真实 JSON 行解析、非 JSON 拒绝、
+载荷复制+硬链接（文件索引相同）、幂等重跑、缺载荷、未展开宏）。冒烟里套过 SDDL 的目录会
+**真的**变得只有 TI 能写 —— 清理时得 `takeown /f … /r` + `icacls … /grant …:(OI)(CI)F`，这本身
+就是"最后上锁"生效的证据。
 ### 6.1 手工分步（首次用 6.0 已经不需要；保留用于逐步排障）
 
 ```powershell

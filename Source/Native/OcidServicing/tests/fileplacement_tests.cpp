@@ -14,6 +14,7 @@
 #include <windows.h>
 
 #include "ocid/ConsoleUtf8.h"
+#include "ocid/CsiPlace.h"
 #include "ocid/FilePlacement.h"
 #include "ocid/Manifest.h"
 #include "ocid/SecurityDescriptor.h"
@@ -407,6 +408,127 @@ static void TestPathSddl()
     Check(!PathExists(base), "测试目录已清理");
 }
 
+// ── ⑤ 落位执行器（place-ops JSONL -> 磁盘）────────────────────────────────
+// 这一层的关键不是"解析对了"，而是**幂等 + 落点真的是硬链接**：
+// `PlaceCsiOps` 的 `placed` 只统计"正本存在且落点是链接"的项。
+static void TestCsiPlace()
+{
+    printf("\n== ⑤ CSI 落位执行器 ==\n");
+
+    // ① place-ops 的真实输出形态（扁平 JSON，路径里有反斜杠转义）
+    const char* lineFile = R"J({"component":"arm_microsoft-windows-basesrv_31bf3856ad364e35_6.2.8061.0_none_93d3f64c57474751","identity":"Microsoft-Windows-Basesrv, Culture=neutral, Version=6.2.8061.0","componentDir":"C:\\img\\Windows\\WinSxS\\arm_basesrv","kind":"file","name":"basesrv.dll","storeDir":"C:\\img\\Windows\\WinSxS\\arm_basesrv","storePath":"C:\\img\\Windows\\WinSxS\\arm_basesrv\\basesrv.dll","destinationPath":"C:\\img\\Windows\\System32\\basesrv.dll","payloadPath":"C:\\img\\packages\\arm_basesrv\\basesrv.dll","sddl":"D:P(A;;FA;;;SY)(A;;FA;;;BA)","sdName":"WRP_FILE_DEFAULT_SDDL","writeableType":"","writeable":false,"redirected":false,"unresolved":""})J";
+
+    CsiPlaceOp op;
+    std::string perr;
+    Check(ParseCsiPlaceJsonLine(lineFile, op, perr), "解析 file 行");
+    CheckStr(op.storePath, L"C:\\img\\Windows\\WinSxS\\arm_basesrv\\basesrv.dll", "storePath 反斜杠已反转义");
+    CheckStr(op.payloadPath, L"C:\\img\\packages\\arm_basesrv\\basesrv.dll", "payloadPath");
+    CheckStr(op.sddl, L"D:P(A;;FA;;;SY)(A;;FA;;;BA)", "sddl 原文");
+    Check(op.kind == "file", "kind=file");
+    Check(!op.redirected, "redirected=false");
+    Check(op.unresolved.empty(), "unresolved 为空");
+
+    // ② 目录行 + 未展开宏
+    const char* lineDir = R"J({"component":"arm_basesrv","identity":"","kind":"directory","path":"C:\\img\\Windows\\Public\\Desktop","sddl":"D:P(A;;GA;;;SY)","unresolved":""})J";
+    CsiPlaceOp od;
+    Check(ParseCsiPlaceJsonLine(lineDir, od, perr), "解析 directory 行");
+    CheckStr(od.path, L"C:\\img\\Windows\\Public\\Desktop", "directory path");
+    CheckStr(od.sddl, L"D:P(A;;GA;;;SY)", "directory sddl");
+
+    const char* lineUnres = R"J({"component":"x","kind":"file","storePath":"C:\\s\\a.dll","destinationPath":"","payloadPath":"","sddl":"","unresolved":"$(build.nttree)\\"})J";
+    CsiPlaceOp ou;
+    Check(ParseCsiPlaceJsonLine(lineUnres, ou, perr), "解析带未展开宏的行");
+    CheckStr(ou.unresolved, L"$(build.nttree)\\", "unresolved 原文（尾随反斜杠保留）");
+
+    // ③ 坏行必须报错，不许"猜一个计划"出来
+    CsiPlaceOp bad;
+    std::string berr;
+    Check(!ParseCsiPlaceJsonLine("not json at all", bad, berr), "非 JSON 行被拒绝");
+    Check(!berr.empty(), "拒绝时带原因");
+
+    // ④ 真落位：载荷 -> 正本（复制）+ 落点（硬链接）
+    const std::wstring base = TempDir(L"csiplace");
+    const std::wstring pkg = base + L"\\packages\\arm_basesrv";
+    const std::wstring store = base + L"\\Windows\\WinSxS\\arm_basesrv";
+    ::CreateDirectoryW(base.c_str(), nullptr);
+    ::CreateDirectoryW((base + L"\\packages").c_str(), nullptr);
+    ::CreateDirectoryW(pkg.c_str(), nullptr);
+    const std::wstring payload = pkg + L"\\basesrv.dll";
+    {
+        HANDLE h = ::CreateFileW(payload.c_str(), GENERIC_WRITE, 0, nullptr,
+                                 CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Check(h != INVALID_HANDLE_VALUE, "造载荷文件");
+        const char body[] = "payload-bytes";
+        DWORD written = 0;
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            ::WriteFile(h, body, sizeof(body) - 1, &written, nullptr);
+            ::CloseHandle(h);
+        }
+    }
+
+    CsiPlaceOp p1;
+    p1.component = "arm_basesrv";
+    p1.kind = "file";
+    p1.storeDir = store;
+    p1.storePath = store + L"\\basesrv.dll";
+    p1.payloadPath = payload;
+    p1.destinationPath = base + L"\\Windows\\System32\\basesrv.dll";
+    CsiPlaceResult r1 = PlaceCsiOps({p1}, false);
+    CheckInt(r1.planned, 1, "planned=1");
+    CheckInt(r1.missingPayload, 0, "载荷齐 ⇒ missingPayload=0");
+    CheckInt(r1.copied, 1, "载荷复制进正本 1 次");
+    CheckInt(r1.linked, 1, "建了 1 条硬链接");
+    CheckInt(r1.failed, 0, "没有失败项");
+    Check(::GetFileAttributesW(p1.storePath.c_str()) != INVALID_FILE_ATTRIBUTES, "正本已生成");
+    Check(::GetFileAttributesW(p1.destinationPath.c_str()) != INVALID_FILE_ATTRIBUTES, "落点已生成");
+
+    // 硬链接的判据是**文件索引相同**（同一卷内），不是路径存在
+    auto sameFile = [](const std::wstring& a, const std::wstring& b) -> bool {
+        HANDLE ha = ::CreateFileW(a.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                  nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        HANDLE hb = ::CreateFileW(b.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                  nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        bool same = false;
+        if (ha != INVALID_HANDLE_VALUE && hb != INVALID_HANDLE_VALUE)
+        {
+            BY_HANDLE_FILE_INFORMATION ia = {}, ib = {};
+            if (::GetFileInformationByHandle(ha, &ia) && ::GetFileInformationByHandle(hb, &ib))
+                same = ia.dwVolumeSerialNumber == ib.dwVolumeSerialNumber &&
+                       ia.nFileIndexHigh == ib.nFileIndexHigh && ia.nFileIndexLow == ib.nFileIndexLow;
+        }
+        if (ha != INVALID_HANDLE_VALUE) ::CloseHandle(ha);
+        if (hb != INVALID_HANDLE_VALUE) ::CloseHandle(hb);
+        return same;
+    };
+    Check(sameFile(p1.storePath, p1.destinationPath), "落点与正本是同一个文件（硬链接）");
+
+    // ⑤ 幂等重跑：正本与落点都在 ⇒ alreadyPresent，绝不再复制
+    CsiPlaceResult r2 = PlaceCsiOps({p1}, false);
+    CheckInt(r2.alreadyPresent, 1, "重跑记 alreadyPresent=1");
+    CheckInt(r2.copied, 0, "重跑不复制");
+    CheckInt(r2.linked, 0, "重跑不重建链接");
+
+    // ⑥ 载荷缺失：不猜、不建空文件
+    CsiPlaceOp p2 = p1;
+    p2.payloadPath = pkg + L"\\nolonger.dll";
+    p2.storePath = store + L"\\nolonger.dll";
+    p2.destinationPath = base + L"\\Windows\\System32\\nolonger.dll";
+    CsiPlaceResult r3 = PlaceCsiOps({p2}, false);
+    CheckInt(r3.missingPayload, 1, "缺载荷 ⇒ missingPayload=1");
+    Check(::GetFileAttributesW(p2.destinationPath.c_str()) == INVALID_FILE_ATTRIBUTES, "缺载荷不产生落点");
+
+    // ⑦ 未展开宏：整条跳过（绝不猜路径）
+    CsiPlaceOp p3 = p1;
+    p3.unresolved = L"$(build.nttree)\\";
+    p3.storePath = store + L"\\kdcom.dll";
+    p3.destinationPath = base + L"\\Windows\\System32\\kdcom.dll";
+    CsiPlaceResult r4 = PlaceCsiOps({p3}, false);
+    CheckInt(r4.skipped, 1, "含未展开宏 ⇒ skipped=1");
+    Check(::GetFileAttributesW(p3.destinationPath.c_str()) == INVALID_FILE_ATTRIBUTES, "未展开宏不落位");
+
+    RmTree(base);
+}
 int main()
 {
     SetupConsoleUtf8();
@@ -415,6 +537,7 @@ int main()
     TestPayloadProbe();
     TestArchRedirection();
     TestPathSddl();
+    TestCsiPlace();
 
     printf("\n通过 %d / 失败 %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
