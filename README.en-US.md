@@ -183,6 +183,24 @@ cabinets fall back too. `Services/CabExtraction.cs` reports those as unsupported
 using `expand.exe`; every other desktop extraction path (`CabHelper`, `UpdatePackageService`,
 `DeviceLayoutService`, `CbsBuildService`, `CbsBuildViewModel`) now decodes in-process.
 
+Cabinets can also be used on their own, outside the desktop app: `Source/Managed/OcidCabinet.Tool/`
+builds `ocid_cab.exe` (Chinese help by default; command names stay English so scripts can call them):
+
+```powershell
+dotnet build .\Source\Managed\OcidCabinet.Tool\OcidCabinet.Tool.csproj --configuration Release
+# -> Source\Managed\OcidCabinet.Tool\bin\Release\net8.0\ocid_cab.exe
+
+ocid_cab info a.cab            # header, per-folder compression/block layout, total size
+ocid_cab list a.cab --long     # entries: size, timestamp, attributes, folder
+ocid_cab extract a.cab out     # extract (MSZIP and LZX); --verbose reports each entry
+ocid_cab cat a.cab update.mum --output update.mum   # pull a single entry
+ocid_cab verify a.cab          # extract to a temp dir, hash every file, confirm it all decodes
+```
+
+`extract` refuses container CABs by default (their entries are numbered ids and `PA30` deltas — run
+`expand.exe` first); `--force` dumps the raw payloads. Sparse CABs are always refused, with the reason.
+Exit codes: 0 success, 1 usage error, 2 cabinet or extraction failure.
+
 ### CBS store writer (COMPONENTS)
 
 `CbsStore` encodes and decodes the COMPONENTS store; `ocid_manifest cbs-write` and
@@ -240,6 +258,7 @@ Tests/                    Offline regression harness
 Source/Native/OcidServicing/  Project-owned C++ servicing stack: library, console tool and native tests
 Source/Native/OcidRegHook/    Diagnostic registry interception DLL for the legacy CBS path
 Source/Managed/OcidCabinet/   Project-owned CAB decompressors (MSZIP DEFLATE and LZX) shared by the toolchain and the desktop side
+Source/Managed/OcidCabinet.Tool/  ocid_cab console: inspect, extract, dump and self-verify cabinets, usable standalone
 Tools/wcpex/              Vendored wcpex.exe + wcp.dll, used to decompress DCM-compressed manifests
 ThirdParty/               Vendored UUP source closure used by UupBridge
 addonkit/                 Bundled Microsoft iot-adk-addonkit 17763-v7 (PowerShell toolchain + sample workspace)

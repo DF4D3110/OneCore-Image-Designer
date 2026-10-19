@@ -166,6 +166,23 @@ container CAB（WU 更新包，条目按 id 编号，真实文件名与 `PA30` d
 约定）；多卷包同样回退。桌面侧其它解包路径（`CabHelper`、`UpdatePackageService`、
 `DeviceLayoutService`、`CbsBuildService`、`CbsBuildViewModel`）都已改为进程内解包。
 
+CAB 也可以脱离主程序单独使用：`Source/Managed/OcidCabinet.Tool/` 构建出 `ocid_cab.exe`，说明默认中文，
+命令名保持英文以便脚本调用：
+
+```powershell
+dotnet build .\Source\Managed\OcidCabinet.Tool\OcidCabinet.Tool.csproj --configuration Release
+# -> Source\Managed\OcidCabinet.Tool\bin\Release\net8.0\ocid_cab.exe
+
+ocid_cab info a.cab            # 柜头、folder 的压缩/块布局、总大小
+ocid_cab list a.cab --long     # 条目、未压缩大小、时间、属性、所在 folder
+ocid_cab extract a.cab out     # 解包（MSZIP 与 LZX），--verbose 逐条目报进度
+ocid_cab cat a.cab update.mum --output update.mum   # 抽单个条目
+ocid_cab verify a.cab          # 解到临时目录并算每文件 SHA-256，确认全部可解码
+```
+
+`extract` 对 container CAB 默认拒绝（条目是数字 id 与 `PA30` delta，先过 `expand.exe`），加 `--force`
+才原样取载荷；sparse CAB 一律拒绝并说明原因。退出码：0 成功、1 用法错误、2 柜文件或解包失败。
+
 ### CBS 台账写侧（COMPONENTS）
 
 `CbsStore` 负责 COMPONENTS 台账的编解码，`ocid_manifest cbs-write` 与 `assemble-cbs-store.ps1` 负责
@@ -228,6 +245,7 @@ Tests/                    离线回归测试
 Source/Native/OcidServicing/  项目自有 C++ 服务栈：库、控制台工具与原生测试
 Source/Native/OcidRegHook/    遗留 CBS 路径用的诊断注册表拦截 DLL
 Source/Managed/OcidCabinet/   自有的 CAB 解压器（MSZIP 的 DEFLATE 与 LZX），供包工具与桌面侧共用
+Source/Managed/OcidCabinet.Tool/  ocid_cab 控制台：查看/解包/抽取/自校验 CAB，可独立使用
 Tools/wcpex/              内置 wcpex.exe + wcp.dll，用于解压 DCM 压缩的清单
 ThirdParty/               UupBridge 使用的内置 UUP 源码闭包
 addonkit/                 内置的微软 iot-adk-addonkit 17763-v7（PowerShell 工具链 + 示例工作区）

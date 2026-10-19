@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ocid_cab: a standalone console front end for the project-owned CAB reader.
+
+    The container reader lives in MobilePackageGen/Cabinet (the vendored WPMT fork);
+    the MSZIP (DEFLATE) and LZX decoders it drives are our own, in
+    Source/Managed/OcidCabinet. This tool exists so the CAB side can be used on its
+    own - listing, inspecting, extracting and self-verifying cabinets without the
+    desktop application, and without expand.exe for ordinary cabinets.
+
+    It is intentionally independent of the WPF project: no UI assemblies, net8.0
+    only, so it can be built and shipped as a single console binary.
+
+    Usage text defaults to zh-CN; command names stay English so scripts can call
+    them. See Program.cs for the command table.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>ocid_cab</AssemblyName>
+    <RootNamespace>OcidCabinet.Tool</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <Platforms>x86;x64;ARM64;ARM32</Platforms>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\MobilePackageGen\Cabinet\Cabinet.Net.csproj" />
+  </ItemGroup>
+
+</Project>

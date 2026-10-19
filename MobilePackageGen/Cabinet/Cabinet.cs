@@ -173,12 +173,22 @@ namespace Cabinet
             get; set;
         }
 
+        /// <summary>
+        /// Index of the folder that holds this entry's data. Reporting only: the folder's
+        /// compression type is available from <see cref="Cabinet.FolderInfo"/>.
+        /// </summary>
+        public ushort FolderIndex
+        {
+            get; set;
+        }
+
         internal CabinetFile(CabinetVolumeFile file)
         {
             FileName = file.FileName;
             FileAttributes = file.CabinetFileVolumeFile.GetFileAttributes();
             TimeStamp = file.CabinetFileVolumeFile.GetDateTime();
             UncompressedSize = file.CabinetFileVolumeFile.cbFile;
+            FolderIndex = file.CabinetFileVolumeFile.iFolder;
         }
 
         public override string ToString()
@@ -231,6 +241,48 @@ namespace Cabinet
         /// 0xFFFD..0xFFFF) that this reader cannot reconstruct yet.
         /// </summary>
         public bool IsSparse { get; }
+
+        /// <summary>
+        /// Header facts for callers that report on a cabinet (the ocid_cab tool):
+        /// cabinet set id, cabinet index in the set, format version, folder/file counts
+        /// and the declared cabinet length in bytes.
+        /// </summary>
+        public (ushort SetId, ushort Index, byte Major, byte Minor, int Folders, int Files, uint SizeBytes) HeaderInfo
+        {
+            get
+            {
+                CFHEADER header = cabinetHeader.CabinetFileHeader;
+                return (header.setID, header.iCabinet, header.versionMajor, header.versionMinor,
+                        header.cFolders, header.cFiles, header.cbCabinet);
+            }
+        }
+
+        /// <summary>
+        /// Per-folder compression and block layout, in folder order. Reporting only; the
+        /// names are format names ("MSZIP", "LZX", "QUANTUM", "NONE") so callers can localise.
+        /// </summary>
+        public IReadOnlyList<(int Index, string Compression, byte Option, int DataBlocks, uint FirstBlockOffset)> FolderInfo
+        {
+            get
+            {
+                List<(int, string, byte, int, uint)> folders = new(volumes.Count);
+                int index = 0;
+                foreach (CabinetVolume volume in volumes)
+                {
+                    CFFOLDER folder = volume.CabinetFileVolume;
+                    string compression = folder.typeCompress switch
+                    {
+                        CFFOLDER.CFTYPECOMPRESS.TYPE_MSZIP => "MSZIP",
+                        CFFOLDER.CFTYPECOMPRESS.TYPE_LZX => "LZX",
+                        CFFOLDER.CFTYPECOMPRESS.TYPE_QUANTUM => "QUANTUM",
+                        _ => "NONE",
+                    };
+                    folders.Add((index++, compression, folder.typeCompressOption,
+                                 folder.dataBlockCount, folder.firstDataBlockOffset));
+                }
+                return folders;
+            }
+        }
 
         #region Reading Metadata
         private CabinetHeader ReadHeader(Stream cabinetStream)
