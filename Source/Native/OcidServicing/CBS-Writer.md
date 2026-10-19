@@ -460,6 +460,19 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
      8B + subcategory 串 id、key-9 `<string id>` 按 `SitOrder`、t10 按 `Hash64(subcategory)` 升序、
      68B `[11]` = 20B deployment blob 槽号。报告 `E:\ocid_verify\pcm_route9\report.md`。
    - 注意**PCM 不影响 COMPONENTS**（`MCP_*`/`(default)` 已经走 `--mcp`/`--version-flags` 输入）。
+   - **已知失败白名单**：11 份单样本的完整文件名与形态固化在
+     `Source/Native/OcidServicing/pcm-known-fails.txt`。全量 diff 的失败集必须恰好等于这份清单，
+     否则视为回归或新形态，解释清楚再提交。
+   - **第二套语料（6.3.9600）已接入**：把 `E:\windesktop\6.3.9600.16384…\backup1.wim` 只读挂载后，
+     `Windows\WinSxS\ManifestCache\cd9d9638180dfb77_blobs.bin`（18,089,221 B）按 LZNT1 拆出
+     **2,787 个 PCM 块**（2,784 个可用池键）；同镜像 3,025 份清单用
+     `cbs-pcm-build --dcm-dictionary <9600 的 9,066 B 字典>` 构建后按串池（MdSp）配对：
+     **2,784 对，T1 2,657（95.4%）/ T2 2,650（95.2%）/ T3 2,331（83.7%）/ T4 2,331（83.7%）**。
+     453 份未过的差异已归类，最大三类是：① MdHd 头里某个段偏移比真机小 0x30/0x50（134 份）；
+     ② t10 记录对顺序 `(3,2)` vs `(2,3)`（75 份）；③ 我方多出一份 MdHd、真机是短记录（55 份）。
+     另有 241 份清单没有配到块（多语种/缺块）。9600 的清单是 XML（少数 2,525 B 的是 DCM 压缩，需字典），
+     9600 的 PCM 规则与 8419 有版本差异，这些差异是下一轮可直接开工的条目（有配对可逐字节验收）。
+     复现脚本 `E:\ocid_verify\pcm9600\run9600.py`（拆块 `E:\ocid_verify\mcp\split8419b.py`）。
 2. 覆盖表瘦身：第 4 节剩下的行已逐条试过推导（f256 段序试了架构/文化/CF/组件键哈希序，
    只能解释 56/60 的顺序且方向不定；CT 的归属包不在 `.mum` 声明集合里）⇒ 保留为输入。
    16299 的 865 行里最大一块是 `Drivers` 台账的 14 条虚拟驱动 + identity 71 条历史写法。

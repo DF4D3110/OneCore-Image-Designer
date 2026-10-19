@@ -1,0 +1,19 @@
+# PCM 构建器（`ocid_manifest cbs-pcm-build`）的已知失败白名单
+#
+# 语料：E:\ocid_verify\mnt8419 的 2,757 对 (manifest, PCM 块)，2026-10-19 route9。
+# 基线：T1 2,752 / T2 2,751 / T3 2,746 / T4 2,746。下面 11 份是 T4 未过的全部，
+# 均为单样本形态（语料里各只出现一次）；按“不硬凑”原则如实留白。
+# 规则：跑全量 diff 时，如果失败集 != 本文件，就是回归或新情况，必须解释后再提交。
+#
+# 文件名                                                          首个差异 / 形态
+arm_microsoft-windows-m..oyment-languagepack_31bf3856ad364e35_6.2.8419.0_en-us_fdc3fb8ff997aad1.manifest   t11 身份表 (列,id) 对顺序
+arm_microsoft-windows-b..nager-efi.resources_31bf3856ad364e35_6.2.8419.0_en-us_0805ca3fc0f1c2a7.manifest   多一组 8B 句柄记录 + t9 + t4
+arm_microsoft.windows.c..-controls.resources_6595b64144ccf1df_6.0.8419.0_en-us_a989be020620c20f.manifest   t10 行序 / catRank
+arm_microsoft.windows.c..-controls.resources_6595b64144ccf1df_5.82.8419.0_en-us_75ec4d2875d0c50e.manifest t10 行序 / catRank
+arm_microsoft-windows-g..licy-base.resources_31bf3856ad364e35_6.2.8419.0_en-us_4a6270fe48eb03ea.manifest t10 行序：catRank [2,0,1] vs SitOrder [0,2,1]
+arm_microsoft-windows-p..structure.resources_31bf3856ad364e35_6.2.8419.0_en-us_ee4a310293ef266c.manifest   16B uidx 列表 {0x75,0x97,0xb9,0xdb} + 4B {0x12f}
+arm_microsoft-windows-s..gement-ui.resources_31bf3856ad364e35_6.2.8419.0_en-us_ae52c9a599160839.manifest   池内 tie 交换
+arm_windowssearchengine.resources_31bf3856ad364e35_7.0.8419.0_en-us_48246f520b104592.manifest               槽数 −2
+x86_microsoft-windows-servicingstack_31bf3856ad364e35_6.2.8419.0_none_928ac4539f522fd6.manifest              槽数 −3
+arm_microsoft-windows-s..mponent-sku-corearm_31bf3856ad364e35_6.2.8419.0_none_8c43cf59104c4eee.manifest     dir 20B dword1=10
+x86_microsoft-windows-pnpplugininstaller_1122334455667788_6.2.8419.0_none_fe5938771ba19d58.manifest         28B installerRegistration 缓存记录 {0,-1,-1,-1,2,-1,0}

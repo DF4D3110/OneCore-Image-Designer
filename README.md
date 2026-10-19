@@ -213,7 +213,7 @@ pwsh -NoProfile -File .\ocid-assemble.ps1 -ImageRoot 'Q:\' `
 | 版本差异 | 按构建号分档（`CbsProfile`）：`>=9600` 起 DCM 清单 + `f!` 状态位，`>=16212` 起 `Drivers` 台账，`>=16299` 起载荷名折叠与 identity 归一；`--os-build` 可显式指定 |
 | 现代镜像（16299+） | `DCM` 紧凑清单（msdelta + `wcp.dll` 字典）已解；`f!` 改 DWORD 状态位、`f256!` 取清单声明哈希、`S256H` 取解压后 XML、新增 `Drivers` 台账 —— 全流程同样 0/0 |
 | 安装历史类值 | 作为输入：`Extract-CbsInputs.ps1` 一条命令导出，`make-cbs-overrides.ps1` 生成覆盖表 |
-| `WinSxS\ManifestCache\*_blobs.bin`（PCM/CDF） | 容器层可逐字节重建（整文件一致率 62.1% → 99.6%，2,746/2,757），剩 11 份单样本形态 |
+| `WinSxS\ManifestCache\*_blobs.bin`（PCM/CDF） | 容器层可逐字节重建（整文件一致率 62.1% → 99.6%，2,746/2,757），剩 11 份单样本形态（白名单 `Source/Native/OcidServicing/pcm-known-fails.txt`）；另接入 6.3.9600 第二套语料 2,784 对，T4 2,331（83.7%），差异已归类 |
 | 可开机镜像（P1 串联最后一公里） | `Build-OcidImage.ps1` 一条命令：建盘 → `dism /Apply-Image` → `bcdboot` → 换台账 → `cbs-scan`/`cbs-verify-store` → `dism /Get-Packages` 换前后对比 → 分离 |
 | 驱动包落位（DMI 台账） | `dmi-ops` → `dmi-place`（载荷进 `FileRepository`、INF 发布成 `Windows\INF\oemN.inf`、产出 `DriverDatabase` 计划）→ `cbs-write --append` 写进镜像的 SYSTEM hive；签名者信息作为输入（`--signer`/`--signer-score`） |
 
