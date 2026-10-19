@@ -3219,18 +3219,18 @@ struct DeploymentPlan
 {
     // 声明过本部署组件的包（按 .mum 文件名升序追加，即"声明顺序"）。
     // 为什么要留住全部候选：真机选哪个 .cat 当 CatalogThumbprint 既不是"最后声明"、
-    // 也不是"已安装优先"，而是**安装会话里最后被 <Resolve> 的那个包**（见
+    // 也不是"置位优先"，而是**安装会话里最后被 <Resolve> 的那个包**（见
     // ChooseDeploymentCatalog），所以选择必须推迟到读完会话日志之后做。
     struct Candidate
     {
         std::string packageId;   // 包身份（与 Sessions\*.xml 的 `<Resolve package="…">` 同口径）
         std::string catalogHex;  // 该包同名 .cat 的 SHA-256
-        bool installed = false;  // --installed 的 CurrentState & 0x40
+        bool installed = false;  // --installed 的 CurrentState & 0x40（installed 位）
     };
     std::string appId;             // store 里组件的 identity 文本（真机 appid 就取这个）
     bool driver = false;           // appid 含 ", Type=driverUpdate" ⇒ 不写 catalog
     std::vector<Candidate> candidates;
-    std::set<std::string> payloads;  // 已安装包声明的 `<包身份>.<update 名>`
+    std::set<std::string> payloads;  // staged 包声明的 `<包身份>.<update 名>`
 };
 
 // 语言包部署（身份文本里 Culture≠neutral）的候选范围与中性部署不同：
@@ -3264,10 +3264,10 @@ static bool IsLanguageScopedIdentity(const std::string& identityText)
 //
 // 有 --sessions 时：真机那次安装是谁最后被 `<Resolve>` 谁就落成 thumbprint。
 //   * 语言包部署 → 全部声明候选里取 Resolve 序号最大者（同序取后声明）；
-//   * 中性部署 → 只在**已安装**候选里挑：真机 MSMQ 的 9 条中性部署记录选的是已安装的
+//   * 中性部署 → 只在 **置位** 候选里挑：真机 MSMQ 的 9 条中性部署记录选的是置位的
 //     主体包，而不是名字更大的 home-basic/home-premium（未安装的派生包）。
 // 会话里没出现过的部署（所有候选都查不到序号）退回老规则，保证不给 --sessions 时
-// 与原行为逐字节一致：已安装候选里最后声明，没已安装候选就退回最后声明的那个。
+// 与原行为逐字节一致：置位候选里最后声明，没有置位候选就退回最后声明的那个。
 static std::string ChooseDeploymentCatalog(const DeploymentPlan& planned,
                                            const std::map<std::string, long long>& resolveOrder)
 {
@@ -3306,9 +3306,9 @@ static std::string ChooseDeploymentCatalog(const DeploymentPlan& planned,
 // 真机的标记 = "参与过这次安装的 catalog"，不是只挑一个：
 //   * 语言包部署 → 全部声明候选（en-US/qps-ploc 的 home-basic/home-premium 即使
 //     未安装、甚至从没在会话里出现过，也照样有标记）；
-//   * 其余部署 → 已安装候选；一个已安装候选都没有时退回选中的那一个
+//   * 其余部署 → 置位候选；一个置位候选都没有时退回选中的那一个
 //     （真机这 749 个部署只有一个标记，与"最后声明"的旧行为一致）。
-// 不给 --sessions 时保持旧语义：已安装候选逐个标记，否则只标退回的那个。
+// 不给 --sessions 时保持旧语义：置位候选逐个标记，否则只标退回的那个。
 static std::set<std::string> ChooseCatalogMarks(const DeploymentPlan& planned,
                                                 const std::string& chosenCatalog,
                                                 bool useSessions)
@@ -3491,12 +3491,13 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
         }
     }
 
-    // 已安装包过滤（可选）：真机 SOFTWARE hive 的
+    // 包状态过滤（可选）：真机 SOFTWARE hive 的
     // `Microsoft\Windows\CurrentVersion\Component Based Servicing\Packages\<包键>` 的
-    // `CurrentState`，bit 0x40 = 已安装。只有已安装包的 update 会留下部署记录——
-    // 不过滤的话，像 MSMQ 的 home-basic/home-premium 这类"未安装的派生包"会往同一个
-    // 部署记录里多写一整套 p!/s!/i!（真机只有已安装那个包的那套）。
-    std::set<std::string> installedPackages;
+    // `CurrentState`，bit 0x40 = CBS 的 installed 位（8061 x86 参考镜像已配置完；
+    // 502/864 个包置了该位）。只有置位包的 update 会留下部署记录——
+    // 不过滤的话，像 MSMQ 的 home-basic/home-premium 这类"未置位的派生包"会往同一个
+    // 部署记录里多写一整套 p!/s!/i!（真机只有置位那个包的那套）。
+    std::set<std::string> installedPackages;  // --installed：CurrentState 的 installed 位（0x40）
     if (!installedPath.empty())
     {
         std::wstring raw, readErr;
@@ -3530,7 +3531,7 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
         }
         if (installedPackages.empty())
         {
-            Err("--installed 里没有任何已安装包（CurrentState bit 0x40）");
+            Err("--installed 里没有任何置位包（CurrentState bit 0x40）");
             return 1;
         }
     }
@@ -3689,8 +3690,8 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
         packageId += "~";
         packageId += MumAttr(packageIdentity, L"version");
         // 注意：不在这里跳过"未安装包"——它们的部署记录（appid / CatalogThumbprint）
-        // 在真机台账里照样存在（864 个包对应 2,283 条部署，远多于 502 个已安装包）；
-        // "已安装"只用于决定 payload 与 catalog 优先取哪一套。
+        // 在真机台账里照样存在（864 个包对应 2,283 条部署，远多于 502 个置位包）；
+        // 该位只用于决定 payload 与 catalog 优先取哪一套。
 
         // 同包同名 .cat 的 SHA-256（CatalogThumbprint / Catalogs 键）
         std::string catalogHex;
@@ -3755,7 +3756,7 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
                 }
                 if (packageInstalled)
                 {
-                    // payload 身份 = `<包身份>.<update 名>`；只有已安装包的那套写进台账。
+                    // payload 身份 = `<包身份>.<update 名>`；只有置位包的那套写进台账。
                     planned.payloads.insert(packageId + "." + updateName);
                 }
                 if (candidateLog != nullptr)
@@ -4715,9 +4716,9 @@ static int CmdCbsPlanDrivers(const std::wstring& packagesDir, const std::wstring
         }
     }
 
-    // 已安装包过滤：.mum 声明的驱动可能属于未安装的可选包（真机 16299 有 10 条这样的
-    // "声明了但台账没有"）。CSV 行格式 `包身份|CurrentState`，0x40 = 已安装。
-    std::set<std::string> installedPackages;
+    // 置位过滤：.mum 声明的驱动可能属于未置位的可选包（真机 16299 有 10 条这样的
+    // "声明了但台账没有"）。CSV 行格式 `包身份|CurrentState`，0x40 = installed 位。
+    std::set<std::string> installedPackages;  // --installed：CurrentState 的 installed 位（0x40）
     if (!installedPath.empty())
     {
         std::wstring csvText, csvErr;

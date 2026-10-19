@@ -66,7 +66,7 @@
 | 旧桶归属（`SomeUnparsedVersionsExist`） | `--buckets` | 被更早服务栈暂存过的家庭挂在旧桶下 |
 | `CT` 的不可推导部分 | `--ct` | 归属包不一定声明该组件（912 条） |
 | `CatalogThumbprint` 的选择 | `--sessions` | 同一组件被多个包声明时，选哪个 `.cat` 由安装会话顺序决定 |
-| `p!/s!/i!` 标记 | `--markers` | `i!` ≈ 包已安装位，但 185 条例外来自功能启用状态 |
+| `p!/s!/i!` 标记 | `--markers` | `i!` ≈ 包 installed 位，但 185 条例外来自功能启用状态 |
 | "骨架家庭"（只有家庭键 + 空版本节点 + `SomeUnparsedVersionsExist`） | `--skeleton-families` | 内容被更早的服务栈写到已被裁剪的旧桶里（8419 有 112 个家庭这样，其中 55 个磁盘上还有载荷） |
 | 根区形态（`ccpinterface`、`Installers\Shortcut`、`ExecutionState`…） | `--minimal` / `--ccpinterface` / `--installers-shortcut` / `--pending` | 不同镜像的首会话集合不同：8061 x86 有 ExecutionState+PendingXml+Ngen+ccpinterface，8061 ARM 只有栈表，8419 有 ccpinterface+Installers\Shortcut+LastScavenge 而没有任何会话值 |
 
@@ -435,7 +435,7 @@ Drivers\<arch>\<INF 名>\<base64(SHA-256(INF 文件字节))>
   尽管宿主包是 amd64）。
 - INF 文件按组件目录找：`<arch>_<inf>_…`、`amd64_dual_<inf>_…`、`amd64_dual_c_<inf>_…` 都要试
   （dual 目录里可能放的是 `c_display.inf` 而不是 `display.inf`），逐个候选目录检查文件存在。
-- `--installed <csv>`（`CurrentState & 0x40`）过滤：只收已安装包声明的驱动。
+- `--installed <csv>`（`CurrentState & 0x40`，CBS installed 位）过滤：只收置位包声明的驱动。
 - 命令：`ocid_manifest cbs-plan-drivers <packagesDir> <winSxsDir> <outFile> [--installed <csv>]`；
   `assemble-cbs-store.ps1` 只在**现代镜像**（清单以 `DCM\x01` 开头）时自动跑这一步，
   或显式 `-ForceDrivers`。老镜像（8061/8419）的 `.mum` 里同样有 `<driver>` 声明，但真机台账里
