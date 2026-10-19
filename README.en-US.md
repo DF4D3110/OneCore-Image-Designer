@@ -181,7 +181,9 @@ to their real names and resolves each `PA30` delta against another entry of the 
 stores the target hash but not which entry the basis is, so candidates are tried and checked against the
 index). The selfupdate container yields 696 files whose SHA-256 all match `expand.exe`, and so do the
 `dummyrepairpackage_*.cab` packages (SHA-256 index, empty payload). `Pa30Delta.cs` still calls
-`msdelta.dll!ApplyDeltaB`; that is the transitional step until the project-owned delta decoder lands.
+`msdelta.dll!ApplyDeltaB`; that is the transitional step until the project-owned delta decoder lands. The
+format itself has been reversed and written down in `Source/Native/OcidServicing/Delta-Format.md` (header
+layout, rift table, pseudo-LZX symbol stream); the decoder is not implemented yet.
 
 The remaining container-level gap is sparse CABs whose files are split with the `iFolder` =
 `0xFFFD/0xFFFE/0xFFFF` convention; multi-volume cabinets fall back too. `Services/CabExtraction.cs`

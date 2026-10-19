@@ -337,7 +337,8 @@ SharpZipLib 与 XNA `LzxDecoder`。
    16299 amd64、9600 amd64）上与微软原版的 COMPONENTS 做到逐键/逐值/逐字节一致（`cbs-diff` 0/0）。尚未自带的只有
    `WinSxS\ManifestCache` 的 PCM/CDF 编码器（容器层已逐字节可复现；`src/PcmBuild.cpp` 直接由清单构建，全语料 99.6% 整文件一致）。
    cab 的 MSZIP/LZX 解压也已自有（`Source/Managed/OcidCabinet`，见上），WU container CAB 的 `cix`
-   清单还原也已接进读取器（`PA30` delta 目前仍借 `msdelta.dll`，是自研 delta 解码器前的过渡）；
+   清单还原也已接进读取器（`PA30` delta 目前仍借 `msdelta.dll`，是自研 delta 解码器前的过渡；
+   该格式的反编译结论已整理在 `Source/Native/OcidServicing/Delta-Format.md`，解码器本身尚未实现）；
    桌面侧默认进程内解包，只有 sparse CAB 与多卷包回退 `expand.exe`，不算能力缺口。
 2. **安装历史类信息必须作为输入。** 有些值（`f256` 多段的段序、identity 文化大小写、`c!` 归属、
    catalog 选择、`MCP_*`/(default) 位图、现代 `f!` 的非 1 状态位）来自镜像的安装历史，不能从包集推导；
