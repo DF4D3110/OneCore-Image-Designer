@@ -175,13 +175,19 @@ The reference is `expand.exe` (the Windows cabinet API): makecab-generated MSZIP
 15/17/20/21) fixtures, the 8400 repair-content MSZIP cabs, the LZX cabs under `C:\Windows\servicing`
 (355 + 10 + 1 files) and the 96 MB MSZIP `BucketConfidenceData.cab` — **429 files, all byte-identical**.
 The replacement is also file-for-file identical to the previous implementation (SharpZipLib + the XNA
-libmspack port) across 3,628 files. `Tests/` covers it offline by generating the fixtures with makecab.
-The known container-level gaps are container CABs (Windows Update payloads whose entries are numbered
-ids: the real names and `PA30` deltas live in `_manifest_.cix.xml`, which only `expand.exe` applies) and
-sparse CABs whose files are split with the `iFolder` = `0xFFFD/0xFFFE/0xFFFF` convention; multi-volume
-cabinets fall back too. `Services/CabExtraction.cs` reports those as unsupported so the callers keep
-using `expand.exe`; every other desktop extraction path (`CabHelper`, `UpdatePackageService`,
-`DeviceLayoutService`, `CbsBuildService`, `CbsBuildViewModel`) now decodes in-process.
+libmspack port) across 3,628 files. Windows Update container CABs are expanded by the reader as well:
+`MobilePackageGen/Cabinet/ContainerCab.cs` parses `_manifest_.cix.xml`, maps the numbered payloads back
+to their real names and resolves each `PA30` delta against another entry of the same cabinet (the index
+stores the target hash but not which entry the basis is, so candidates are tried and checked against the
+index). The selfupdate container yields 696 files whose SHA-256 all match `expand.exe`, and so do the
+`dummyrepairpackage_*.cab` packages (SHA-256 index, empty payload). `Pa30Delta.cs` still calls
+`msdelta.dll!ApplyDeltaB`; that is the transitional step until the project-owned delta decoder lands.
+
+The remaining container-level gap is sparse CABs whose files are split with the `iFolder` =
+`0xFFFD/0xFFFE/0xFFFF` convention; multi-volume cabinets fall back too. `Services/CabExtraction.cs`
+reports those as unsupported so the callers keep using `expand.exe`; every other desktop extraction
+path (`CabHelper`, `UpdatePackageService`, `DeviceLayoutService`, `CbsBuildService`,
+`CbsBuildViewModel`) now decodes in-process.
 
 Cabinets can also be used on their own, outside the desktop app: `Source/Managed/OcidCabinet.Tool/`
 builds `ocid_cab.exe` (Chinese help by default; command names stay English so scripts can call them):
@@ -197,8 +203,8 @@ ocid_cab cat a.cab update.mum --output update.mum   # pull a single entry
 ocid_cab verify a.cab          # extract to a temp dir, hash every file, confirm it all decodes
 ```
 
-`extract` refuses container CABs by default (their entries are numbered ids and `PA30` deltas — run
-`expand.exe` first); `--force` dumps the raw payloads. Sparse CABs are always refused, with the reason.
+`extract` expands container CABs through `_manifest_.cix.xml` (real names plus `PA30` deltas); sparse
+CABs are always refused, with the reason.
 Exit codes: 0 success, 1 usage error, 2 cabinet or extraction failure.
 
 ### CBS store writer (COMPONENTS)
@@ -353,9 +359,11 @@ This is an active work in progress. Three things are worth stating plainly:
    byte, key for key, value for value (`cbs-diff` reports 0/0). The only part not yet self-contained is
    the `WinSxS\ManifestCache` PCM/CDF encoder: its container layer already reproduces files exactly, the
    element-record tables are still being worked out. CAB decompression (MSZIP/LZX) is already
-   self-contained in `Source/Managed/OcidCabinet`; the desktop side decodes in-process by default and
-   only falls back to `expand.exe` for container CABs, sparse CABs and multi-volume cabinets, which is
-   not a capability gap.
+   self-contained in `Source/Managed/OcidCabinet`, and Windows Update container cabs (their `cix`
+   manifest and `PA30` deltas) are handled by the reader too — the delta application still borrows
+   `msdelta.dll` until the project-owned decoder lands. The desktop side decodes in-process by default
+   and only falls back to `expand.exe` for sparse CABs and multi-volume cabinets, which is not a
+   capability gap.
 2. **Install-history information has to be supplied as input.** Some values (`f256` segment order,
    identity culture casing, `c!` attribution, catalog choice, `MCP_*` and version-node flag bits) come
    from the image's installation history and cannot be derived from a package set. `Extract-CbsInputs.ps1`

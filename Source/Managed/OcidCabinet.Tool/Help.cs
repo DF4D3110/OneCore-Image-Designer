@@ -22,12 +22,12 @@ internal static class Help
             "例：ocid_cab list a.cab --long"),
 
         new("extract", "解包",
-            "把柜里全部条目解包到目录（支持 MSZIP 与 LZX）。",
+            "把柜里全部条目解包到目录（支持 MSZIP 与 LZX，含 container CAB）。",
             "ocid_cab extract <cab> <目录> [--force] [--verbose]",
             "--force：目标目录非空时仍继续（同名文件会被覆盖）。\n" +
             "--verbose：逐条目输出进度到 stderr。\n" +
-            "container CAB（含 _manifest_.cix.xml）默认拒绝：条目是数字 id 与 PA30 delta，\n" +
-            "真实文件名只有 expand.exe 会按清单还原；确需原样取载荷时加 --force。\n" +
+            "container CAB（含 _manifest_.cix.xml）会按清单还原真实文件名，并展开 PA30 delta\n" +
+            "（delta 的基取自同柜另一条目，按清单里的哈希校验）。\n" +
             "sparse CAB（iFolder 0xFFFD..0xFFFF）不支持，请用 expand.exe。\n" +
             "例：ocid_cab extract a.cab out --verbose"),
 

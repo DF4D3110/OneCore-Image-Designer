@@ -9,14 +9,15 @@ namespace OneCore_Image_Designer.Services
     /// 进程内 CAB 读取（基于仓库自有的 <c>MobilePackageGen/Cabinet</c> 容器读取器 +
     /// <c>Source/Managed/OcidCabinet</c> 的 MSZIP/LZX 解码器），不再调用 <c>expand.exe</c>。
     ///
-    /// 仍有三类包本读取器不支持，会抛 <see cref="NotSupportedException"/>，调用方按需退回
-    /// <c>expand.exe</c>：多卷（Previous/Next Cabinet）、sparse 包（同一文件拆成多条 CFFILE，
-    /// 续段用 iFolder 0xFFFD..0xFFFF 标记）、以及 WU 的 container 包（内含
-    /// <c>_manifest_.cix.xml</c>，条目按 id 编号、真实名字与 PA30 delta 都在清单里，
-    /// expand.exe 会按清单还原文件名并应用 delta）。
+    /// WU container 包（内含 <c>_manifest_.cix.xml</c>，条目按 id 编号、真实名字与 PA30 delta
+    /// 都在清单里）由 <c>Cabinet.ContainerCab</c> 按清单还原；sparse 包（同一文件拆成多条
+    /// CFFILE，续段用 iFolder 0xFFFD..0xFFFF 标记）与多卷包仍超出本读取器能力，会抛
+    /// <see cref="NotSupportedException"/>，由调用方退回 <c>expand.exe</c>。
     /// </summary>
     public static class CabExtraction
     {
+        const string ContainerManifest = "_manifest_.cix.xml";
+
         /// <summary>读取器能否完整处理这个包（不检查压缩算法，只检查容器特性）。</summary>
         public static bool IsSupported(string cabPath)
         {
@@ -29,11 +30,15 @@ namespace OneCore_Image_Designer.Services
             catch { return false; }
         }
 
-        /// <summary>列出条目名与解压后大小。</summary>
+        /// <summary>列出条目名与解压后大小；container 包给出的是真实文件名。</summary>
         public static List<(string Name, long Size)> List(string cabPath)
         {
             using FileStream fs = OpenStream(cabPath);
-            return ReadCabinet(fs).Files
+            Cabinet.Cabinet cab = ReadCabinet(fs);
+            if (IsContainer(cab))
+                return Cabinet.ContainerCab.ReadAll(cab).Select(f => (f.Name, (long)f.Content.Length)).ToList();
+
+            return cab.Files
                 .Select(f => (f.FileName, (long)f.UncompressedSize))
                 .ToList();
         }
@@ -43,8 +48,14 @@ namespace OneCore_Image_Designer.Services
         {
             using FileStream fs = OpenStream(cabPath);
             Cabinet.Cabinet cab = ReadCabinet(fs);
-            EnsurePathsAreSafe(cab);
             Directory.CreateDirectory(destDir);
+            if (IsContainer(cab))
+            {
+                Cabinet.ContainerCab.ExtractAll(cab, destDir, progress);
+                return;
+            }
+
+            EnsurePathsAreSafe(cab);
             cab.ExtractAllFiles(destDir, progress);
         }
 
@@ -55,6 +66,14 @@ namespace OneCore_Image_Designer.Services
             using FileStream fs = OpenStream(cabPath);
             Cabinet.Cabinet cab = ReadCabinet(fs);
             string normalized = Normalize(entryName);
+
+            if (IsContainer(cab))
+            {
+                return Cabinet.ContainerCab.ReadAll(cab)
+                    .FirstOrDefault(f => string.Equals(Normalize(f.Name), normalized, StringComparison.OrdinalIgnoreCase))
+                    .Content;
+            }
+
             string? match = cab.Files
                 .Select(f => f.FileName)
                 .FirstOrDefault(n => string.Equals(Normalize(n), normalized, StringComparison.OrdinalIgnoreCase));
@@ -90,23 +109,18 @@ namespace OneCore_Image_Designer.Services
             return cab;
         }
 
+        static bool IsContainer(Cabinet.Cabinet cab) =>
+            cab.Files.Any(f => string.Equals(Path.GetFileName(f.FileName), ContainerManifest, StringComparison.OrdinalIgnoreCase));
+
         /// <summary>
-        /// container 包的条目按 id 编号，真实文件名与 PA30 delta 都写在
-        /// <c>_manifest_.cix.xml</c> 里，只有 expand.exe 会按清单还原；sparse 包的续段则用
-        /// iFolder 0xFFFD..0xFFFF 标记。两种都超出本读取器能力，必须交给 expand.exe。
+        /// sparse 包的续段用 iFolder 0xFFFD..0xFFFF 标记，本读取器不拼分段文件，必须交给
+        /// expand.exe。container 包已由 <c>ContainerCab</c> 支持，不再算不支持。
         /// </summary>
         static bool IsUnsupported(Cabinet.Cabinet cab, out string reason)
         {
             if (cab.IsSparse)
             {
                 reason = "sparse CAB (iFolder 0xFFFD..0xFFFF) is not supported by the in-process reader";
-                return true;
-            }
-
-            if (cab.Files.Any(f => Path.GetFileName(f.FileName)
-                    .Equals("_manifest_.cix.xml", StringComparison.OrdinalIgnoreCase)))
-            {
-                reason = "container CAB (_manifest_.cix.xml with numbered payloads) needs expand.exe";
                 return true;
             }
 

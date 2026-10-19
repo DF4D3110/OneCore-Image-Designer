@@ -32,7 +32,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ,("Ocid driver store lands package files and publishes the INF", () => { OcidDriverStoreLanding(); return Task.CompletedTask; })
     ,("Ocid DMI import lands files, publishes oemN.inf and writes the database in one pass", () => { OcidDmiImport(); return Task.CompletedTask; })
     ,("Cabinet decompressor round-trips MSZIP and LZX fixtures made by makecab", () => { CabinetDecompression(); return Task.CompletedTask; })
-    ,("CabExtraction matches expand.exe and refuses container cabinets", () => { CabExtractionAgainstExpand(); return Task.CompletedTask; })
+    ,("CabExtraction matches expand.exe on plain and container cabinets", () => { CabExtractionAgainstExpand(); return Task.CompletedTask; })
 };
 
 var failures = new List<string>();
@@ -1444,9 +1444,8 @@ static void CabinetDecompression()
 // The desktop services extract cabinets in-process now (Services/CabExtraction.cs). This guard
 // compares that path with the Windows cabinet API via expand.exe on real packages; the corpora
 // live outside the repository, so the test is opt-in through environment variables and prints a
-// skip line otherwise. OCID_UNSUPPORTED_CAB points at a package the in-process reader must refuse
-// (a WU container cabinet, or a sparse one) so callers fall back to expand.exe instead of getting
-// silently renamed/truncated payloads.
+// skip line otherwise. OCID_UNSUPPORTED_CAB may point at a sparse package the in-process reader
+// must still refuse, so callers fall back to expand.exe instead of getting truncated payloads.
 static void CabExtractionAgainstExpand()
 {
     string? cabDir = Environment.GetEnvironmentVariable("OCID_CAB_TEST_DIR");
@@ -1472,7 +1471,7 @@ static void CabExtractionAgainstExpand()
     foreach (string cab in Directory.EnumerateFiles(cabDir, "*.cab")
                                  .OrderBy(f => new FileInfo(f).Length))
     {
-        // Container cabs (WU payloads with a cix manifest) are handled by expand.exe only.
+        // Sparse cabinets need expand.exe; container cabinets are handled in-process now.
         if (!CabExtraction.IsSupported(cab)) continue;
 
         string root = NewTempDirectory();
@@ -1506,6 +1505,56 @@ static void CabExtractionAgainstExpand()
     }
 
     True(compared > 0, $"no cabinet under {cabDir} is handled by the in-process reader");
+
+    // Container cabinets: the real names and PA30 deltas come from _manifest_.cix.xml, so this is a
+    // different code path than the plain entry walk above.
+    int containers = 0;
+    foreach (string cab in Directory.EnumerateFiles(cabDir, "*.cab"))
+    {
+        string cix;
+        try
+        {
+            using FileStream fs = File.OpenRead(cab);
+            Cabinet.Cabinet cabReader = new(fs);
+            cix = cabReader.Files.Any(f => Path.GetFileName(f.FileName)
+                .Equals("_manifest_.cix.xml", StringComparison.OrdinalIgnoreCase)) ? "yes" : "";
+        }
+        catch { continue; }
+
+        if (cix.Length == 0) continue;
+
+        string root = NewTempDirectory();
+        try
+        {
+            string ours = Path.Combine(root, "ours");
+            string theirs = Path.Combine(root, "expand");
+            Directory.CreateDirectory(ours);
+            Directory.CreateDirectory(theirs);
+
+            CabExtraction.ExtractAll(cab, ours);
+            RunTool("expand.exe", $"-F:* \"{cab}\" \"{theirs}\"", root);
+
+            var expected = HashTree(theirs);
+            var actual = HashTree(ours);
+            Equal(expected.Count, actual.Count);
+            foreach (var (path, hash) in expected)
+            {
+                True(actual.TryGetValue(path, out string? got), $"{Path.GetFileName(cab)}: missing {path}");
+                Equal(hash, got);
+            }
+
+            containers++;
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* temp cleanup is best effort */ }
+        }
+    }
+
+    if (containers > 0)
+    {
+        Console.WriteLine($"  (container cabinets compared with expand.exe: {containers})");
+    }
 }
 
 static Dictionary<string, string> HashTree(string root)
@@ -1576,3 +1625,4 @@ static async Task<TException> ThrowsAsync<TException>(Func<Task> action) where T
     catch (TException ex) { return ex; }
     throw new InvalidOperationException($"Expected {typeof(TException).Name}.");
 }
+

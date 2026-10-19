@@ -3,8 +3,8 @@
 // 设计约束：
 //  * 容器读取只走 MobilePackageGen/Cabinet 的公共 API（open → Files / FolderInfo →
 //    ExtractAllFiles / ReadFile），压缩解码由它内部调用 OcidCabinet。
-//  * 不静默降级：container CAB（含 _manifest_.cix.xml）与 sparse CAB（iFolder
-//    0xFFFD..0xFFFF）如实拒绝或提醒，因为本读取器给不出真实文件名 / 拼不回分段。
+//  * 不静默降级：container CAB 走 ContainerCab（解析 _manifest_.cix.xml、展开 PA30 delta），
+//    sparse CAB（iFolder 0xFFFD..0xFFFF）如实拒绝，因为本读取器拼不回分段。
 //  * 路径安全：柜内条目名来自不可信输入，解包前拒绝绝对路径与 ".."。
 
 using System.Diagnostics;
@@ -67,8 +67,9 @@ internal static class Commands
         }
         if (HasContainerManifest(cab))
         {
-            notes.Add("container CAB：条目是数字 id，真实文件名与 PA30 delta 都在 " + ContainerManifest + " 里；");
-            notes.Add("             只有 expand.exe 会按清单还原真实文件，本工具只能原样取出载荷。");
+            int realFiles = cab.Files.Count - 1;
+            notes.Add("container CAB：柜内 " + realFiles + " 个载荷条目要按 " + ContainerManifest + " 还原成真实文件名；");
+            notes.Add("             extract 会解析清单并展开 PA30 delta（基来自同柜另一条目），list 仍显示原始条目名。");
         }
         if (notes.Count > 0)
         {
@@ -168,11 +169,9 @@ internal static class Commands
             return 2;
         }
 
-        if (HasContainerManifest(cab) && !force)
+        if (HasContainerManifest(cab))
         {
-            Console.Error.WriteLine("错误：这是 container CAB（含 " + ContainerManifest + "）。条目是数字 id 与 PA30 delta，");
-            Console.Error.WriteLine("      直接解出的载荷不是真实文件；先用 expand.exe 解，或加 --force 原样取载荷。");
-            return 2;
+            return ExtractContainer(cab, outputDirectory, force, verbose);
         }
 
         EnsureSafeEntryNames(cab);
@@ -195,6 +194,57 @@ internal static class Commands
         watch.Stop();
 
         Console.WriteLine($"已解包 {count} 个文件，共 {Number(total)} 字节 → {Path.GetFullPath(outputDirectory)}");
+        Console.WriteLine($"用时 {watch.Elapsed.TotalSeconds:F2} 秒。");
+        return 0;
+    }
+
+    /// <summary>
+    /// container CAB：柜内条目只是载荷，真实文件名与 delta 全在 _manifest_.cix.xml 里，
+    /// 由 Cabinet.ContainerCab 按清单还原（PA30 的基来自同柜另一条目）。
+    /// </summary>
+    private static int ExtractContainer(CabinetReader cab, string outputDirectory, bool force, bool verbose)
+    {
+        if (Directory.Exists(outputDirectory) && Directory.EnumerateFileSystemEntries(outputDirectory).Any() && !force)
+        {
+            Console.Error.WriteLine($"错误：目标目录不是空的：{Path.GetFullPath(outputDirectory)}");
+            Console.Error.WriteLine("      继续会覆盖同名文件；确认要写就加 --force。");
+            return 2;
+        }
+
+        Stopwatch watch = Stopwatch.StartNew();
+        IReadOnlyList<(string Name, byte[] Content)> files;
+        try
+        {
+            files = Cabinet.ContainerCab.ReadAll(
+                cab,
+                verbose ? (percent, name) => Console.Error.WriteLine($"  [{percent,3}%] {name}") : null);
+
+            string root = Path.GetFullPath(outputDirectory);
+            Directory.CreateDirectory(root);
+            foreach ((string name, byte[] content) in files)
+            {
+                string relative = Cabinet.ContainerCab.NormalizeEntryName(name);
+                string target = Path.GetFullPath(Path.Combine(root, relative));
+                if (!target.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new CabToolException($"清单条目越界：{name}");
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                File.WriteAllBytes(target, content);
+            }
+        }
+        catch (InvalidDataException error)
+        {
+            Console.Error.WriteLine($"错误：{error.Message}");
+            return 2;
+        }
+        finally
+        {
+            watch.Stop();
+        }
+
+        Console.WriteLine($"已按 {ContainerManifest} 还原 {files.Count} 个文件，共 {Number(files.Sum(item => (long)item.Content.Length))} 字节 → {Path.GetFullPath(outputDirectory)}");
         Console.WriteLine($"用时 {watch.Elapsed.TotalSeconds:F2} 秒。");
         return 0;
     }
@@ -259,6 +309,12 @@ internal static class Commands
         }
 
         EnsureSafeEntryNames(cab);
+
+        if (HasContainerManifest(cab))
+        {
+            return VerifyContainer(cab);
+        }
+
         int expected = cab.Files.Count;
 
         string temporary = Path.Combine(Path.GetTempPath(), "ocid_cab_verify_" + Guid.NewGuid().ToString("N"));
@@ -304,6 +360,36 @@ internal static class Commands
                 // 临时目录清理失败不影响结论。
             }
         }
+    }
+
+    /// <summary>container CAB 的校验：按清单还原后逐个对 SHA-1/长度（ContainerCab 内部已断言）。</summary>
+    private static int VerifyContainer(CabinetReader cab)
+    {
+        Stopwatch watch = Stopwatch.StartNew();
+        IReadOnlyList<(string Name, byte[] Content)> files;
+        try
+        {
+            files = Cabinet.ContainerCab.ReadAll(cab);
+        }
+        catch (InvalidDataException error)
+        {
+            Console.Error.WriteLine($"错误：{error.Message}");
+            return 2;
+        }
+        finally
+        {
+            watch.Stop();
+        }
+
+        int nameWidth = Math.Clamp(files.Count == 0 ? 8 : files.Max(item => DisplayWidth(item.Name)), 8, 60);
+        foreach ((string name, byte[] content) in files.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"{PadVisual(name, nameWidth)} {PadLeftVisual(Number(content.Length), 14)}  {Convert.ToHexString(SHA256.HashData(content))}");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"校验通过：{files.Count} 个文件、{Number(files.Sum(item => (long)item.Content.Length))} 字节，SHA-1 与清单全部一致，用时 {watch.Elapsed.TotalSeconds:F2} 秒。");
+        return 0;
     }
 
     // ── 共用 ────────────────────────────────────────────────────────────────
@@ -462,3 +548,4 @@ internal sealed class ParsedArgs
         return parsed;
     }
 }
+

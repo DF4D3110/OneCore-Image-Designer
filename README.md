@@ -157,14 +157,21 @@ cab 容器（文件头、folder、`CFDATA`、文件落位）的读取，压缩�
 验证口径是 `expand.exe`（Windows 自带的 cabinet API）：makecab 现造的 MSZIP 与 LZX（窗口 15/17/20/21）
 夹具、8400 repair content 的 MSZIP 包、`C:\Windows\servicing` 下的 LZX 包（355 + 10 + 1 个文件）、
 96 MB 的 `BucketConfidenceData.cab`（MSZIP），共 **429 个文件逐字节一致**；与替换前的实现
-（SharpZipLib + XNA libmspack 移植）在 3,628 个文件上同样零差异。`Tests/` 里有对应的离线回归
-（用 makecab 现场造多块夹具）。
+（SharpZipLib + XNA libmspack 移植）在 3,628 个文件上同样零差异。container CAB 按清单还原后与
+`expand.exe` 的 696 个文件也逐个 SHA-256 一致。`Tests/` 里有对应的离线回归（用 makecab 现场造
+多块夹具；真包对比通过 `OCID_CAB_TEST_DIR` 打开）。
 
-容器层有两类包超出当前读取器，`Services/CabExtraction.cs` 会把它们判为不支持并回退 `expand.exe`：
-container CAB（WU 更新包，条目按 id 编号，真实文件名与 `PA30` delta 记在 `_manifest_.cix.xml` 里，
-只有 `expand.exe` 会按清单还原）与 sparse CAB（`iFolder` 取 `0xFFFD/0xFFFE/0xFFFF` 的分段文件
-约定）；多卷包同样回退。桌面侧其它解包路径（`CabHelper`、`UpdatePackageService`、
-`DeviceLayoutService`、`CbsBuildService`、`CbsBuildViewModel`）都已改为进程内解包。
+WU 的 container CAB（条目是数字 id，真实文件名与 `PA30` delta 都记在 `_manifest_.cix.xml` 里）现在也
+由读取器自己还原：`MobilePackageGen/Cabinet/ContainerCab.cs` 解析清单、按顺序把条目映射成真实文件，
+`PA30` 的基取自同柜另一条目的内容（清单只记目标哈希、不记基是哪一条，所以按内容逐一试并用清单哈希
+校验）。`Source/Managed/OcidCabinet/Pa30Delta.cs` 目前仍借 `msdelta.dll!ApplyDeltaB` 应用补丁，
+是自研 delta 解码器落地前的过渡实现。selfupdate 容器包按清单还原出 696 个文件，与 `expand.exe`
+的输出逐个 SHA-256 相同；`dummyrepairpackage_*.cab`（清单用 SHA-256、载荷为空）同样一致。
+
+容器层仍有一类包超出读取器，`Services/CabExtraction.cs` 会把它判为不支持并回退 `expand.exe`：
+sparse CAB（`iFolder` 取 `0xFFFD/0xFFFE/0xFFFF` 的分段文件约定）；多卷包同样回退。桌面侧其它解包
+路径（`CabHelper`、`UpdatePackageService`、`DeviceLayoutService`、`CbsBuildService`、
+`CbsBuildViewModel`）都已改为进程内解包。
 
 CAB 也可以脱离主程序单独使用：`Source/Managed/OcidCabinet.Tool/` 构建出 `ocid_cab.exe`，说明默认中文，
 命令名保持英文以便脚本调用：
@@ -180,8 +187,8 @@ ocid_cab cat a.cab update.mum --output update.mum   # 抽单个条目
 ocid_cab verify a.cab          # 解到临时目录并算每文件 SHA-256，确认全部可解码
 ```
 
-`extract` 对 container CAB 默认拒绝（条目是数字 id 与 `PA30` delta，先过 `expand.exe`），加 `--force`
-才原样取载荷；sparse CAB 一律拒绝并说明原因。退出码：0 成功、1 用法错误、2 柜文件或解包失败。
+`extract` 对 container CAB 会按 `_manifest_.cix.xml` 还原真实文件名并展开 `PA30` delta；sparse CAB
+一律拒绝并说明原因。退出码：0 成功、1 用法错误、2 柜文件或解包失败。
 
 ### CBS 台账写侧（COMPONENTS）
 
@@ -329,8 +336,9 @@ SharpZipLib 与 XNA `LzxDecoder`。
    `Source/Native/OcidServicing` 自己实现；CBS 写侧在四个真机镜像（8061 x86、8061 ARM、8419 ARM、
    16299 amd64、9600 amd64）上与微软原版的 COMPONENTS 做到逐键/逐值/逐字节一致（`cbs-diff` 0/0）。尚未自带的只有
    `WinSxS\ManifestCache` 的 PCM/CDF 编码器（容器层已逐字节可复现；`src/PcmBuild.cpp` 直接由清单构建，全语料 99.6% 整文件一致）。
-   cab 的 MSZIP/LZX 解压也已自有（`Source/Managed/OcidCabinet`，见上）；桌面侧默认进程内解包，
-   只有 container CAB、sparse CAB 与多卷包回退 `expand.exe`，不算能力缺口。
+   cab 的 MSZIP/LZX 解压也已自有（`Source/Managed/OcidCabinet`，见上），WU container CAB 的 `cix`
+   清单还原也已接进读取器（`PA30` delta 目前仍借 `msdelta.dll`，是自研 delta 解码器前的过渡）；
+   桌面侧默认进程内解包，只有 sparse CAB 与多卷包回退 `expand.exe`，不算能力缺口。
 2. **安装历史类信息必须作为输入。** 有些值（`f256` 多段的段序、identity 文化大小写、`c!` 归属、
    catalog 选择、`MCP_*`/(default) 位图、现代 `f!` 的非 1 状态位）来自镜像的安装历史，不能从包集推导；
    `Extract-CbsInputs.ps1` 从参考镜像导出它们，`make-cbs-overrides.ps1` 生成覆盖表，组装时显式传入。
