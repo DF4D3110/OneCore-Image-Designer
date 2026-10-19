@@ -16,6 +16,7 @@
 #include "ocid/Dcm.h"
 #include "ocid/ConsoleUtf8.h"
 #include "ocid/Pcm.h"
+#include "ocid/CbsProfile.h"
 
 #include <cstdio>
 #include <string>
@@ -716,6 +717,43 @@ static void DcmMagic()
     Check(!DcmIsCompressed(plain), "普通 XML 不被当成 DCM");
 }
 
+static void VersionProfiles()
+{
+    // 版本兼容矩阵：按构建号分档（见 ocid/CbsProfile.h 的说明与真机取证）。
+    std::int32_t build = 0;
+    Check(ocid::CbsBuildFromVersionText("6.3.9600.16384 (winblue_rtm_partner.130828-1900)", build)
+          && build == 9600, "从栈版本文本取构建号");
+    Check(ocid::CbsBuildFromVersionText("10.0.16299.15 (WinBuild.160101.0800)", build)
+          && build == 16299, "从 16299 栈版本文本取构建号");
+    Check(!ocid::CbsBuildFromVersionText("nothing here", build) && !ocid::CbsBuildFromVersionText("6.2", build),
+          "非法栈版本不该给出构建号");
+
+    const ocid::CbsVersionProfile legacy = ocid::CbsProfileForBuild(8061);
+    Check(!legacy.dcmManifests && !legacy.fileValuesAreFlags && !legacy.driversLedger && !legacy.modernIdentity,
+          "8061（明文清单）走老规则");
+    Check(std::string(legacy.family) == "win8", "8061 归入 win8 代");
+    Check(std::string(ocid::CbsProfileForBuild(7600).family) == "win8"
+          && std::string(ocid::CbsProfileForBuild(7268).family) == "win7", "6.1/6.2 分代");
+
+    const ocid::CbsVersionProfile win81 = ocid::CbsProfileForBuild(9600);
+    Check(win81.dcmManifests && win81.fileValuesAreFlags && win81.configFlagsFullDword && win81.catalogForDrivers,
+          "9600 起 DCM、f! 状态位、CF 全 DWORD、驱动部署写 thumb");
+    Check(win81.sha256OfDecodedManifest && win81.f256FromDigestValue, "9600 起 S256H/f256 走解压 XML 语义");
+    Check(!win81.driversLedger && win81.payloadNameCollapse && !win81.modernIdentity,
+          "9600 有载荷名折叠，但还没有 Drivers 台账与现代 identity");
+
+    const ocid::CbsVersionProfile rs2 = ocid::CbsProfileForBuild(14357);
+    Check(!rs2.driversLedger && !rs2.modernIdentity, "14357 还没有 Drivers 台账");
+    Check(ocid::CbsProfileForBuild(16212).driversLedger, "16212 起有 Drivers 台账");
+
+    const ocid::CbsVersionProfile rs3 = ocid::CbsProfileForBuild(16299);
+    Check(rs3.driversLedger && rs3.payloadNameCollapse && rs3.modernIdentity, "16299 全开");
+
+    const std::string summary = ocid::CbsProfileSummary(rs3);
+    Check(summary.find("build=16299") != std::string::npos && summary.find("identity-modern=on") != std::string::npos,
+          "档案摘要里能看到构建号与开关");
+}
+
 int main()
 {
     SetupConsoleUtf8();
@@ -733,6 +771,7 @@ int main()
     PcmContainer();
     PcmRecordTables();
     DcmMagic();
+    VersionProfiles();
 
     printf("\n== 结果 ==\n  通过 %d / 失败 %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

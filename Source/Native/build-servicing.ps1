@@ -162,7 +162,7 @@ function Build-Dll {
 Get-Toolchain 'x86' | ForEach-Object { New-Dirs -Out $_.Out -Obj $_.Obj }
 Get-Toolchain 'x64' | ForEach-Object { New-Dirs -Out $_.Out -Obj $_.Obj }
 
-$core = @('src\Identity.cpp', 'src\Manifest.cpp', 'src\WcmSchema.cpp', 'src\RegistryValue.cpp', 'src\CmiInstaller.cpp', 'src\MacroExpander.cpp', 'src\SecurityDescriptor.cpp', 'src\FilePlacement.cpp', 'src\CsiPlace.cpp', 'src\DriverPackage.cpp', 'src\DriverInf.cpp', 'src\CbsStore.cpp', 'src\Sha256.cpp', 'src\Pcm.cpp', 'src\PcmBuild.cpp', 'src\Microdom.cpp', 'src\Dcm.cpp')
+$core = @('src\Identity.cpp', 'src\Manifest.cpp', 'src\WcmSchema.cpp', 'src\RegistryValue.cpp', 'src\CmiInstaller.cpp', 'src\MacroExpander.cpp', 'src\SecurityDescriptor.cpp', 'src\FilePlacement.cpp', 'src\CsiPlace.cpp', 'src\DriverPackage.cpp', 'src\DriverInf.cpp', 'src\CbsStore.cpp', 'src\CbsProfile.cpp', 'src\Sha256.cpp', 'src\Pcm.cpp', 'src\PcmBuild.cpp', 'src\Microdom.cpp', 'src\Dcm.cpp')
 $api  = $core + @('src\OcidServicingApi.cpp')
 $def  = Join-Path $src 'src\OcidServicing.def'
 
@@ -179,7 +179,7 @@ Build-Target 'ocid_sd_tests.exe'       @('src\SecurityDescriptor.cpp', 'tests\se
 Build-Target 'ocid_place_tests.exe'    @('src\Identity.cpp', 'src\Manifest.cpp', 'src\MacroExpander.cpp', 'src\SecurityDescriptor.cpp', 'src\FilePlacement.cpp', 'src\CsiPlace.cpp', 'tests\fileplacement_tests.cpp')
 Build-Target 'ocid_dmi_tests.exe'      @('src\DriverPackage.cpp', 'tests\driverpackage_tests.cpp')
 Build-Target 'ocid_dmiinf_tests.exe'    @('src\DriverPackage.cpp', 'src\DriverInf.cpp', 'tests\driverinf_tests.cpp')
-Build-Target 'ocid_cbs_tests.exe'      @('src\CbsStore.cpp', 'src\Sha256.cpp', 'src\Pcm.cpp', 'src\PcmBuild.cpp', 'src\Microdom.cpp', 'src\Dcm.cpp', 'tests\cbsstore_tests.cpp')
+Build-Target 'ocid_cbs_tests.exe'      @('src\CbsStore.cpp', 'src\CbsProfile.cpp', 'src\Sha256.cpp', 'src\Pcm.cpp', 'src\PcmBuild.cpp', 'src\Microdom.cpp', 'src\Dcm.cpp', 'tests\cbsstore_tests.cpp')
 Build-Target 'ocid_microdom_tests.exe' @('src\Microdom.cpp', 'tests\microdom_tests.cpp')
     Build-Target 'ocid_manifest.exe'       ($core + @('tools\ocid_manifest.cpp'))
 

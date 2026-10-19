@@ -14,6 +14,7 @@
 // 输出约定：**数据走 stdout，诊断走 stderr** —— 这样 C# 侧可以干净地消费 stdout。
 
 #include "ocid/ConsoleUtf8.h"
+#include "ocid/CbsProfile.h"
 #include "ocid/CbsStore.h"
 #include "ocid/CsiPlace.h"
 #include "ocid/DriverPackage.h"
@@ -67,6 +68,53 @@ namespace {
     // 现代镜像（16299+）的 f! 值是 REG_DWORD 文件状态位；非 1 的状态由 --file-flags
     // 输入（安装历史），键是 "<组件键>|<f! 值名>"。
     std::map<std::string, std::uint32_t> g_fileFlags;
+
+    // 台账的"代"（版本兼容层，见 ocid/CbsProfile.h）。0 = 还没探测到。
+    // 优先级：--os-build > 镜像里的 ntoskrnl.exe > --stack-version 文本。
+    std::int32_t g_osBuild = 0;
+    bool g_osBuildFromCommandLine = false;
+
+    ocid::CbsVersionProfile EffectiveProfile()
+    {
+        if (g_osBuild > 0)
+            return ocid::CbsProfileForBuild(g_osBuild);
+        // 没探测到构建号：有 DCM 字典说明至少是 6.3 之后的镜像（DCM 从 9600 起），
+        // 否则按 legacy。宁可少用现代规则，也不要把 6.3 当成 16299。
+        return ocid::CbsProfileForBuild(g_manifestDictionary.empty() ? 0 : 9600);
+    }
+
+    // 从 "<win>" 里的 ntoskrnl.exe 取构建号；已经有显式 --os-build 时不覆盖。
+    void DetectBuildFromWindowsDir(const std::wstring& windowsDir)
+    {
+        if (g_osBuildFromCommandLine || g_osBuild > 0 || windowsDir.empty())
+            return;
+        std::wstring path = windowsDir;
+        if (!path.empty() && path.back() != L'\\' && path.back() != L'/')
+            path += L'\\';
+        path += L"System32\\ntoskrnl.exe";
+        std::int32_t build = 0;
+        std::string error;
+        if (ocid::CbsBuildFromImageFile(path, build, error))
+            g_osBuild = build;
+    }
+
+    // 去掉尾部分隔符后取上一级目录（路径操作不处理 ".." 之类的花活，够用即可）。
+    std::wstring ParentDir(const std::wstring& path)
+    {
+        std::wstring p = path;
+        while (!p.empty() && (p.back() == L'\\' || p.back() == L'/'))
+            p.pop_back();
+        const size_t slash = p.find_last_of(L"\\/");
+        if (slash == std::wstring::npos)
+            return std::wstring();
+        return p.substr(0, slash);
+    }
+
+    // 从 "<win>\WinSxS" 这种目录推构建号；已经有更权威的来源时自动跳过。
+    void DetectBuildFromWinSxsDir(const std::wstring& winSxsDir)
+    {
+        DetectBuildFromWindowsDir(ParentDir(winSxsDir));
+    }
 
     bool ReadFileUtf8(const std::wstring& path, std::wstring& out, std::wstring& err)
     {
@@ -3448,8 +3496,9 @@ static const CommandDoc kCommandDocs[] = {
      "生成组件记录（DerivedData\\Components）：S256H、identity、f!、c!、CF 等。",
      "ocid_manifest cbs-plan-components <manifestDir> <outFile> [--staged <winSxsDir>] [--limit N]",
      "--staged：镜像的 WinSxS，用来决定哪些文件真的在盘上（f! 值）。\n"
-     "可选全局开关：--dcm-dictionary（现代镜像）、--file-flags <csv>（现代 f! 状态位）、\n"
-     "--dcm-dictionary 同时决定「现代规则」是否启用。\n"
+     "可选全局开关：--dcm-dictionary（现代镜像的 DCM 清单）、--file-flags <csv>（现代 f! 状态位）、\n"
+     "--os-build <构建号>（版本兼容分档的兜底，例如 9600/16299；不给则从镜像的\n"
+     "ntoskrnl.exe 版本、再不行从 --stack-version 文本探测）。\n"
      "例：ocid_manifest cbs-plan-components W:\\Windows\\WinSxS\\Manifests plan-c.txt --staged W:\\Windows\\WinSxS"},
     {"cbs-plan-deployments", "CBS 台账（生成与写入）",
      "生成部署记录与 catalog 标记（CanonicalData\\Deployments / Catalogs）。",
@@ -3590,7 +3639,8 @@ static void Usage()
         }
         if (!first) OutLn("");
     }
-    OutLn("全局开关：--dcm-dictionary <wcp.dll>（16299+ 的 DCM 清单）、--file-flags <csv>（现代 f! 状态位）。");
+    OutLn("全局开关：--dcm-dictionary <wcp.dll>（DCM 清单）、--file-flags <csv>（现代 f! 状态位）、");
+    OutLn("          --os-build <构建号>（版本兼容分档兜底；默认从镜像 ntoskrnl.exe 或 --stack-version 探测）。");
     OutLn("数据走 stdout，诊断走 stderr。");
 }
 
@@ -3881,7 +3931,7 @@ std::string IdentityTextFromManifest(const AssemblyIdentity& identity)
     //     22,167 条实测只有 `neutral` 与 title case 两种；
     // 8061/8419 的明文清单时代沿用老规则（名称原样、除 en-* 外小写），因为那个时代的记录
     // 来自安装时的另一份清单（8061 429 条、8419 22 条历史记录）。
-    const bool modernIdentity = !g_manifestDictionary.empty();
+    const bool modernIdentity = EffectiveProfile().modernIdentity;
     std::string out = ToUtf8(identity.Name());
     if (modernIdentity)
     {
@@ -3954,6 +4004,8 @@ static int CmdCbsPlanComponents(const std::wstring& manifestDir,
                                 int limit)
 {
 #ifdef _WIN32
+    DetectBuildFromWinSxsDir(winSxsDir);
+    OutLn("版本档位：" + ocid::CbsProfileSummary(EffectiveProfile()));
     WIN32_FIND_DATAW found{};
     const std::wstring pattern = manifestDir + L"\\*.manifest";
     HANDLE find = FindFirstFileW(pattern.c_str(), &found);
@@ -4032,12 +4084,12 @@ static int CmdCbsPlanComponents(const std::wstring& manifestDir,
         // 现代镜像（16299+）的 f! 值是 REG_DWORD 状态位，且是**镜像级**属性：
         // 16299 真机 34,285 条 f! 全部是类型 4，其中不少组件的清单本身仍是明文 XML
         // （未走 DCM），所以不能按"该清单是否压缩"判定，只能按"是否加载了 DCM 字典"。
-        const bool modernFileValues = !g_manifestDictionary.empty();
+        const bool modernFileValues = EffectiveProfile().fileValuesAreFlags;
         std::string shaHex;
         // 16299+ 的清单是 DCM 压缩（msdelta 补丁）；真机 S256H = 解压后清单 XML 的 SHA-256，
         // 8061 的清单本来就是明文，两种情形都由这里的"解码后再哈希"统一覆盖。
         std::vector<std::uint8_t> manifestHashBytes = bytes;
-        if (!g_manifestDictionary.empty() && DcmIsCompressed(manifestHashBytes))
+        if (EffectiveProfile().sha256OfDecodedManifest && DcmIsCompressed(manifestHashBytes))
         {
             std::vector<std::uint8_t> decoded;
             std::string dcmErr;
@@ -4305,6 +4357,9 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
                                  const std::wstring& outPath)
 {
 #ifdef _WIN32
+    // <win>\WinSxS\Manifests → <win>\System32\ntoskrnl.exe 里的构建号。
+    DetectBuildFromWindowsDir(ParentDir(ParentDir(manifestDir)));
+    OutLn("版本档位：" + ocid::CbsProfileSummary(EffectiveProfile()));
     long long manifests = 0, badManifest = 0;
     std::map<std::string, std::string> store;
     {
@@ -4747,7 +4802,7 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
         // 语言包 + 357 个功能部署 + 16 个其它组成，一个驱动都没有）。
         // 16299+：驱动部署同样写 CatalogThumbprint（实测 497 个驱动部署有、且都等于其
         // 声明包的 .cat），`Catalogs` 标记也照写。
-        const bool modernCatalog = !g_manifestDictionary.empty();
+        const bool modernCatalog = EffectiveProfile().catalogForDrivers;
         const std::string catalogHex = ChooseDeploymentCatalog(planned, resolveOrder);
         if (!catalogHex.empty() && (modernCatalog || !planned.driver))
         {
@@ -4805,7 +4860,7 @@ static int CmdCbsPlanDeployments(const std::wstring& packagesDir,
             {
                 if (markerList.find(prefix) == std::string::npos) continue;
                 const std::string valueName =
-                    CbsPayloadValueName(std::string(1, prefix) + "!", payloadText, !g_manifestDictionary.empty());
+                    CbsPayloadValueName(std::string(1, prefix) + "!", payloadText, EffectiveProfile().payloadNameCollapse);
                 lines.insert("V\t" + deploymentPath + "\t" + valueName + "\t3\t" + payloadHex);
                 ++payloads;
             }
@@ -4939,6 +4994,8 @@ static int CmdCbsPlanVersioned(const std::wstring& manifestDir,
                                const std::wstring& outPath)
 {
 #ifdef _WIN32
+    DetectBuildFromWinSxsDir(stagedDir);
+    OutLn("版本档位：" + ocid::CbsProfileSummary(EffectiveProfile()));
     // 1) .mum → 组件键 → 所属包的 .cat 的 SHA-256（CT 值的来源）。
     // 组件键前缀 → (包语言小写 → 该包的 .cat SHA-256)。同一个语言包组件常被
     // 中性包 + 各语言包同时声明（Common-Drivers 的 `~~`/`~en-US~`/`~qps-PLOC~`），
@@ -5592,6 +5649,22 @@ static int CmdCbsPlanDrivers(const std::wstring& packagesDir, const std::wstring
                              const std::wstring& installedPath, const std::wstring& outPath)
 {
 #ifdef _WIN32
+    DetectBuildFromWinSxsDir(winSxsDir);
+    OutLn("版本档位：" + ocid::CbsProfileSummary(EffectiveProfile()));
+    // Drivers 台账是 10.0.16212（RS3 前后）才出现的子系统：9600/8419/8061 的真机
+    // 台账里根本没有 `Drivers` 子树（实测 0 键）。这一代跑这个阶段只会多写 455 个键，
+    // 所以按版本档位直接产出空计划，不靠调用方记得加开关。
+    if (!EffectiveProfile().driversLedger)
+    {
+        std::wstring writeError;
+        if (!WriteLinesUtf8(outPath, {}, writeError))
+        {
+            Err("写不了 " + ToUtf8(outPath) + "：" + ToUtf8(writeError));
+            return 2;
+        }
+        OutLn("drivers=0（这一代没有 Drivers 台账，跳过）");
+        return 0;
+    }
     std::map<std::string, std::wstring> componentDirs; // 小写目录名 → 完整路径
     {
         WIN32_FIND_DATAW fd;
@@ -5788,6 +5861,15 @@ static int CmdCbsPlanRoot(const std::wstring& archText, const std::wstring& stac
                           bool emitTransformSettings = false,
                           bool emitInstallersRoot = false)
 {
+    // 根键里的形态（ccpinterface 等）由输入决定；构建号在这里只做兜底：
+    // 没给 --os-build、也没有镜像目录可探测时，从栈版本文本取。
+    if (!g_osBuildFromCommandLine && g_osBuild == 0)
+    {
+        std::int32_t buildFromText = 0;
+        if (ocid::CbsBuildFromVersionText(ToUtf8(stackVersion), buildFromText))
+            g_osBuild = buildFromText;
+    }
+    OutLn("版本档位：" + ocid::CbsProfileSummary(EffectiveProfile()));
     const std::string arch = ToUtf8(archText);
     std::uint32_t archCode = 0;
     if (arch == "x86") archCode = 0;
@@ -5919,6 +6001,14 @@ int main(int argc, char** argv)
                 (void)wcpPath;
                 (void)loadError;
 #endif
+                ++i;
+                continue;
+            }
+            if (a == "--os-build" && i + 1 < argc)
+            {
+                // 版本兼容层：显式指定台账的构建号（优先于镜像里的 ntoskrnl.exe）。
+                g_osBuild = static_cast<std::int32_t>(strtol(argv[i + 1], nullptr, 10));
+                g_osBuildFromCommandLine = g_osBuild > 0;
                 ++i;
                 continue;
             }

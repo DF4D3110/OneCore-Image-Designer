@@ -302,7 +302,20 @@ if ($InstalledHive) {
 elseif ($SoftwareHivePath) {
     $full = (Resolve-Path $SoftwareHivePath).Path
     $key = "HKLM\$MountName"
+    # `reg load` 对"已经挂着同名键"会失败但不报错：如果上一次抽取没卸干净（或上次是
+    # 别的镜像），这里会静默读到**上一个镜像**的包状态（实测把 8419 ARM 的状态喂给了
+    # 9600，导致所有部署的载荷值都没写）。所以先确保这个挂载点干净，再核对确实挂上了。
+    if (Test-Path ("Registry::" + $key)) {
+        & reg unload $key | Out-Null
+        Start-Sleep -Milliseconds 300
+        if (Test-Path ("Registry::" + $key)) {
+            throw "挂载点 $key 仍被占用（另一个 reg load 没卸），先 reg unload 再抽取"
+        }
+    }
     & reg load $key $full | Out-Null
+    if (-not (Test-Path ("Registry::" + $key))) {
+        throw "reg load $key $full 失败（包状态读不到）"
+    }
     try {
         $pkgRoot = "${key}\Microsoft\Windows\CurrentVersion\Component Based Servicing\Packages"
         $items = Get-ChildItem -Path ("Registry::" + $pkgRoot) -ErrorAction SilentlyContinue
@@ -317,7 +330,17 @@ elseif ($SoftwareHivePath) {
         $packages = $lines.Count
     }
     finally {
-        & reg unload $key | Out-Null
+        # 注册表句柄释放有延迟：立刻 unload 常常 Access is denied。重试几次，
+        # 别把挂载点留给下一次（那会让下一次抽取静默读到这个镜像的状态）。
+        [System.GC]::Collect()
+        [System.GC]::WaitForPendingFinalizers()
+        $unloaded = $false
+        for ($try = 0; $try -lt 5 -and -not $unloaded; $try++) {
+            & reg unload $key 2>&1 | Out-Null
+            Start-Sleep -Milliseconds 300
+            $unloaded = -not (Test-Path ("Registry::" + $key))
+        }
+        if (-not $unloaded) { Write-Warning "无法卸载 $key（下一次抽取前请手工 reg unload）" }
     }
 }
 
