@@ -1,12 +1,18 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
     <OutputType>Library</OutputType>
     <Platforms>x86;x64;ARM64;ARM32</Platforms>
   </PropertyGroup>
-	
+
+  <!--
+    Container reader for cabinet files (header / folder / CFDATA walking, file
+    placement). The compression codecs are NOT here: MSZIP (raw DEFLATE) and LZX
+    are decoded by the first-party OcidCabinet project, so this vendored project
+    no longer pulls SharpZipLib or ships the XNA libmspack port.
+  -->
   <ItemGroup>
-    <PackageReference Include="SharpZipLib" Version="1.4.2" />
+    <ProjectReference Include="..\..\Source\Managed\OcidCabinet\OcidCabinet.csproj" />
   </ItemGroup>
 
 </Project>

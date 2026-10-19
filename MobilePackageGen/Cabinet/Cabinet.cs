@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) Gustave Monce
  * 
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -19,8 +19,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
-using Cabinet.Xna;
-using ICSharpCode.SharpZipLib.Zip.Compression;
+using OcidCabinet;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -403,8 +402,11 @@ namespace Cabinet
             {
                 CabinetVolume volume = volumes.ElementAt(volumeIndex);
 
+                // Both decoders keep state across the compressed blocks of a folder (LZX by
+                // format, MSZIP because the compressor keeps the 32 KiB window), so one instance
+                // is created per folder.
                 LzxDecoder lzx = null;
-                Inflater inf = null;
+                DeflateDecoder deflate = null;
                 if (volume.CabinetFileVolume.typeCompress == CFFOLDER.CFTYPECOMPRESS.TYPE_LZX)
                 {
                     lzx = new LzxDecoder(volume.CabinetFileVolume.typeCompressOption);
@@ -412,7 +414,7 @@ namespace Cabinet
 
                 if (volume.CabinetFileVolume.typeCompress == CFFOLDER.CFTYPECOMPRESS.TYPE_MSZIP)
                 {
-                    inf = new Inflater(true);
+                    deflate = new DeflateDecoder();
                 }
 
                 int fcount = 0;
@@ -442,11 +444,7 @@ namespace Cabinet
                         compressedDataBlock = cabinetBinaryReader.ReadBytes(dataStruct.cbData);
                     }
 
-                    using (MemoryStream uncompressedDataBlockStream = new(uncompressedDataBlock))
-                    using (MemoryStream compressedDataBlockStream = new(compressedDataBlock))
-                    {
-                        ExpandBlock(uncompressedDataBlockStream, compressedDataBlockStream, volume.CabinetFileVolume.typeCompress, lzx, inf);
-                    }
+                    ExpandBlock(uncompressedDataBlock, compressedDataBlock, volume.CabinetFileVolume.typeCompress, lzx, deflate);
 
                     foreach (CabinetVolumeFile file in files)
                     {
@@ -527,7 +525,7 @@ namespace Cabinet
             CabinetVolume volume = volumes.ElementAt(volumeIndex);
 
             LzxDecoder lzx = null;
-            Inflater inf = null;
+            DeflateDecoder deflate = null;
             if (volume.CabinetFileVolume.typeCompress == CFFOLDER.CFTYPECOMPRESS.TYPE_LZX)
             {
                 lzx = new LzxDecoder(volume.CabinetFileVolume.typeCompressOption);
@@ -535,7 +533,7 @@ namespace Cabinet
 
             if (volume.CabinetFileVolume.typeCompress == CFFOLDER.CFTYPECOMPRESS.TYPE_MSZIP)
             {
-                inf = new Inflater(true);
+                deflate = new DeflateDecoder();
             }
 
             using BinaryReader cabinetBinaryReader = new(InputStream, System.Text.Encoding.UTF8, true);
@@ -567,11 +565,7 @@ namespace Cabinet
                     compressedDataBlock = cabinetBinaryReader.ReadBytes(dataStruct.cbData);
                 }
 
-                using (MemoryStream uncompressedDataBlockStream = new(uncompressedDataBlock))
-                using (MemoryStream compressedDataBlockStream = new(compressedDataBlock))
-                {
-                    ExpandBlock(uncompressedDataBlockStream, compressedDataBlockStream, volume.CabinetFileVolume.typeCompress, lzx, inf);
-                }
+                ExpandBlock(uncompressedDataBlock, compressedDataBlock, volume.CabinetFileVolume.typeCompress, lzx, deflate);
 
                 if (file.CabinetFileVolumeFile.cbFile != 0)
                 {
@@ -607,35 +601,35 @@ namespace Cabinet
             return destination;
         }
 
-        private static void ExpandBlock(Stream uncompressedDataBlockStream, Stream compressedDataBlockStream, CFFOLDER.CFTYPECOMPRESS compressionType, LzxDecoder lzx, Inflater inf)
+        private static void ExpandBlock(byte[] uncompressedDataBlock, byte[] compressedDataBlock, CFFOLDER.CFTYPECOMPRESS compressionType, LzxDecoder lzx, DeflateDecoder deflate)
         {
             switch (compressionType)
             {
                 case CFFOLDER.CFTYPECOMPRESS.TYPE_LZX:
                     {
-                        _ = lzx.Decompress(compressedDataBlockStream, (int)compressedDataBlockStream.Length, uncompressedDataBlockStream, (int)uncompressedDataBlockStream.Length);
+                        _ = lzx.Decompress(compressedDataBlock, uncompressedDataBlock);
                         break;
                     }
 
                 case CFFOLDER.CFTYPECOMPRESS.TYPE_NONE:
                     {
-                        compressedDataBlockStream.CopyTo(uncompressedDataBlockStream);
+                        if (compressedDataBlock.Length != uncompressedDataBlock.Length)
+                        {
+                            throw new Exception($"Bad Cabinet: stored block is {compressedDataBlock.Length} bytes, expected {uncompressedDataBlock.Length}");
+                        }
+
+                        Buffer.BlockCopy(compressedDataBlock, 0, uncompressedDataBlock, 0, uncompressedDataBlock.Length);
                         break;
                     }
+
                 case CFFOLDER.CFTYPECOMPRESS.TYPE_MSZIP:
                     {
-                        using BinaryReader br = new(compressedDataBlockStream);
-                        using BinaryWriter bw = new(uncompressedDataBlockStream);
-                        byte[] inBuffer = br.ReadBytes((int)br.BaseStream.Length);
-                        inf.SetInput(inBuffer);
-                        byte[] outBuffer = new byte[bw.BaseStream.Length];
-                        int ret = inf.Inflate(outBuffer);
-                        if (ret == 0)
+                        int written = deflate.Decompress(compressedDataBlock, uncompressedDataBlock);
+                        if (written != uncompressedDataBlock.Length)
                         {
-                            throw new Exception("Inflate failed");
+                            throw new Exception($"Bad Cabinet: MSZIP block inflated to {written} bytes, expected {uncompressedDataBlock.Length}");
                         }
-                        bw.Write(outBuffer);
-                        inf.Reset();
+
                         break;
                     }
             }

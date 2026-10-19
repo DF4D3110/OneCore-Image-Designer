@@ -100,7 +100,6 @@ MobilePackageGen.exe <Path to image file(s)> <Output folder CBSs>
 | **NSudo**（TrustedInstaller 提权） | 原始项目 [M2TeamArchived/NSudo](https://github.com/M2TeamArchived/NSudo)（M2-Team / Mouri_Naruto，已归档）；编译 `NSudoAPI.dll` 用的是 [UUP-Project/NSudo](https://github.com/UUP-Project/NSudo) 分支 | MIT | `MobilePackageGen.Common/NSudo`（C# 绑定 `M2.NSudo`）；`NSudoAPI.dll` 本身不随仓库分发，需自行编译 |
 | **LTRData.DiscUtils**（Vhd / Vhdx / Wim / Ntfs / FileSystems / Streams / Registry，1.0.85 与 1.0.55） | [LTRData/DiscUtils](https://github.com/LTRData/DiscUtils) | MIT | NuGet 包 |
 | **RawDiskLib** 0.2.1 | [LTRData/RawDiskLib](https://github.com/LTRData/RawDiskLib) | 见包内许可 | NuGet 包 |
-| **SharpZipLib** 1.4.2 | [icsharpcode/SharpZipLib](https://github.com/icsharpcode/SharpZipLib) | MIT | NuGet 包（`Cabinet`） |
 | **System.Reactive** 6.0.1 | [dotnet/reactive](https://github.com/dotnet/reactive) | MIT | NuGet 包（`DeflateBlockCompressor`） |
 | **ZLibDotNet** 0.1.1 | [NN---/ZLibDotNet](https://github.com/NN---/ZLibDotNet) | MIT | NuGet 包（`DeflateBlockCompressor`） |
 | **System.IO.Hashing** 8.0.0 / 10.0.0 | [dotnet/runtime](https://github.com/dotnet/runtime) | MIT | NuGet 包 |
@@ -112,7 +111,7 @@ MobilePackageGen.exe <Path to image file(s)> <Output folder CBSs>
 | **StorageSpace** | [gus33000/StorageSpace](https://github.com/gus33000/StorageSpace) | MIT | `StorageSpace`（本地版） |
 | **EDLProgram2VHDX** | [gus33000/EDLProgram2VHDX](https://github.com/gus33000/EDLProgram2VHDX) | 见项目内许可 | 上游 fork 里的子模块；本目录**不包含**，也未引用 |
 | **LibSxS** | 随 [WSK Tools](https://github.com/gus33000/WSK) 分发 | 见源码内说明 | `LibSxS` |
-| **Cabinet / XNA LzxDecoder** | 随 UUPMediaCreator / WPMT 分发；`LzxDecoder` 源自 libmspack（Stuart Caie），经 Ali Scissons 改写 | `Cabinet/LICENSE`（MIT）；`Cabinet/Xna/LzxDecoder.cs` 头部为 LGPL-2.1 或 MS-PL 双许可 | `Cabinet`、`Cabinet/Xna/LzxDecoder.cs` |
+| **Cabinet**（容器读取） | 随 UUPMediaCreator / WPMT 分发 | `Cabinet/LICENSE`（MIT） | `Cabinet` —— 只保留 cab 容器（头、folder、`CFDATA`、文件落位）的读取；MSZIP 的 DEFLATE 与 LZX 解码由项目自有的 `Source/Managed/OcidCabinet/` 提供，本目录不再随附 XNA `LzxDecoder`，也不再引用 SharpZipLib |
 | **Microsoft.Deployment.Compression(.Cab)** | WiX 工具集 | MS-RL | `Microsoft.Deployment.Compression(.Cab)` |
 | **SevenZipExtractor / 7-Zip** | [adoconnection/SevenZipExtractor](https://github.com/adoconnection/SevenZipExtractor) | LGPL-2.1 | `Archives.DiscUtils/SevenZipExtractor` |
 | **WPMT.Core**（压缩 / 哈希 / 目录库） | 自 WPMT（Windows Package Management Tool）迁移 | 见源码内说明 | `WPMT.Core` |
@@ -131,6 +130,7 @@ MobilePackageGen.exe <Path to image file(s)> <Output folder CBSs>
 - **裸文件系统镜像支持**：新增 `FileSystemImage` 适配器，可直接读取无分区表的 NTFS/FAT 卷 dump
 - **GPT 解析修复**：`GPT.cs` 边界检查修复（Bad GPT 崩溃）
 - **WPMT 压缩/哈希/目录能力迁移**：DCM manifest 压缩/解压、cat 重建（CDF + 签名）、文件名/哈希算法
+- **CAB 解压改为自有实现**：`Cabinet` 只保留容器读取，MSZIP（DEFLATE）与 LZX 解码换成 `Source/Managed/OcidCabinet/`；不再引用 SharpZipLib，也不再随附 XNA `LzxDecoder`（对 `expand.exe` 逐字节对拍通过）
 - **CAB 输出选项**：是否使用 DCM 压缩（两选项），满足 imageapp 构建要求
 - **包校验日志**：全程输出所有包（含缺失包）的日志，便于与 FM 核对
 - **FM 结构摆放**：Appx/CAB 按 FM 定义输出到对应架构目录，文件名与 FM 对齐

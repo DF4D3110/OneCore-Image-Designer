@@ -2,6 +2,13 @@ MIT License
 
 Copyright (c) 2021 Gustave Monce
 
+Note: this directory now contains only the cabinet container reader (originally
+from UUPMediaCreator / WPMT). The MSZIP and LZX decompressors that used to live
+here were replaced by the project's own implementation under
+Source/Managed/OcidCabinet/, and Cabinet/Xna/LzxDecoder.cs was removed. The
+libmspack/XNA notice below is kept because it still applies to the copy of this
+project vendored under ThirdParty/UUPMediaCreator/src/Cabinet/.
+
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights

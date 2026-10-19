@@ -159,6 +159,28 @@ exposes it to the application through a small C ABI.
 | `MacroExpander` | Expansion of `$(runtime.*)` path macros and `$(runtime.host.*)` registry-root macros, including WOW64 variants and unresolved-macro reporting. |
 | `SecurityDescriptor` | SDDL resolution and description, `(inherit)` pass-through, and SDDL ↔ self-relative binary conversion. |
 
+### CAB decompression (managed side, project-owned)
+
+`Source/Managed/OcidCabinet/` holds our own decoders for cabinet payloads. `MobilePackageGen/Cabinet`
+keeps only the container reader (header, folders, `CFDATA`, file placement) and references it, so the
+vendored project no longer pulls SharpZipLib and no longer ships the XNA libmspack port. Both codecs
+follow what Windows actually does:
+
+| Codec | Implementation notes |
+| --- | --- |
+| MSZIP (`TYPE_MSZIP`) | Raw RFC 1951 DEFLATE (no zlib header), stored / fixed / dynamic blocks. **Each `CFDATA` block continues the folder's last 32 KiB of history** (makecab does not reset the dictionary at block boundaries), so one decoder instance is reused for every block of a folder, in order. |
+| LZX (`TYPE_LZX`) | Windows 15..21 (`typeCompressOption` is the window bit count), verbatim / aligned / uncompressed blocks; code-length trees, R0/R1/R2 and the aligned offset table persist across blocks; the odd-byte pad and 16-bit realignment after an uncompressed block; the intel E8 transform accumulates over frame positions. |
+
+The reference is `expand.exe` (the Windows cabinet API): makecab-generated MSZIP and LZX (window
+15/17/20/21) fixtures, the 8400 repair-content MSZIP cabs, the LZX cabs under `C:\Windows\servicing`
+(355 + 10 + 1 files) and the 96 MB MSZIP `BucketConfidenceData.cab` — **429 files, all byte-identical**.
+The replacement is also file-for-file identical to the previous implementation (SharpZipLib + the XNA
+libmspack port) across 3,628 files. `Tests/` covers it offline by generating the fixtures with makecab.
+The known container-level gap is sparse CABs whose files are split with the `iFolder` =
+`0xFFFD/0xFFFE/0xFFFF` convention: `expand.exe` stitches them, the current reader treats them as a
+plain folder — a container issue, unrelated to decompression. The desktop side still shells out to
+`expand.exe`; switching it to these decoders is follow-up work.
+
 ### CBS store writer (COMPONENTS)
 
 `CbsStore` encodes and decodes the COMPONENTS store; `ocid_manifest cbs-write` and
@@ -215,6 +237,7 @@ UupShared/                Offline UUP query parsing and payload contracts shared
 Tests/                    Offline regression harness
 Source/Native/OcidServicing/  Project-owned C++ servicing stack: library, console tool and native tests
 Source/Native/OcidRegHook/    Diagnostic registry interception DLL for the legacy CBS path
+Source/Managed/OcidCabinet/   Project-owned CAB decompressors (MSZIP DEFLATE and LZX) shared by the toolchain and the desktop side
 Tools/wcpex/              Vendored wcpex.exe + wcp.dll, used to decompress DCM-compressed manifests
 ThirdParty/               Vendored UUP source closure used by UupBridge
 addonkit/                 Bundled Microsoft iot-adk-addonkit 17763-v7 (PowerShell toolchain + sample workspace)
@@ -235,8 +258,8 @@ as assets on this repository's GitHub Release tagged `adktool`.
 groups checks for UUP query parsing and snapshot round-trip, payload lookup and path-traversal
 rejection, bridge cancellation and error propagation, conversion input/output/tool validation,
 overwrite protection, same-drive free-space accounting, safe CLI argument construction, artifact
-preflight, the SxS no-execution gate, XML capability detection, and the managed-to-native servicing
-bindings.
+preflight, the SxS no-execution gate, XML capability detection, CAB decompression (makecab-generated
+MSZIP/LZX fixtures compared byte for byte), and the managed-to-native servicing bindings.
 
 The native modules have their own assertion suites, built and run by `build-servicing.ps1`:
 `identity`, `manifest`, `wcm`, `registryvalue`, `cmiinstaller`, `macroexpander`,
@@ -271,11 +294,12 @@ ships; everything else is either project-owned or taken from an installation the
 | DevImgGen | [mediaexplorer74/DevImgGen](https://github.com/mediaexplorer74/DevImgGen) (fork: [DF4D3110/DevImgGen](https://github.com/DF4D3110/DevImgGen)) | design reference for the image-build page entry, recorded in the file header of `ViewModels/ImageBuild/ImageBuildViewModel.cs` | MIT. No code is copied; nothing from it is distributed. |
 
 The complete component inventory of the vendored `MobilePackageGen/` subtree — LTRData.DiscUtils,
-RawDiskLib, SharpZipLib, System.Reactive, ZLibDotNet, System.IO.Hashing, Zafiro.DivineBytes,
-SevenZipExtractor / 7-Zip (LGPL-2.1), Microsoft.Deployment.Compression (WiX, MS-RL), Cabinet and
-the XNA LzxDecoder, DotnetPackaging.Msix, DeflateBlockCompressor, LibSxS, Img2Ffu, StorageSpace,
-WPMT.Core, and the `msdelta.dll` system component — is listed in full in
-`MobilePackageGen/readme.md`.
+RawDiskLib, System.Reactive, ZLibDotNet, System.IO.Hashing, Zafiro.DivineBytes,
+SevenZipExtractor / 7-Zip (LGPL-2.1), Microsoft.Deployment.Compression (WiX, MS-RL),
+DotnetPackaging.Msix, DeflateBlockCompressor, LibSxS, Img2Ffu, StorageSpace, WPMT.Core, and the
+`msdelta.dll` system component — is listed in full in `MobilePackageGen/readme.md`. The cabinet
+codecs are not part of it: MSZIP/LZX are project-owned (`Source/Managed/OcidCabinet/`), and
+`MobilePackageGen/Cabinet` no longer carries SharpZipLib or the XNA `LzxDecoder`.
 
 ### Consumed, referenced, but not distributed
 
@@ -307,7 +331,9 @@ This is an active work in progress. Three things are worth stating plainly:
    reference images (8061 x86, 8061 ARM, 8419 ARM, 16299 amd64, 9600 amd64) matches Microsoft's own COMPONENTS store byte for
    byte, key for key, value for value (`cbs-diff` reports 0/0). The only part not yet self-contained is
    the `WinSxS\ManifestCache` PCM/CDF encoder: its container layer already reproduces files exactly, the
-   element-record tables are still being worked out.
+   element-record tables are still being worked out. CAB decompression (MSZIP/LZX) is already
+   self-contained in `Source/Managed/OcidCabinet`; the desktop side's `expand.exe` calls are migration
+   debt, not a capability gap.
 2. **Install-history information has to be supplied as input.** Some values (`f256` segment order,
    identity culture casing, `c!` attribution, catalog choice, `MCP_*` and version-node flag bits) come
    from the image's installation history and cannot be derived from a package set. `Extract-CbsInputs.ps1`

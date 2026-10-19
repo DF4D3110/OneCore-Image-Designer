@@ -143,6 +143,25 @@ TestContent/DevicePlatformIDs、V2 专有与 V2 已废弃字段）。`Assets/Val
 | `MacroExpander` | `$(runtime.*)` 路径宏与 `$(runtime.host.*)` 注册表根宏的展开，含 WOW64 变体与未展开宏上报。 |
 | `SecurityDescriptor` | SDDL 解析与描述、`(inherit)` 直通，以及 SDDL ↔ 自相对二进制互转。 |
 
+### CAB 解压（托管侧，自有实现）
+
+`Source/Managed/OcidCabinet/` 是本项目自写的 CAB 载荷解码器，`MobilePackageGen/Cabinet` 只保留
+cab 容器（文件头、folder、`CFDATA`、文件落位）的读取，压缩部分改为引用它，因此那个 vendored 工程
+不再依赖 SharpZipLib，也不再随附 XNA 的 libmspack 移植。两种编码都按 Windows 的实际语义实现：
+
+| 编码 | 实现要点 |
+| --- | --- |
+| MSZIP（`TYPE_MSZIP`） | RFC 1951 原始 DEFLATE（无 zlib 头），支持 stored / 固定码 / 动态码。**每个 `CFDATA` 块沿用同一 folder 已解出的 32 KiB 历史**（makecab 的块边界并不重置字典），所以解码器实例按 folder 顺序复用。 |
+| LZX（`TYPE_LZX`） | 窗口 15..21（`typeCompressOption` 直接作为窗口位），verbatim / aligned / uncompressed 三种块；码长表、R0/R1/R2、aligned 偏移都在块之间保持；`uncompressed` 块的奇数字节补齐与按 16 位对齐的重同步；intel E8 变换按 frame 位置累加。 |
+
+验证口径是 `expand.exe`（Windows 自带的 cabinet API）：makecab 现造的 MSZIP 与 LZX（窗口 15/17/20/21）
+夹具、8400 repair content 的 MSZIP 包、`C:\Windows\servicing` 下的 LZX 包（355 + 10 + 1 个文件）、
+96 MB 的 `BucketConfidenceData.cab`（MSZIP），共 **429 个文件逐字节一致**；与替换前的实现
+（SharpZipLib + XNA libmspack 移植）在 3,628 个文件上同样零差异。`Tests/` 里有对应的离线回归
+（用 makecab 现场造多块夹具）。容器层的已知缺口是 sparse CAB 的分段文件（`iFolder` 取
+`0xFFFD/0xFFFE/0xFFFF` 的约定），`expand.exe` 会拼接而当前读取器按普通 folder 处理——属容器问题，
+与解压无关。桌面侧目前仍通过 `expand.exe` 解包，后续可切到同一份解码器。
+
 ### CBS 台账写侧（COMPONENTS）
 
 `CbsStore` 负责 COMPONENTS 台账的编解码，`ocid_manifest cbs-write` 与 `assemble-cbs-store.ps1` 负责
@@ -204,6 +223,7 @@ UupShared/                离线 UUP 查询解析与负载契约，主程序与�
 Tests/                    离线回归测试
 Source/Native/OcidServicing/  项目自有 C++ 服务栈：库、控制台工具与原生测试
 Source/Native/OcidRegHook/    遗留 CBS 路径用的诊断注册表拦截 DLL
+Source/Managed/OcidCabinet/   自有的 CAB 解压器（MSZIP 的 DEFLATE 与 LZX），供包工具与桌面侧共用
 Tools/wcpex/              内置 wcpex.exe + wcp.dll，用于解压 DCM 压缩的清单
 ThirdParty/               UupBridge 使用的内置 UUP 源码闭包
 addonkit/                 内置的微软 iot-adk-addonkit 17763-v7（PowerShell 工具链 + 示例工作区）
@@ -221,7 +241,8 @@ Release 上，标签为 `adktool`。
 
 `Tests/` 是离线回归工具（`Tests/Program.cs`，不联网、不需要镜像）。其中分组覆盖：UUP 查询解析与快照
 往返、负载定位与路径穿越拒绝、桥接取消与错误传播、转换输入/输出/工具校验、覆盖保护、同盘剩余空间核算、
-命令行参数安全构造、产物预检、SxS 不执行门禁、XML 能力探测，以及托管到原生的服务绑定。
+命令行参数安全构造、产物预检、SxS 不执行门禁、XML 能力探测、CAB 解压（makecab 现场造 MSZIP/LZX
+夹具并逐字节比对），以及托管到原生的服务绑定。
 
 原生模块各有断言套件，由 `build-servicing.ps1` 构建并运行：`identity`、`manifest`、`wcm`、
 `registryvalue`、`cmiinstaller`、`macroexpander`、`securitydescriptor`。
@@ -253,11 +274,13 @@ Release 上，标签为 `adktool`。
 | wcpex | [smx-smx/wcpex](https://github.com/smx-smx/wcpex) | `Tools/wcpex/wcpex.exe` + `wcp.dll`，以内嵌资源方式打包、运行期释放，用于解压 DCM 压缩的清单 | 预编译二进制；上游未随附许可文件，因此这里按原样保留、不参与构建。 |
 | DevImgGen | [mediaexplorer74/DevImgGen](https://github.com/mediaexplorer74/DevImgGen)（fork：[DF4D3110/DevImgGen](https://github.com/DF4D3110/DevImgGen)） | 镜像构建页入口的**设计参考**，记录在 `ViewModels/ImageBuild/ImageBuildViewModel.cs` 的文件头注释里 | MIT。未复制任何代码，也未分发其中任何内容。 |
 
-内置的 `MobilePackageGen/` 子树的完整组件清单——LTRData.DiscUtils、RawDiskLib、SharpZipLib、
+内置的 `MobilePackageGen/` 子树的完整组件清单——LTRData.DiscUtils、RawDiskLib、
 System.Reactive、ZLibDotNet、System.IO.Hashing、Zafiro.DivineBytes、SevenZipExtractor / 7-Zip
-（LGPL-2.1）、Microsoft.Deployment.Compression（WiX，MS-RL）、Cabinet 与 XNA LzxDecoder、
-DotnetPackaging.Msix、DeflateBlockCompressor、LibSxS、Img2Ffu、StorageSpace、WPMT.Core，以及系统组件
-`msdelta.dll`——在 `MobilePackageGen/readme.md` 中逐条列出。
+（LGPL-2.1）、Microsoft.Deployment.Compression（WiX，MS-RL）、DotnetPackaging.Msix、
+DeflateBlockCompressor、LibSxS、Img2Ffu、StorageSpace、WPMT.Core，以及系统组件
+`msdelta.dll`——在 `MobilePackageGen/readme.md` 中逐条列出。cab 的压缩解码器不在其中：
+MSZIP/LZX 是项目自有的 `Source/Managed/OcidCabinet/`，`MobilePackageGen/Cabinet` 已不含
+SharpZipLib 与 XNA `LzxDecoder`。
 
 ### 被引用或使用，但不随本仓库分发
 
@@ -284,6 +307,8 @@ DotnetPackaging.Msix、DeflateBlockCompressor、LibSxS、Img2Ffu、StorageSpace�
    `Source/Native/OcidServicing` 自己实现；CBS 写侧在四个真机镜像（8061 x86、8061 ARM、8419 ARM、
    16299 amd64、9600 amd64）上与微软原版的 COMPONENTS 做到逐键/逐值/逐字节一致（`cbs-diff` 0/0）。尚未自带的只有
    `WinSxS\ManifestCache` 的 PCM/CDF 编码器（容器层已逐字节可复现；`src/PcmBuild.cpp` 直接由清单构建，全语料 99.6% 整文件一致）。
+   cab 的 MSZIP/LZX 解压也已自有（`Source/Managed/OcidCabinet`，见上）；桌面侧的 `expand.exe` 调用是
+   迁移中遗留，不是能力缺口。
 2. **安装历史类信息必须作为输入。** 有些值（`f256` 多段的段序、identity 文化大小写、`c!` 归属、
    catalog 选择、`MCP_*`/(default) 位图、现代 `f!` 的非 1 状态位）来自镜像的安装历史，不能从包集推导；
    `Extract-CbsInputs.ps1` 从参考镜像导出它们，`make-cbs-overrides.ps1` 生成覆盖表，组装时显式传入。

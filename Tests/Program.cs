@@ -31,6 +31,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ,("Ocid DriverDatabase ledger writes a hived copy and reads back value-for-value", () => { OcidDriverDatabaseLedger(); return Task.CompletedTask; })
     ,("Ocid driver store lands package files and publishes the INF", () => { OcidDriverStoreLanding(); return Task.CompletedTask; })
     ,("Ocid DMI import lands files, publishes oemN.inf and writes the database in one pass", () => { OcidDmiImport(); return Task.CompletedTask; })
+    ,("Cabinet decompressor round-trips MSZIP and LZX fixtures made by makecab", () => { CabinetDecompression(); return Task.CompletedTask; })
 };
 
 var failures = new List<string>();
@@ -1364,6 +1365,99 @@ static void RunReg(params string[] args)
         throw new InvalidOperationException($"reg {string.Join(' ', args)} 失败 ({proc.ExitCode}): {stderr}{stdout}");
 }
 static string Hex(byte[] b) => Convert.ToHexString(b);
+
+// Cabinet decompression is now first-party (Source/Managed/OcidCabinet): raw DEFLATE for MSZIP
+// folders, LZX for every window size Windows images use. makecab.exe is the closest thing to a
+// reference encoder on a stock machine, so the fixture is generated with it rather than checked
+// into the repo: the blob spans many CFDATA blocks, which is exactly the case where MSZIP must
+// carry its 32 KiB history across block boundaries (a decoder that resets per block fails here).
+static void CabinetDecompression()
+{
+    string root = NewTempDirectory();
+    try
+    {
+        string srcDir = Path.Combine(root, "src");
+        string cabDir = Path.Combine(root, "cab");
+        Directory.CreateDirectory(srcDir);
+        Directory.CreateDirectory(cabDir);
+
+        var random = new Random(20261019);
+        byte[] blob = new byte[3 * 1024 * 1024 + 517];
+        for (int i = 0; i < blob.Length; i++)
+        {
+            blob[i] = i % 97 < 90 ? (byte)(i % 251) : (byte)random.Next(256);
+        }
+
+        string text = string.Concat(Enumerable.Repeat(
+            "cabinet fixture: MSZIP keeps its 32 KiB window across CFDATA blocks.\n", 4000));
+        var files = new Dictionary<string, byte[]>
+        {
+            ["empty.bin"] = Array.Empty<byte>(),
+            ["text.bin"] = System.Text.Encoding.UTF8.GetBytes(text),
+            ["blob.bin"] = blob,
+        };
+        foreach (var (name, data) in files)
+        {
+            File.WriteAllBytes(Path.Combine(srcDir, name), data);
+        }
+
+        string listings = string.Join("\r\n", files.Keys.Select(name => $"\"{Path.Combine(srcDir, name)}\""));
+        foreach (var (type, memory) in new[] { ("MSZIP", 21), ("LZX", 15), ("LZX", 17), ("LZX", 20), ("LZX", 21) })
+        {
+            string stem = $"{type.ToLowerInvariant()}{memory}";
+            string ddf = Path.Combine(root, stem + ".ddf");
+            File.WriteAllText(ddf,
+                $".Set CabinetNameTemplate={stem}.cab\r\n" +
+                ".Set Cabinet=on\r\n" +
+                ".Set Compress=on\r\n" +
+                $".Set DiskDirectoryTemplate={cabDir}\r\n" +
+                $".Set CompressionType={type}\r\n" +
+                $".Set CompressionMemory={memory}\r\n" +
+                listings + "\r\n");
+
+            RunTool("makecab.exe", $"/F \"{ddf}\"", root);
+
+            string cabPath = Path.Combine(cabDir, stem + ".cab");
+            True(File.Exists(cabPath), $"makecab did not produce {cabPath}");
+
+            string outDir = Path.Combine(root, "out-" + stem);
+            Directory.CreateDirectory(outDir);
+            Cabinet.CabinetExtractor.ExtractCabinet(cabPath, outDir);
+
+            foreach (var (name, data) in files)
+            {
+                byte[] actual = File.ReadAllBytes(Path.Combine(outDir, name));
+                True(actual.AsSpan().SequenceEqual(data),
+                    $"{stem}: {name} does not match the source ({actual.Length} vs {data.Length} bytes)");
+            }
+
+            Equal(files.Count, Directory.GetFiles(outDir, "*", SearchOption.AllDirectories).Length);
+        }
+    }
+    finally
+    {
+        try { Directory.Delete(root, recursive: true); } catch { /* temp cleanup is best effort */ }
+    }
+}
+
+static void RunTool(string fileName, string arguments, string workingDirectory)
+{
+    var psi = new System.Diagnostics.ProcessStartInfo(fileName, arguments)
+    {
+        UseShellExecute = false,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        CreateNoWindow = true,
+        WorkingDirectory = workingDirectory,
+    };
+    using var proc = System.Diagnostics.Process.Start(psi)
+        ?? throw new InvalidOperationException($"{fileName} 起不来");
+    string stdout = proc.StandardOutput.ReadToEnd();
+    string stderr = proc.StandardError.ReadToEnd();
+    proc.WaitForExit();
+    if (proc.ExitCode != 0)
+        throw new InvalidOperationException($"{fileName} {arguments} 失败 ({proc.ExitCode}): {stderr}{stdout}");
+}
 
 static string NewTempDirectory()
 {

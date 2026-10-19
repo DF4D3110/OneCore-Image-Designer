@@ -45,6 +45,7 @@
 
   <ItemGroup>
     <Compile Remove="MobilePackageGen\**\*.cs" />
+    <Compile Remove="Source\**\*.cs" />
     <Compile Remove="UupBridge\**\*.cs" />
     <Compile Remove="UupShared\**\*.cs" />
     <Compile Remove="Tests\**\*.cs" />

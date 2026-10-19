@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    OcidCabinet: first-party decompressors for cabinet payloads.
+
+    Why it lives outside MobilePackageGen/: that subtree is the third-party fork
+    (WPMT / UUPMediaCreator lineage) and carries its own licences. The DEFLATE
+    (MSZIP) and LZX decoders here are our own code, so they belong next to
+    Source/Native/OcidServicing as part of the self-contained tooling rather than
+    inside the vendored tree. MobilePackageGen/Cabinet still owns the CAB container
+    reader and simply references this project; desktop code can use the same
+    decoders instead of shelling out to expand.exe.
+
+    Verified against expand.exe (the Windows cabinet API) on:
+      * makecab-made MSZIP and LZX (windows 15/17/20/21) fixtures,
+      * the 8400 repair-content MSZIP cabs,
+      * LZX cabs under C:\Windows\servicing (355+10+1 files),
+      * the 96 MB MSZIP BucketConfidenceData.cab.
+    Every payload byte matched.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <Platforms>x86;x64;ARM64;ARM32</Platforms>
+  </PropertyGroup>
+
+</Project>
