@@ -21,6 +21,16 @@ bool LoadManifestDictionary(const std::wstring& wcpPath,
                             std::vector<std::uint8_t>& dictionary,
                             std::string& error);
 
+// 从独立文件读字典（.bin）。镜像装配只需要这份文件，不必再带 wcp.dll。
+bool LoadManifestDictionaryFile(const std::wstring& path,
+                                std::vector<std::uint8_t>& dictionary,
+                                std::string& error);
+
+// 把 wcp.dll 里的字典导出成独立文件，供上面那条路使用。
+bool DumpManifestDictionary(const std::wstring& wcpPath,
+                            const std::wstring& outPath,
+                            std::string& error);
+
 // 用字典解开一份 DCM 清单，输出原始清单字节（UTF-8 XML）。
 bool DcmDecodeManifest(const std::vector<std::uint8_t>& compressed,
                        const std::vector<std::uint8_t>& dictionary,

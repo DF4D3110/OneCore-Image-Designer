@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <cstdio>
 #include <cstring>
 
 #include <msdelta.h>
@@ -13,6 +14,32 @@ namespace {
 
 constexpr std::uint16_t kDictionaryResourceType = 614;  // 0x266
 constexpr std::uint16_t kDictionaryResourceId = 1;
+
+bool ReadWholeFile(const std::wstring& path, std::vector<std::uint8_t>& bytes, std::string& error) {
+  bytes.clear();
+  FILE* f = ::_wfopen(path.c_str(), L"rb");
+  if (f == nullptr) {
+    error = "cannot open dictionary file";
+    return false;
+  }
+  std::fseek(f, 0, SEEK_END);
+  const long size = std::ftell(f);
+  std::fseek(f, 0, SEEK_SET);
+  if (size <= 0) {
+    std::fclose(f);
+    error = "dictionary file is empty";
+    return false;
+  }
+  bytes.resize(static_cast<std::size_t>(size));
+  const std::size_t read = std::fread(bytes.data(), 1, bytes.size(), f);
+  std::fclose(f);
+  if (read != bytes.size()) {
+    bytes.clear();
+    error = "cannot read dictionary file";
+    return false;
+  }
+  return true;
+}
 
 }  // namespace
 
@@ -56,11 +83,45 @@ bool LoadManifestDictionary(const std::wstring& wcpPath,
   return true;
 }
 
+bool LoadManifestDictionaryFile(const std::wstring& path,
+                                std::vector<std::uint8_t>& dictionary,
+                                std::string& error) {
+  if (!ReadWholeFile(path, dictionary, error)) {
+    return false;
+  }
+  if (dictionary.size() < 16) {
+    dictionary.clear();
+    error = "dictionary file is too small";
+    return false;
+  }
+  return true;
+}
+
+bool DumpManifestDictionary(const std::wstring& wcpPath,
+                            const std::wstring& outPath,
+                            std::string& error) {
+  std::vector<std::uint8_t> dictionary;
+  if (!LoadManifestDictionary(wcpPath, dictionary, error)) {
+    return false;
+  }
+  FILE* out = ::_wfopen(outPath.c_str(), L"wb");
+  if (out == nullptr) {
+    error = "cannot open output file";
+    return false;
+  }
+  const std::size_t written = std::fwrite(dictionary.data(), 1, dictionary.size(), out);
+  std::fclose(out);
+  if (written != dictionary.size()) {
+    error = "cannot write output file";
+    return false;
+  }
+  return true;
+}
+
 bool DcmDecodeManifest(const std::vector<std::uint8_t>& compressed,
                        const std::vector<std::uint8_t>& dictionary,
                        std::vector<std::uint8_t>& output,
-                       std::string& error) {
-  output.clear();
+                       std::string& error) {  output.clear();
   if (!DcmIsCompressed(compressed)) {
     error = "not a DCM manifest";
     return false;

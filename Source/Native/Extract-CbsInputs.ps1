@@ -43,7 +43,11 @@ param(
     [string] $MountName = 'OCIDIN',
     [string] $DefaultBucket,
     [string] $ImageRoot,
-    [string] $Exe
+    [string] $Exe,
+    # 16299+：给一份 servicing stack 的 wcp.dll，就把里面的清单字典导出成
+    # `<OutDir>\manifest-dictionary.bin`。之后的装配用 `-DcmDictionary <bin>`，
+    # 镜像里不必再保留 wcp.dll，也不再在装配期读微软二进制里的资源。
+    [string] $WcpDll
 )
 
 $ErrorActionPreference = 'Stop'
@@ -109,6 +113,17 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $truth = Join-Path $OutDir 'truth.txt'
 & $exePath cbs-dump $Hive $truth | Out-Null
 if (-not (Test-Path $truth)) { throw "cbs-dump failed: $Hive" }
+
+# 16299+ 的清单字典：从 wcp.dll 里导出成独立 .bin，装配期只认这份文件。
+if ($WcpDll) {
+    if (-not (Test-Path $WcpDll)) { throw "wcp.dll not found: $WcpDll" }
+    $dictPath = Join-Path $OutDir 'manifest-dictionary.bin'
+    & $exePath dcm-dump-dictionary $WcpDll $dictPath | Out-Null
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $dictPath)) {
+        throw "dcm-dump-dictionary failed: $WcpDll"
+    }
+    Write-Host ("[inputs] dcm dictionary {0} ({1} bytes)" -f $dictPath, (Get-Item $dictPath).Length)
+}
 
 $markers = New-Object 'System.Collections.Generic.Dictionary[string,object]'
 $claims = New-Object 'System.Collections.Generic.List[string]'

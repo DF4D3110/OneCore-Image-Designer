@@ -489,6 +489,14 @@ DCM 解码（`src/Dcm.cpp`）：字典 = `wcp.dll` 资源 type 614（0x266）id 
 在 `<ImageRoot>\\Windows\\WinSxS\\*_servicingstack_*\\wcp.dll` 里找）。老镜像的 `wcp.dll` 没有该资源，
 加载失败只提示、不清空管道（8061 清单本来也没压缩）。实测全量 22,167 份清单解压 72 秒、`bad=0`。
 
+**字典也可以脱离 `wcp.dll`**：`ocid_manifest dcm-dump-dictionary <wcp.dll> <manifest-dictionary.bin>`
+把资源导出成 9,066 字节的独立文件，之后 `--dcm-dictionary` 直接给这份 `.bin`（开关先按 DLL 读，
+失败再按裸文件读）。`Extract-CbsInputs.ps1 -WcpDll <wcp.dll>` 会在输入目录里生成这份
+`manifest-dictionary.bin`。16299 的 x86 与 amd64 servicing stack 导出的字典逐字节相同
+（SHA-256 `0AD8F100…`），用它跑全量 22,167 份清单与用 `wcp.dll` 得到的计划文本 **逐字节一致**
+（22,299,528 字节、`bad=0`）。这样装配期不再需要 `LoadLibraryEx` 去读微软二进制里的资源。
+
+
 本轮两条大规则修好后，pass 1 的差额从 61,942/66,936 值降到 **779/420 值**（键 73,559/73,537），
 自动覆盖表从 67,001 行降到 **865 行**，pass 2 之后 0/0。
 

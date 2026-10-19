@@ -3320,6 +3320,33 @@ static int CmdCbsDcmDecode(const std::wstring& inPath, const std::wstring& outPa
 #endif
 }
 
+// dcm-dump-dictionary <wcp.dll> <out.bin>：把清单字典从 wcp.dll 里导出成独立文件。
+// 之后的装配与解压只需要这份 .bin：镜像里不必再保留 wcp.dll，也不再用
+// LoadLibraryEx 去找资源（那是唯一还在"读微软二进制"的地方）。
+static int CmdDcmDumpDictionary(const std::wstring& wcpPath, const std::wstring& outPath)
+{
+#ifdef _WIN32
+    std::string error;
+    if (!DumpManifestDictionary(wcpPath, outPath, error)) {
+        Err("导出字典失败：" + error);
+        return 1;
+    }
+    std::uintmax_t size = 0;
+    if (FILE* f = _wfopen(outPath.c_str(), L"rb")) {
+        _fseeki64(f, 0, SEEK_END);
+        const __int64 end = _ftelli64(f);
+        if (end > 0) size = static_cast<std::uintmax_t>(end);
+        fclose(f);
+    }
+    OutLn("dictionary=" + ToUtf8(outPath) + " bytes=" + std::to_string(size));
+    return 0;
+#else
+    (void)wcpPath; (void)outPath;
+    Err("仅支持 Windows");
+    return 2;
+#endif
+}
+
 // csi-place：执行 `place-ops` 的 JSONL（载荷 → 正本复制 → 落点硬链接 → SDDL）。
 //
 // 为什么单独一层：`place-ops` 只算计划（也可 `--list` 只出计划），真正动磁盘是
@@ -3558,6 +3585,12 @@ static const CommandDoc kCommandDocs[] = {
      "ocid_manifest cbs-dcm-decode <inDcm> <outXml> --dcm-dictionary <wcp.dll>",
      "字典来自镜像 servicing stack 的 wcp.dll（资源 type 614 id 1）。\n"
      "例：ocid_manifest cbs-dcm-decode a.manifest a.xml --dcm-dictionary W:\\Windows\\WinSxS\\x86_microsoft-windows-servicingstack_*\\wcp.dll"},
+    {"dcm-dump-dictionary", "CBS 台账（生成与写入）",
+     "把 wcp.dll 里的 DCM 字典导出成独立文件（.bin）。",
+     "ocid_manifest dcm-dump-dictionary <wcp.dll> <out.bin>",
+     "导出后 `--dcm-dictionary` 直接给这份 .bin：装配时不必再带 wcp.dll，\n"
+     "也不再 LoadLibraryEx 去读微软二进制里的资源。\n"
+     "例：ocid_manifest dcm-dump-dictionary W:\\...\\wcp.dll manifest-dictionary.bin"},
 
     // ── ManifestCache（PCM/微 DOM）────────────────────────────────────────
     {"cbs-pcm-tables", "ManifestCache（PCM/CDF）",
@@ -6007,9 +6040,17 @@ int main(int argc, char** argv)
                 std::string loadError;
 #ifdef _WIN32
                 if (!LoadManifestDictionary(wcpPath, g_manifestDictionary, loadError)) {
+                    // 也可以给一份独立导出的字典文件（dcm-dump-dictionary 的产物）：
+                    // 镜像装配只要这份 .bin，不必再带 wcp.dll。
+                    std::string fileError;
+                    if (LoadManifestDictionaryFile(wcpPath, g_manifestDictionary, fileError)) {
+                        ++i;
+                        continue;
+                    }
                     // 老镜像（8061 等）的 wcp.dll 里没有这份资源，清单本来也没压缩：
                     // 只要不是真的要解 DCM，就当没给过这个开关。
-                    Err("提示：未能加载 DCM 字典（" + loadError + "），按未压缩清单处理");
+                    Err("提示：未能加载 DCM 字典（" + loadError + "；" + fileError +
+                        "），按未压缩清单处理");
                 }
 #else
                 (void)wcpPath;
@@ -6337,6 +6378,8 @@ int main(int argc, char** argv)
 
     if (cmd == L"cbs-dcm-decode" && argc >= 4)
         return CmdCbsDcmDecode(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]));
+    if (cmd == L"dcm-dump-dictionary" && argc >= 4)
+        return CmdDcmDumpDictionary(FromUtf8OrAnsi(argv[2]), FromUtf8OrAnsi(argv[3]));
     if (cmd == L"cbs-diff" && argc >= 4) {
         int mx = 0;
         for (int i = 4; i < argc; ++i) {
