@@ -437,6 +437,17 @@ std::string GetString(const MdDom& dom, std::uint32_t id) {
     return dom.strings[id];
 }
 
+// 临时诊断（OCID_PCM_DEBUG_DOM=1）：按 uidx 打印整棵微 DOM。
+void DbgDumpDom(const MdDom& dom) {
+    if (std::getenv("OCID_PCM_DEBUG_DOM") == nullptr) return;
+    for (std::size_t i = 0; i < dom.nodes.size(); ++i) {
+        const MdNode& n = dom.nodes[i];
+        std::fprintf(stderr, "DOM %zu t=%u local=<%s> value=<%s> kids=%zu\n", i, n.type,
+                     GetString(dom, n.local).c_str(), GetString(dom, n.value).c_str(),
+                     n.children.size());
+    }
+}
+
 // 元素视图：只保留生成 PCM 需要的字段（父/子都用 elems 下标）。
 struct Elem {
     std::uint32_t node = 0;
@@ -808,10 +819,15 @@ std::string BuildFileRecord(Interner& inter, const Elem& e, int sddBlob, std::ui
 // 字符串值槽（3/5/50 → 5 = 4+1、8 = 6+2、50 = 48+2）。
 std::string BuildDocRecord(std::size_t nDep, std::uint32_t depBlobSlot, bool hasMvid,
                            bool hasDeployment, bool hasNoInheritable, bool hasGac,
-                           bool wild, bool hasHashFile, bool hasSourcePath) {
+                           std::int32_t resDepIdx, bool wild, bool hasHashFile,
+                           bool hasSourcePath, bool legacyIdent) {
     std::uint32_t flags = 1;
     if (hasDeployment) flags |= 8;
     if ((hasNoInheritable && !hasSourcePath) || (hasGac && hasHashFile)) flags |= 16;
+    // 0x10 还会被"没有 language 属性的旧式 Win32 身份"置位：gdiplus 1.0/1.1、
+    // isolationautomation.proxystub、systemcompatible、isolationautomation 这五份
+    // 全语料里唯一没有 language 的清单，真机 flags 都是 0x11。
+    if (legacyIdent) flags |= 16;
     const std::uint32_t d11 = hasDeployment ? depBlobSlot : kNoId;
     return PackU32({
         1u,
@@ -825,7 +841,10 @@ std::string BuildDocRecord(std::size_t nDep, std::uint32_t depBlobSlot, bool has
         kNoId,
         d11,                    // [11]
         kNoId, kNoId,
-        wild ? 0u : kNoId,      // [14] 资源通配符
+        // [14]：有 resourceType 依赖时是它的**序号**，否则是通配符标志（0/-1）。
+        // 03050/03058/03065（2 依赖、资源在第 1 个 → 1）、03063（9 依赖 → 2）、
+        // 03074（6 依赖 → 5）这五份 WMI 清单证明它不是布尔位。
+        resDepIdx >= 0 ? static_cast<std::uint32_t>(resDepIdx) : (wild ? 0u : kNoId),
         kNoId, kNoId,
     });
 }
@@ -1207,6 +1226,9 @@ const char* const kCacheGuidLodctr = "eeed2ed84e859a4fb458ae1bc62a0e6b";
 const char* const kCacheGuidBfsvc = "d7e9f0c544e8074589e4701b5a747221";
 const char* const kCacheGuidRescache = "7ad7ecc41185184b89bfc6ebecad4e01";
 const char* const kCacheGuidInstrumentation = "2bfdb93b1e359c4bb1fced0758805998";
+// <instrumentation><counters> 用的是另一个 GUID（00777/00853/02759 三份 counters
+// 清单的头部 GUID 表里是这串；<events> 用上面那个）。
+const char* const kCacheGuidCounters = "218a49b105045949adaa7e78686acfbe";
 const char* const kCacheGuidSppInstaller = "d25f261b1c72594ead559d102a5d1d7f";
 const char* const kCacheGuidNgen = "276748d4364da545bc81b8935aed1429";
 const char* const kCacheGuidRootDevices = "50d1073d3d2f84419793d0fd59b0c885";
@@ -1258,6 +1280,7 @@ std::string CacheGuid(const std::string& local) {
     if (local == "bfsvc") return kCacheGuidBfsvc;
     if (local == "rescache") return kCacheGuidRescache;
     if (local == "instrumentation" || local == "events") return kCacheGuidInstrumentation;
+    if (local == "counters") return kCacheGuidCounters;
     if (local == "sppInstaller") return kCacheGuidSppInstaller;
     if (local == "ngen") return kCacheGuidNgen;
     if (local == "rootDevices") return kCacheGuidRootDevices;
@@ -1285,7 +1308,7 @@ std::string GuidBytes(const std::string& hex) {
 // 该顺序来自二进制里的静态表，清单 XML 里没有对应信息；未观测到的对
 // （firewallRule/ngen 与其他 kind 的组合）按已知约束的线性扩展放在末尾。
 const char* const kCacheGuidOrder[] = {
-    "bfsvc", "instrumentation", "lodctr", "lodctrDat", "securityDescriptor",
+    "bfsvc", "instrumentation", "counters", "lodctr", "lodctrDat", "securityDescriptor",
     "serviceData", "rootDevices", "sppInstaller", "mof", "rescache",
     "taskScheduler", "timezoneresourceAI", "firewallRule", "ngen",
 };
@@ -1322,6 +1345,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     MdDom dom;
     MdPatchInfo patch;
     if (!DecodeMicrodom(mdhd, dom, patch, error)) return false;
+    DbgDumpDom(dom);
     if (patch.firstElementHasMin && b0Extra != 0) {
         // 真机写入器第一个元素记录的 b0 bit4..6 是未初始化栈字节；只在
         // min(属性数, 内容子数) != 0 时写（和 md_build 的 b0_extra 一致）。
@@ -1352,6 +1376,14 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     std::string mvidVal;
     std::int32_t gacEl = -1;
     std::uint32_t depUidx = 0;
+
+    if (std::getenv("OCID_PCM_DEBUG_UIDX") != nullptr) {
+        for (std::size_t i = 0; i < elems.size(); ++i) {
+            const Elem& e = elems[i];
+            std::fprintf(stderr, "UIDX %u %s parent=%s\n", e.uidx, e.local.c_str(),
+                         e.parent < elems.size() ? elems[e.parent].local.c_str() : "-");
+        }
+    }
 
     for (std::size_t i = 0; i < elems.size(); ++i) {
         const Elem& e = elems[i];
@@ -1899,6 +1931,13 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     const std::size_t mdhdSlot = slots.size();
     AppendSlot(slots, 1, std::string(mdhd.begin(), mdhd.end()));
 
+    if (std::getenv("OCID_PCM_DEBUG_POOL") != nullptr) {
+        const std::vector<std::string>& pool = inter.order();
+        for (std::size_t i = 0; i < pool.size(); ++i) {
+            std::fprintf(stderr, "POOL %u %s\n", static_cast<unsigned>(i), pool[i].c_str());
+        }
+    }
+
     // ---- 6. cache 记录（静态 kinds 表顺序，不是文档序）-------------------
     std::vector<std::uint32_t> cacheSlots;
     std::vector<std::string> recGuids;   // 与 cacheSlots 平行：该记录对应的 GUID（migration 为空）
@@ -1946,15 +1985,28 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             AppendSlot(slots, 1, record);
             recGuids.push_back(GuidBytes(kCacheGuidMof));
         } else if (ln == "instrumentation") {
-            std::int32_t ev = -1;
+            // 记录里写的是 `<instrumentation>` 每个 registers 子节点的 uidx，
+            // 一个子节点一条记录：<events> 用 instrumentation GUID、<counters>
+            // 用 counters GUID（00777/00853/02759 只有 counters；02758 同时有
+            // events 与 counters，真机发两条 —— 写父元素自己的 uidx 会小 2，
+            // 因为中间隔着一个空白 PcData 节点）。
+            std::vector<std::uint32_t> kids;
             for (std::uint32_t k : e.kids) {
-                if (elems[k].local == "events") { ev = static_cast<std::int32_t>(k); break; }
+                const std::string& kl = elems[k].local;
+                if (kl == "events" || kl == "counters" || kl == "settings") kids.push_back(k);
             }
-            const std::uint32_t uidx =
-                ev >= 0 ? elems[static_cast<std::size_t>(ev)].uidx : e.uidx;
-            cacheSlots.push_back(static_cast<std::uint32_t>(slots.size()));
-            AppendSlot(slots, 1, PackU32({uidx}));
-            recGuids.push_back(GuidBytes(kCacheGuidInstrumentation));
+            if (kids.empty()) {
+                cacheSlots.push_back(static_cast<std::uint32_t>(slots.size()));
+                AppendSlot(slots, 1, PackU32({e.uidx}));
+                recGuids.push_back(GuidBytes(kCacheGuidInstrumentation));
+            }
+            for (std::uint32_t k : kids) {
+                cacheSlots.push_back(static_cast<std::uint32_t>(slots.size()));
+                AppendSlot(slots, 1, PackU32({elems[k].uidx}));
+                recGuids.push_back(GuidBytes(elems[k].local == "counters"
+                                                 ? kCacheGuidCounters
+                                                 : kCacheGuidInstrumentation));
+            }
         } else if (ln == "events") {
             cacheSlots.push_back(static_cast<std::uint32_t>(slots.size()));
             AppendSlot(slots, 1, PackU32({e.uidx}));
@@ -2039,11 +2091,18 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             if (!Attr(at, "hash").empty()) hasHashFile = true;
             if (!Attr(at, "sourcePath").empty()) hasSourcePath = true;
         }
+        std::int32_t resDepIdx = -1;
+        for (std::size_t d = 0; d < deps.size(); ++d) {
+            if (!Attr(AttrsOf(elems[deps[d]]), "resourceType").empty()) {
+                resDepIdx = static_cast<std::int32_t>(d);
+            }
+        }
         AppendSlot(slots, 1,
                    BuildDocRecord(nDepTotal,
                                   static_cast<std::uint32_t>(depBlobSlot), hasMvid,
-                                  hasDeployment, hasNoInh, hasGac, wild, hasHashFile,
-                                  hasSourcePath));
+                                  hasDeployment, hasNoInh, hasGac, resDepIdx, wild,
+                                  hasHashFile, hasSourcePath,
+                                  Attr(asmAttrs, "language").empty()));
     }
 
     // ---- 8. GeneratePCM 表槽（PCM_KEYS 固定调用序）-----------------------
