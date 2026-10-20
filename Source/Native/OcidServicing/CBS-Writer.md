@@ -622,6 +622,31 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
      `E:\ocid_verify\re\t10_search_all.py`（穷举属性掩码/排序算子求唯一规则）；单样本对拍用
      `E:\ocid_verify\re\t10_check5.py`、`t10_one.py`。语料里仍无 count ≥7 的表，f0 列不可观测。
 
+     **9600 收尾（`ff2af92` 之后的 41 份真实残差里修掉 38 份）**：全量
+     **T1 2,756（99.0%）/ T2 2,749 / T3 2,571 / T4 2,571（92.3%）**（`ff2af92` 时 2,534），
+     8419 route9 仍 **2,750/2,757**（零回归）。逐族结论：
+     - `<signatureInfo><signatureDescriptor DRMLevel="1300">`：8 B 签名 blob 是
+       `{flags, DRMLevel}`，`flags` bit0 = 有 DRMLevel；去重键 `(flags<<16)|(level&0xFFFF)`（`0dc977b`）。
+     - `f0` 撞车定序：取 `f1` **降序**（`OCID_SORT_MODE` 默认 1）；升序 2,544、`std::sort` 只比
+       `f0` 2,545、降序 2,546 ⇒ 降序最优，但真机不是简单排序（01344 同表内 3 组升 1 组降），仍开放。
+     - `<instrumentation>` 每个子节点（`events`/`counters`/`settings`）各发一条
+       `{uidx}` 记录；`<counters>` 的 cache GUID 是 `218a49b1-0504-5949-adaa-7e78686acfbe`（`03672e4`）。
+     - `<directory>` 无 sdd 时 ref 是 `-1`；文档记录 `[14]` 是有 `resourceType` 依赖时的**序号**，
+       否则 `-1`；`REG_NONE` 的值类型是 0；依赖的 `wild` 是**清单级**（任一依赖 `language="*"`），
+       无 `language` 属性按 neutral 且带 `0x10`，`optional="yes"` 再加 `0x01`（`67c62ab`）。
+     - `<fveUpdateAI fveCommand>`：bfsvc 8 B 之后一条 4 B 记录（interned 值 id）、cache 记录
+       GUID `bacf4a08-714f-4d8a-a69a-fe4e9c8ce62d`（rank 45）、自己的 (uidx,槽) `type 9` 表，
+       **注册键 35**（bfsvc 是 33），必须在固定键序里发射（`292112b`）。
+     - 根 `<registryKeys>`：只把**带 `perUserVirtualization` 属性**的直接子 `<registryKey>` 的 uidx
+       拼成记录（00149 的 16 个 key 里唯一没有该属性的 `HKEY_CURRENT_USER\…` 被排除 → 15 项；
+       02857 两项 → 8 B `{0x12,0x1f}`；驱动清单的 key 没有该属性 ⇒ 真机不发这条记录）。
+       它是 cache 记录，GUID `a39bfc2e-d678-8c45-ac19-0b5b6bdae296`（rank 46）（`3f150c4`）。
+     - 仍开放（41 份）：`installerRegistrations` 9 份（真机把 `<file>` 的 sdd 8 B 换成
+       28 B 常量 `{0,-1,-1,-1,2,-1,0}` + 8 B `{1,-1}`，且 16 B `[2]`、`type 9` 值、96 B `[8]`
+       连带变化）、`t2` 串池顺序 6 份（非 ASCII 字体族名与 registry 文本的 intern 次序）、
+       `f0` 撞车 4 份、`migXml` 3 份（−29/−31/−33 槽）、其余 −3/−4/−5/−6 槽 13 份
+       （`00028` 是 `<file>` 前多一条 12 B `{id1,0x80000044,id2}` 记录）。
+
      **8419 语料里的 install 记录极端样本**（`x86_…pnpplugininstaller_1122334455667788_6.2.8419.0_neutral_~_…`，
      对应 `03040.pcm`，是 8419 语料 2,534 个配对里唯一带 `<installerRegistrations>` 的清单）：
      真机 37 槽 / 我方 35 槽，且首 9 槽结构不同——真机 slot0 是 28 B
