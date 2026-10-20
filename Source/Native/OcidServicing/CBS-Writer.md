@@ -622,9 +622,9 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
      `E:\ocid_verify\re\t10_search_all.py`（穷举属性掩码/排序算子求唯一规则）；单样本对拍用
      `E:\ocid_verify\re\t10_check5.py`、`t10_one.py`。语料里仍无 count ≥7 的表，f0 列不可观测。
 
-     **9600 收尾（`ff2af92` 之后的 41 份真实残差里修掉 38 份）**：全量
-     **T1 2,756（99.0%）/ T2 2,749 / T3 2,571 / T4 2,571（92.3%）**（`ff2af92` 时 2,534），
-     8419 route9 仍 **2,750/2,757**（零回归）。逐族结论：
+     **9600 收尾（`ff2af92` 之后的 41 份真实残差里修掉 45 份）**：全量
+     **T1 2,763（99.2%）/ T2 2,756 / T3 2,578 / T4 2,578（92.6%）**（`ff2af92` 时 2,534），
+     8419 route9 **2,751/2,757**（`ff2af92` 时 2,750）。逐族结论：
      - `<signatureInfo><signatureDescriptor DRMLevel="1300">`：8 B 签名 blob 是
        `{flags, DRMLevel}`，`flags` bit0 = 有 DRMLevel；去重键 `(flags<<16)|(level&0xFFFF)`（`0dc977b`）。
      - `f0` 撞车定序：取 `f1` **降序**（`OCID_SORT_MODE` 默认 1）；升序 2,544、`std::sort` 只比
@@ -641,22 +641,24 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
        拼成记录（00149 的 16 个 key 里唯一没有该属性的 `HKEY_CURRENT_USER\…` 被排除 → 15 项；
        02857 两项 → 8 B `{0x12,0x1f}`；驱动清单的 key 没有该属性 ⇒ 真机不发这条记录）。
        它是 cache 记录，GUID `a39bfc2e-d678-8c45-ac19-0b5b6bdae296`（rank 46）（`3f150c4`）。
-     - 仍开放（41 份）：`installerRegistrations` 9 份（真机把 `<file>` 的 sdd 8 B 换成
-       28 B 常量 `{0,-1,-1,-1,2,-1,0}` + 8 B `{1,-1}`，且 16 B `[2]`、`type 9` 值、96 B `[8]`
-       连带变化）、`t2` 串池顺序 6 份（非 ASCII 字体族名与 registry 文本的 intern 次序）、
-       `f0` 撞车 4 份、`migXml` 3 份（−29/−31/−33 槽）、其余 −3/−4/−5/−6 槽 13 份
-       （`00028` 是 `<file>` 前多一条 12 B `{id1,0x80000044,id2}` 记录）。
+     - `<installerRegistrations><installerRegistration factoryClsid=…>`：每个 registration
+        （a）在**依赖组之后、文件组之前**发一条 28 B 常量记录 `{0,-1,-1,-1,2,-1,0}`；
+        （b）让 `<file>` 的**文件名先入串池**（于是 96 B `[4]=[18]=0`、sdd 8 B 记录是 `{1,-1}`、
+        sdddef 名字 id=1，与没有该元素时相反）；（c）把 `factoryClsid`（GUID 文本 → Data1/2/3
+        小端）作为 cache GUID 放进头部 GUID 表**最前**；（d）发一张 `type 8` 表 `{guidIdx, 槽}`
+        并以**注册键 3** 登记（`kKeys` 里紧跟 key 1 之后）。10 份里 7 份整文件一致
+        （`01493/02774/02229/02781/01109/01761/03074`）；`01078`（SMBServer）与 `01247`
+        （isolationautomation，`<comClass clsid>` 走同一张 key-3 表）仍开放（`6468de6`）。
+     - 仍开放（35 份）：`t2` 串池顺序 6 份（非 ASCII 字体族名与 registry 文本的 intern 次序）、
+        `f0` 撞车 4 份、`migXml` 3 份（−29/−31/−33 槽）、`<comClass>`/`<windowClass>` 记录族
+        （`01286/01287` 各差 29/31 槽，真机把每个 windowClass 名单独入池）、其余 −3/−4/−5/−6 槽
+        （`00028` 是 `<file>` 前多一条 12 B `{id1,0x80000044,id2}` 记录）。
 
      **8419 语料里的 install 记录极端样本**（`x86_…pnpplugininstaller_1122334455667788_6.2.8419.0_neutral_~_…`，
-     对应 `03040.pcm`，是 8419 语料 2,534 个配对里唯一带 `<installerRegistrations>` 的清单）：
-     真机 37 槽 / 我方 35 槽，且首 9 槽结构不同——真机 slot0 是 28 B
-     `00000000ffffffff ffffffff ffffffff 02000000 ffffffff 00000000`（我方 8 B 全 `0xffffffff` 的包装记录），
-     slot5 96 B 内部 `[2][3]` 顺序与取值也不同；`MdHd` 段内偏移真机 `0x81` vs 我方 `0xE1`
-     （**我方多 0x60 = 96 B**，正是多出来的一条记录）。⇒ install 历史在 CMI 微域里是独立记录族
-     （真机 `installerRegistration{ factoryClsid, supportedTargets }` + `installers/installer{xpath,passes}`），
-     需要 `<installerRegistration>` 的 CDF 记录布局才能落地；8419 语料只有这一份，无法从差分归纳。
-     同一镜像的 `01014/00777/01914/02643` 属于「真机有值、我方 0」的 `type 1` 单值族，
-     与 `03040` 不是同类问题。
+     对应 `03040.pcm`，是该语料 2,757 个配对里唯一带 `<installerRegistrations>` 的清单）：
+     它曾是 9600/8419 两批 install 族的样本来源——真机 37 槽 / 我方 35 槽，slot0 是 28 B
+     `{0,-1,-1,-1,2,-1,0}`、slot1 是 8 B `{1,-1}`，`MdHd` 段内偏移相差 0x60（多一条 96 B）。
+     现已由 `6468de6` 的规则整文件对齐（8419 route9 2,750 → 2,751 即这一份）。
 
      **9600 最大的单一残差族（51/282）**：`…b..iagnostic.resources_31bf3856ad364e35_6.3.9600.16384_<lang>_…`
      （49 份，槽数 53 vs 55）+ 2 份 `…re-memorydiagnostic…`（62/63 vs 68/69）。以 `de-de` 为例，
