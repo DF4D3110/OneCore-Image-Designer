@@ -841,10 +841,12 @@ std::string BuildDocRecord(std::size_t nDep, std::uint32_t depBlobSlot, bool has
         kNoId,
         d11,                    // [11]
         kNoId, kNoId,
-        // [14]：有 resourceType 依赖时是它的**序号**，否则是通配符标志（0/-1）。
+        // [14]：有 resourceType 依赖时是它的**序号**（从 0 起），否则 -1。
         // 03050/03058/03065（2 依赖、资源在第 1 个 → 1）、03063（9 依赖 → 2）、
-        // 03074（6 依赖 → 5）这五份 WMI 清单证明它不是布尔位。
-        resDepIdx >= 0 ? static_cast<std::uint32_t>(resDepIdx) : (wild ? 0u : kNoId),
+        // 03074（6 依赖 → 5）这五份 WMI 清单证明它不是布尔位；语料里 529 份
+        // [14]=0 是资源依赖正好排在第 0 个。03048 两个依赖都是 language="*"
+        // 但没有资源依赖，真机是 -1 —— 所以 wild 不参与 [14]。
+        resDepIdx >= 0 ? static_cast<std::uint32_t>(resDepIdx) : kNoId,
         kNoId, kNoId,
     });
 }
@@ -860,11 +862,14 @@ std::string BuildDepRecord(std::uint32_t ordinal, bool wild) {
 //   language="*"              → 0x90 (0x80 表示通配，同时带 0x10)
 //   其它（en-US/en-us/en-GB…）→ 0x00
 // （02701/02768/02714 的 discoverable="yes"+neutral = 0x10，02543 的 "*" = 0x90。）
-std::string BuildDepChild(std::uint32_t ordinal, const std::string& lang) {
+std::string BuildDepChild(std::uint32_t ordinal, const std::string& lang, bool optional) {
     const bool wild = lang == "*";
     std::uint32_t flags = 0;
-    if (wild || lang == "neutral") flags |= 0x10u;
+    // 缺语言属性的依赖按 neutral 处理（00260 的两条 Common-Controls 依赖）。
+    if (wild || lang == "neutral" || lang.empty()) flags |= 0x10u;
     if (wild) flags |= 0x80u;
+    // `<dependency optional="yes">` 额外置 bit0（00375，全语料唯一的 optional 依赖）。
+    if (optional) flags |= 0x01u;
     return PackU32({flags, kNoId, 2u * ordinal, wild ? 2u : 1u});
 }
 
@@ -980,6 +985,7 @@ struct RegNode {
 };
 
 std::uint32_t RegistryValueType(const std::string& name) {
+    if (name == "REG_NONE") return 0;
     if (name == "REG_SZ") return 1;
     if (name == "REG_EXPAND_SZ") return 2;
     if (name == "REG_MULTI_SZ") return 3;
@@ -1510,6 +1516,18 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     // 带 <dependency> 的样本都是 slot 0/1、2/3… 成对开头。早期把它们放在
     // 元素循环里"顺便"发，遇到带 <gac> 的样本就错位（02543）。
     const std::size_t nDepTotal = deps.size();
+    // 通配标志是**清单级**的：只要有一个依赖身份 language="*"，这份清单的
+    // 所有依赖记录都按通配发射（03074：5 条 neutral + 1 条 "*" 的
+    // MofInstaller.Resources，真机 6 条依赖记录全是 [6]=4 / 子记录 0x90）。
+    // 全语料 887 份带依赖的真块里，依赖记录的 [6] 从不在同一份里混用。
+    bool depsAnyWild = false;
+    for (std::uint32_t d : deps) {
+        const std::int32_t de = depIdentity(d);
+        if (de >= 0 && Attr(AttrsOf(elems[static_cast<std::size_t>(de)]), "language") == "*") {
+            depsAnyWild = true;
+            break;
+        }
+    }
     {
         std::uint32_t depOrd = 0;
         for (std::uint32_t d : deps) {
@@ -1517,9 +1535,12 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             const std::string lang =
                 de >= 0 ? Attr(AttrsOf(elems[static_cast<std::size_t>(de)]), "language")
                         : std::string();
-            const bool wild = lang == "*";
+            const bool wild = depsAnyWild;
+            const std::string& depOpt = Attr(AttrsOf(elems[static_cast<std::size_t>(d)]), "optional");
             AppendSlot(slots, 1, BuildDepRecord(depOrd, wild));
-            AppendSlot(slots, 1, BuildDepChild(depOrd, lang));
+            AppendSlot(slots, 1,
+                       BuildDepChild(depOrd, wild ? std::string("*") : lang,
+                                     depOpt == "yes" || depOpt == "true"));
             ++depOrd;
             hseq += 2;
         }
@@ -1848,9 +1869,11 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                 }
             }
             const std::size_t dslot = slots.size();
+            // 有 sdd 时 ref = 那一对 8B sdd 记录里 8B 记录的槽号（首次出现时正好
+            // 是前一个槽）；**没有 sdd 时是真机写 -1**，不是"前一个槽"
+            // （02643/01113/02992 三份全语料唯一的无 sdd 目录）。
             const std::uint32_t ref =
-                haveSdd ? static_cast<std::uint32_t>(dirSddSlot[nid2])
-                        : static_cast<std::uint32_t>(dslot - 1);
+                haveSdd ? static_cast<std::uint32_t>(dirSddSlot[nid2]) : kNoId;
             AppendSlot(slots, 1,
                        PackU32({(Attr(dat, "owner") == "true" || Attr(dat, "owner") == "yes" ||
                                  Attr(dat, "owner") == "1")
@@ -2523,6 +2546,12 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
         WriteU32(prefix, identOff + 4 * i, identIds[i]);
     }
 
+    if (std::getenv("OCID_PCM_DEBUG_POOL") != nullptr) {
+        const std::vector<std::string>& pool = inter.order();
+        for (std::size_t i = 0; i < pool.size(); ++i) {
+            std::fprintf(stderr, "POOL %u %s\n", static_cast<unsigned>(i), pool[i].c_str());
+        }
+    }
     std::vector<PcmTable> tables;
     tables.reserve(slots.size());
     for (const Slot& s : slots) {
