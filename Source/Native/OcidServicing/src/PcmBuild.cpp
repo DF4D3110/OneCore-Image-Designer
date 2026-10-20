@@ -1896,6 +1896,13 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
         } else {
             const std::size_t slot = slots.size();
             cacheSlots.push_back(static_cast<std::uint32_t>(slot));
+            // <bfsvc>：真机在发 cache 记录时把 Source 值做一次 string interning
+            // （9600 的 02895：Source="$(runtime.windows)\boot" 进 type-2 串表；
+            // Flags="17" 不入池）。缺这一条会让后续串 id 整体后移 1。
+            if (ln == "bfsvc") {
+                const std::string src = Attr(AttrsOf(e), "Source");
+                if (!src.empty()) inter.String(src);
+            }
             AppendSlot(slots, 1, PackU32({e.uidx}));
             if (ln != "migration") {
                 recGuids.push_back(GuidBytes(CacheGuid(ln)));
