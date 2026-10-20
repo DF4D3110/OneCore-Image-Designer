@@ -1233,6 +1233,9 @@ const char* const kCacheGuidBfsvc = "d7e9f0c544e8074589e4701b5a747221";
 // <fveUpdateAI>：01039/01281/00952/02417 四份真块的头部 GUID 表里紧挨在
 // bfsvc GUID 之前（bacf4a08-714f-4d8a-a69a-fe4e9c8ce62d）。
 const char* const kCacheGuidFveUpdateAI = "bacf4a084f718a4da69afe4e9c8ce62d";
+// <registryKeys>：记录内容是各子 <registryKey> 的 uidx 数组。
+// 02857 真块头部 GUID 表只有这一条（a39bfc2e-d678-8c45-ac19-0b5b6bdae296）。
+const char* const kCacheGuidRegistryKeys = "a39bfc2ed6788c45ac190b5b6bdae296";
 const char* const kCacheGuidRescache = "7ad7ecc41185184b89bfc6ebecad4e01";
 const char* const kCacheGuidInstrumentation = "2bfdb93b1e359c4bb1fced0758805998";
 // <instrumentation><counters> 用的是另一个 GUID（00777/00853/02759 三份 counters
@@ -1254,7 +1257,7 @@ const char* const kCacheGuidLodctrDat = "9bcb3d9a96a7df41b45577eba6a1ec1a";
 
 bool IsCacheRecordElement(const std::string& local) {
     return local == "lodctr" || local == "bfsvc" || local == "fveUpdateAI" ||
-           local == "rescache" ||
+           local == "registryKeys" || local == "rescache" ||
            local == "migration" || local == "sppInstaller" || local == "ngen" ||
            local == "rootDevices" || local == "timezoneresourceAI" ||
            local == "taskScheduler" || local == "serviceData" ||
@@ -1281,6 +1284,7 @@ int CacheRank(const std::string& local) {
     if (local == "timezoneresourceAI") return 34;
     if (local == "bfsvc") return 44;
     if (local == "fveUpdateAI") return 45;
+    if (local == "registryKeys") return 46;
     return 999;
 }
 
@@ -1290,6 +1294,7 @@ std::string CacheGuid(const std::string& local) {
     if (local == "lodctrDat") return kCacheGuidLodctrDat;
     if (local == "bfsvc") return kCacheGuidBfsvc;
     if (local == "fveUpdateAI") return kCacheGuidFveUpdateAI;
+    if (local == "registryKeys") return kCacheGuidRegistryKeys;
     if (local == "rescache") return kCacheGuidRescache;
     if (local == "instrumentation" || local == "events") return kCacheGuidInstrumentation;
     if (local == "counters") return kCacheGuidCounters;
@@ -1322,7 +1327,7 @@ std::string GuidBytes(const std::string& hex) {
 const char* const kCacheGuidOrder[] = {
     "fveUpdateAI", "bfsvc", "instrumentation", "counters", "lodctr", "lodctrDat", "securityDescriptor",
     "serviceData", "rootDevices", "sppInstaller", "mof", "rescache",
-    "taskScheduler", "timezoneresourceAI", "firewallRule", "ngen",
+    "taskScheduler", "timezoneresourceAI", "registryKeys", "firewallRule", "ngen",
 };
 
 int CacheGuidRank(const std::string& guid) {
@@ -2074,6 +2079,22 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             }
             AppendSlot(slots, 1, record);
             recGuids.push_back(GuidBytes(kCacheGuidFirewallRule));
+        } else if (ln == "registryKeys") {
+            // 记录内容是根 <registryKeys> 里**带 perUserVirtualization 属性**的
+            // 直接子 <registryKey> 的 uidx 数组。00149 有 16 个 key 却只出现 15 个
+            // ——缺的正是唯一没有该属性的 HKEY_CURRENT_USER\ 那条；02857 两个 key
+            // 都有该属性，于是 8B `{0x12,0x1f}`。02606/01412 等驱动清单的 key 没有
+            // 该属性，真机完全不发这条记录。
+            std::string record;
+            for (std::uint32_t k : e.kids) {
+                if (elems[k].local != "registryKey") continue;
+                if (Attr(AttrsOf(elems[k]), "perUserVirtualization").empty()) continue;
+                record += PackU32({elems[k].uidx});
+            }
+            if (record.empty()) continue;  // 没有需要登记的 key：真机不发这条记录
+            cacheSlots.push_back(static_cast<std::uint32_t>(slots.size()));
+            AppendSlot(slots, 1, record);
+            recGuids.push_back(GuidBytes(kCacheGuidRegistryKeys));
         } else {
             const std::size_t slot = slots.size();
             cacheSlots.push_back(static_cast<std::uint32_t>(slot));
