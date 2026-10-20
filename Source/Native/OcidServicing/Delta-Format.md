@@ -150,4 +150,74 @@ riftTable( SumRiftTables ): ...
 - `fileType != 1` 的载荷（PE 差分，需要 `ApplyPreProcessSource_<mnemonic>` 与
   `ApplyPostProcessTarget`，含 E8 变换）。
   （多格式 `CompositeFormat` 已于 2026-10-20 解出，见上一节。）
-- 非空 `RiftTable` 的 delta（目前见到的 DCM/container 载荷基表都为空）。
+- 非空 `RiftTable` 的 delta（DCM 载荷为空；PE 载荷非空，见下节）。
+
+## 7. PE 差分（`fileType != 1`）的流水线与组件清单
+
+`fileType` 是 PE 架构号（实测 container 里 `wuaueng.dll` 的载荷 `fileType = 8`，即 AMD64；
+`0xF` 是 `FileTypeSet` 的通配位集合，`Flags` 的 bit0 决定后处理是否走 `PostProcessI386E8`）。
+
+`msdelta.dll` 的 flow 文本（`.rdata` 0x60000–0x73000，导出见 `E:\ocid_verify\re\flow_specs_raw.txt`）
+给出 `ApplyPreProcessSourcePe` 的完整顺序：
+
+```
+sourcePe          = PortableExecutableFromBuffer(source, 1)
+sourceOffsetToRva = ExtractImageOffsetToRva(sourcePe)
+sourceCliMetadata = ExtractCliMetadata(sourcePe)
+sourceImageBase   = GetImageBase(sourcePe)
+targetInfo        = BitReadPortableExecutableInfo(bitReader)
+targetInfoSplit   = SplitPortableExecutableInfo(targetInfo)
+                    → imageBase, globalPointer, timeStamp, rvaToOffset(RiftTable), cliMetadata
+usedRiftTable     = BitReadRiftTable(...)   # 目标与源的差异映射
+cliMap            = BitReadCliMap(...)
+hintBuffer        = CreateHintBuffer(sourcePe)
+transformed       = RiftTransform_<mnemonic>(flags, sourcePe, hintBuffer, usedRiftTable, "", cliMap,
+                                             targetInfo, 1, emptyRelativeRiftTable)
+transformed       = SetImageBase / SetGlobalPointer / SetTimeStamp / SetCheckSum(0)
+transformed       = PortableExecutableToBuffer(transformed)
+compressionRift   = Multiply(sourceOffsetToRva, usedRiftTable) × targetRvaToOffset
+```
+
+要点：
+
+- 载荷解压（pseudo-LZX）里的 `marker == 0x54000` 一类“从源拷贝”是**按 `compressionRift`
+  映射到源文件偏移**的，因此 PE 载荷必须先把基表算出来才能解压；这与 RAW 载荷（空表、直接按
+  统一缓冲坐标取源）不同。
+- `BitReadPortableExecutableInfo` 的位编码已实测确认（`PortableExecutableInfo::InternalFromBitReader`
+  0x180007BA0）：`BitReaderOpen` 起手 **skip 3 位**，随后 `imageBase`（两个 u32，低在前）、
+  `globalPointer`（u32）、`timeStamp`（u32），之后是 `rvaToOffset` 的 `RiftTable` 与 `CliMetadata`。
+  用 container 里 `wuaueng.dll`（7.6.7600.256 amd64）的载荷验证：解出 `imageBase = 0x60000080000`、
+  `timeStamp = 0x4FCA9088`，与 `expand.exe` 产出的目标 PE 头完全一致。
+- `RiftTransform_<mnemonic>` 是一整套结构变换（Headers / Exports / Imports / Pdata / Relocations /
+  Resources / CliMetadata / RelativeCalls / RelativeJmps / Disasm），x86/amd64/arm/arm64 各有方言。
+  `msdelta.dll` 里对应的工厂与 RVA（文件基址 0x180000000）：
+
+| 组件 | 入口 |
+| --- | --- |
+| `PortableExecutableFromBufferComponent::InternalProcess` | 0x180016CA0 |
+| `PortableExecutableToBufferComponent::InternalProcess` | 0x180028500 |
+| `UnbindPortableExecutableComponent::InternalProcess` | 0x180016920 |
+| `PortableExecutableInfo::InternalFromBitReader` | 0x180007BA0 |
+| `SplitPortableExecutableInfoComponent::InternalProcess` | 0x1800276D0 |
+| `RiftTransformHeadersComponent::Transform` | 0x18004F460 |
+| `RiftTransformExportsComponent::Transform` | 0x180025C80 |
+| `RiftTransformImportsComponent::TransformImports32/64` | 0x180015658 / 0x180015900 |
+| `RiftTransformPdataAmd64Component::Transform` | 0x180016150 |
+| `RiftTransformRelocationsComponent::Transform` | 0x1800209C0 |
+| `RiftTransformRelocationsI386Component::Transform` | 0x180029DD0 |
+| `RiftTransformResourcesComponent::Transform` | 0x180018B30 |
+| `RiftTransformCliMetadataComponent::Transform` | 0x18001CAF0 |
+| `RiftTransformCli4MetadataComponent::Transform` | 0x180018FC0 |
+| `RiftTransformRelativeCallsI386Component::Transform` | 0x1800204C0 |
+| `RiftTransformRelativeJmpsI386Component::Transform` | 0x180018480 |
+| `RiftTransformDisasmAmd64Component::Transform` | 0x180007C30 |
+| `RiftTransformDisasmIa64Component::Transform` | 0x18004A7C0 |
+| `RiftTransformDisasmARMComponent::Transform` | 0x180043670 |
+| `RiftTransformDisasmARM64Component::Transform` | 0x180047870 |
+| `RiftTableFromHeaders/Exports/Imports/Pdatas/ResourcesComponent::FromPes` | 0x18004D0E0 / 0x180046180 / 0x180048F60 / 0x180047F30 / 0x1800438C0 |
+| `CliMapFromPesComponent::InternalProcess` | 0x1800443B0 |
+| `Cli4MapFromPesComponent::InternalProcess` | 0x18004D890 |
+
+结论：PE 支持不是一个小补丁，而是“PE 解析/重建 + 每架构结构变换 + 反汇编级归一化”的一整套；
+`RiftTransformDisasm*` 还要内置 x86/amd64/ARM/ARM64 反汇编器，识别并重写 PC 相对引用。
+目前自研解码器对 `fileType != 1` 的载荷会在解压前明确拒绝并回退 `msdelta.dll`。
