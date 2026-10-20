@@ -65,7 +65,7 @@ namespace OcidCabinet
         [DllImport("msdelta.dll", ExactSpelling = true)]
         private static extern void DeltaFree(IntPtr buffer);
 
-        // Transitional path: PE payloads and the multi-format deltas still need msdelta.dll.
+        // Transitional path: PE payloads (fileType != 1) still need msdelta.dll.
         private static byte[]? ApplyWithMsDelta(byte[] basis, byte[] delta)
         {
             var source = new DeltaInput();

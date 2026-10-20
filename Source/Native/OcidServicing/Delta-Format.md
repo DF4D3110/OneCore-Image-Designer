@@ -130,10 +130,18 @@ riftTable( SumRiftTables ): ...
 - 托管：`Source/Managed/OcidCabinet/Delta/`（`BitReader`、`Huffman`、`IntFormat`、
   `CompressionFormat`、`Pa30Decoder`），`Pa30Delta.TryApply` 对外仍是同一签名。
 
+多格式（`CompositeFormat`）语义（2026-10-20 补齐）：`GetCompressionFormatRead`（0x18002392C）
+对 `bounds[]` 做二分，取**最后一个 `bound <= pos`** 的格式（每个 bound 是后一格式的起点），
+最后一个格式一直用到缓冲末尾；`pos` 是**统一缓冲坐标**（源在前、目标跟在后面，从 `sourceSize`
+起算），不是目标的相对偏移。`nextSwitch = bounds[idx+1] - 1`，只有 `pos > nextSwitch` 才重新查询。
+按此实现后 68 份多格式清单全部逐字节通过（代表样例
+`amd64_microsoft-appmodel-exec-events_…_44d317ae5a4a25e6.manifest`：3 格式、bounds `[9066, 116870, 396828]`、
+目标 591,274 字节，与 oracle 完全相同）。
+
 验收数字：
 
 - 16299 全量清单：`cbs-plan-components` 22,167 份、`bad=0`、计划文件 22,299,528 字节，SHA-256
-  `293E2824BC219D96…`，与 `msdelta` 结果逐字节相同；其中 22,099 份由自研解码器直接解出。
+  `293E2824BC219D96…`，与 `msdelta` 结果逐字节相同；22,167 份全部由自研解码器直接解出（多格式语义补齐后不再回退）。
 - 12 份 oracle 样例 + 200 份随机 DCM 清单：自研解码结果与 `ApplyDeltaB` 逐字节一致。
 - container CAB（WU selfupdate 包）：`ocid_cab verify` 696 个文件、10,186,062 字节，SHA-1 与清单全一致。
 
@@ -141,6 +149,5 @@ riftTable( SumRiftTables ): ...
 
 - `fileType != 1` 的载荷（PE 差分，需要 `ApplyPreProcessSource_<mnemonic>` 与
   `ApplyPostProcessTarget`，含 E8 变换）。
-- 少数多格式 `CompositeFormat` 补丁（22,167 份里 68 份）：格式边界取值为源大小、切换后符号流解错的
-  问题尚未定位；单格式分支已验证 200/200。
+  （多格式 `CompositeFormat` 已于 2026-10-20 解出，见上一节。）
 - 非空 `RiftTable` 的 delta（目前见到的 DCM/container 载荷基表都为空）。

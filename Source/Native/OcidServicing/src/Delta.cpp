@@ -545,11 +545,6 @@ class CompositeFormat {
     }
 
     const int count = static_cast<int>(reader.ReadBit());
-    if (count > 1) {
-      // Multi-format patches still evade the reversed format switch; leave them to the msdelta
-      // fallback instead of risking a silently wrong decode.
-      throw DeltaFailure("PA30: multi-format patches are not decoded yet");
-    }
     std::int64_t accumulated = 0;
     for (int i = 0; i < count; ++i) {
       accumulated += static_cast<std::int64_t>(reader.ReadBit());
@@ -576,13 +571,17 @@ class CompositeFormat {
     }
   }
 
+  // Mirror of CompositeFormat::GetCompressionFormatRead (0x18002392C): the last format whose
+  // cumulative bound is <= position wins (each bound starts the next format), and the final
+  // format extends to the end. Positions are unified-buffer offsets (source then target).
   const CompressionFormat& FormatAt(std::int64_t position) const {
+    std::size_t index = 0;
     for (std::size_t i = 0; i < bounds_.size(); ++i) {
-      if (position < bounds_[i]) {
-        return formats_[i];
+      if (bounds_[i] <= position) {
+        index = i;
       }
     }
-    return formats_.back();
+    return formats_[index];
   }
 
  private:
@@ -648,7 +647,7 @@ bool ApplyPa30Delta(const std::vector<std::uint8_t>& source,
     std::uint32_t r2 = 0;
 
     while (position < end) {
-      const CompressionFormat& current = format.FormatAt(position - basePosition);
+      const CompressionFormat& current = format.FormatAt(position);  // unified buffer offset
       std::uint32_t marker = 0;
       int length = 0;
       current.ReadSymbol(patchReader, &marker, &length);

@@ -210,12 +210,6 @@ namespace OcidCabinet.Delta
             }
 
             int count = (int)reader.ReadBit();
-            if (count > 1)
-            {
-                // Multi-format patches still evade the reversed format switch; the caller falls back
-                // to msdelta rather than risking a silently wrong decode.
-                throw new InvalidDataException("PA30: multi-format patches are not decoded yet");
-            }
 
             long accumulated = 0;
             var bounds = new List<long>(count);
@@ -248,15 +242,22 @@ namespace OcidCabinet.Delta
             }
         }
 
+        /// <summary>
+        /// Mirrors <c>CompositeFormat::GetCompressionFormatRead</c>: the last format whose cumulative
+        /// bound is &lt;= position wins (each bound is the start of the next format), and the final
+        /// format extends to the end of the buffer. Positions are unified-buffer offsets
+        /// (source bytes first, then the target), not target-relative ones.
+        /// </summary>
         public CompressionFormat FormatAt(long position)
         {
+            int index = 0;
             for (int i = 0; i < _bounds.Count; i++)
             {
-                if (position < _bounds[i])
-                    return _formats[i];
+                if (_bounds[i] <= position)
+                    index = i;
             }
 
-            return _formats[^1];
+            return _formats[index];
         }
     }
 }

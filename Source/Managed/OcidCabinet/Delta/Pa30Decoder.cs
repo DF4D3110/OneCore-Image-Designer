@@ -75,7 +75,7 @@ namespace OcidCabinet.Delta
 
             while (position < end)
             {
-                CompressionFormat current = format.FormatAt(position - basePosition);
+                CompressionFormat current = format.FormatAt(position);  // unified buffer offset
                 (uint marker, int length) = current.ReadSymbol(patchReader);
 
                 if (length == 1)

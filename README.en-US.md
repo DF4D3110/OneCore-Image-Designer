@@ -182,10 +182,10 @@ stores the target hash but not which entry the basis is, so candidates are tried
 index). The selfupdate container yields 696 files whose SHA-256 all match `expand.exe`, and so do the
 `dummyrepairpackage_*.cab` packages (SHA-256 index, empty payload). The delta itself is applied by the
 project-owned decoder (`Source/Managed/OcidCabinet/Delta/`, native twin in
-`Source/Native/OcidServicing/src/Delta.cpp`); only PE payloads (`fileType != 1`) and a few multi-format
-patches still go through `msdelta.dll!ApplyDeltaB`. The
+`Source/Native/OcidServicing/src/Delta.cpp`); only PE payloads (`fileType != 1`) still go through
+`msdelta.dll!ApplyDeltaB`. The
 format itself has been reversed and written down in `Source/Native/OcidServicing/Delta-Format.md` (header
-layout, rift table, pseudo-LZX symbol stream); the decoder is not implemented yet.
+layout, rift table, pseudo-LZX symbol stream) and the decoder now lives in `src/Delta.cpp`.
 
 The remaining container-level gap is sparse CABs whose files are split with the `iFolder` =
 `0xFFFD/0xFFFE/0xFFFF` convention, plus multi-volume cabinets. The desktop application no longer calls
@@ -367,7 +367,7 @@ This is an active work in progress. Three things are worth stating plainly:
    element-record tables are still being worked out. CAB decompression (MSZIP/LZX) is already
    self-contained in `Source/Managed/OcidCabinet`, and Windows Update container cabs (their `cix`
    manifest and `PA30` deltas) are handled by the reader too, with the project-owned `PA30` decoder
-   (`Delta.cpp`, `OcidCabinet/Delta/`) applying `fileType == 1` (RAW) patches and only PE / multi-format
+   (`Delta.cpp`, `OcidCabinet/Delta/`) applying `fileType == 1` (RAW) patches and only PE
    patches still borrowing `msdelta.dll` as a transitional fallback. The desktop side decodes in-process
    and never calls `expand.exe`; sparse CABs and multi-volume cabinets are reported as unsupported.
 2. **Install-history information has to be supplied as input.** Some values (`f256` segment order,
