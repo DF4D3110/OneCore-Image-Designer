@@ -584,8 +584,17 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
      **N 等于 `categoryMembership` 条数 49/91**，等于 `categoryMembership+1` 37/91（即 `N = cat + [1]` 覆盖 86/91），
      其余 5 份是 `(24,2)`/`(16,2)`/`(16,10)` 等离群样本（cat=0/4）。
      同理 `diagnostic.resources` 族（无 categoryMembership）的 N=6，对不上 cat，说明 N 不是单纯的 cat 计数，
-     更像 walker 内部的行号（含固定偏移）。需反编译 wcp 的 bfsvc/file handler 才能定；
-     未实现（避免拿单样本硬编）。
+     更像 walker 内部的行号（含固定偏移）。**已定（16299 x86 wcp 反编译）**：
+     `CCdfManifestBuilder::AddBfsvc`（RVA `0x9C719`）发的 8 B 记录是
+     `{ Flags, InternString(Source) }`——第二字段不是计数，而是 `Source` 值在
+     `CSingleInstanceTable`（vtable+160 的串表）里 `FindOrAdd` 得到的**顺序 id**。
+     实测 4 份（`02895/02107/02676/00751`）：我方 `inter.String(Source)` 返回 **6/8/2/2**，
+     与真机记录的 N 完全一致（`Flags` 分别是 17/16/24/16）。
+     ⇒ 已按此实现（`PcmBuild.cpp` 在 `MdHd` 槽前发 `{Flags, inter.String(Source)}`），
+     91 份 bfsvc 样本的记录字节/位置与真机一致（`02895` 我方 5836 / 真机 5844，偏移差 8 B 来自另一条缺记录）。
+     9600 全量 T4 仍 **2,331**（零回归、零提升）：该族还缺真机在 `MdHd` 前的 28 B `type 9` 记录
+     （`3006 0000 0100 0200 0c00 2100 d200 9a02 0c00 1300 0b00 1600 1500 1400`，
+     头部 `(count<<8)|0x30`），且两条 4 B uidx 仍被并成 8 B，尚未落地。
 
      **8419 语料里的 install 记录极端样本**（`x86_…pnpplugininstaller_1122334455667788_6.2.8419.0_neutral_~_…`，
      对应 `03040.pcm`，是 8419 语料 2,534 个配对里唯一带 `<installerRegistrations>` 的清单）：

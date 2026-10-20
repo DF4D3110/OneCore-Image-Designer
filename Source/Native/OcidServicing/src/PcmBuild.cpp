@@ -1817,6 +1817,24 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             hasMvid = true;
         }
     }
+    // <bfsvc> 的 8B 记录 {Flags, InternString(Source)}：真机在**元素记录末尾、
+    // MdHd 之前**发射（16299 wcp 的 CCdfManifestBuilder::AddBfsvc 反编译）。
+    {
+        const char* dbg = std::getenv("OCID_PCM_DEBUG_BFSVC");
+        for (std::size_t i = 0; i < elems.size(); ++i) {
+            if (elems[i].local != "bfsvc") continue;
+            const std::string flags = Attr(AttrsOf(elems[i]), "Flags");
+            const std::string src = Attr(AttrsOf(elems[i]), "Source");
+            const std::int32_t sid = inter.String(src);
+            (void)dbg;
+            // 真机在同一个位置发这个 8B 记录（16299 wcp 的
+            // CCdfManifestBuilder::AddBfsvc：{Flags, InternString(Source)}）。
+            AppendSlot(slots, 1,
+                       PackU32({static_cast<std::uint32_t>(std::strtoul(flags.c_str(), nullptr, 10)),
+                                static_cast<std::uint32_t>(sid)}));
+            break;
+        }
+    }
     const std::size_t mdhdSlot = slots.size();
     AppendSlot(slots, 1, std::string(mdhd.begin(), mdhd.end()));
 
