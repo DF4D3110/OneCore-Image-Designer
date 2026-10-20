@@ -1315,6 +1315,31 @@ std::string GuidBytes(const std::string& hex) {
     return out;
 }
 
+// 清单里的 "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}" → 真机 PCM 头部的 16 字节
+// 布局：Data1/Data2/Data3 小端，Data4 原序（01493/02229/02781 等 installReg
+// 族的 factoryClsid 与真块 GUID 表逐字节一致）。
+bool GuidFromText(const std::string& text, std::string& out) {
+    std::string hex;
+    hex.reserve(text.size());
+    for (char ch : text) {
+        if (ch == '{' || ch == '}' || ch == '-') continue;
+        hex.push_back(ch);
+    }
+    std::string raw;
+    if (!HexDecode(hex, raw) || raw.size() != 16) return false;
+    out.assign(16, '\0');
+    out[0] = raw[3];
+    out[1] = raw[2];
+    out[2] = raw[1];
+    out[3] = raw[0];
+    out[4] = raw[5];
+    out[5] = raw[4];
+    out[6] = raw[7];
+    out[7] = raw[6];
+    for (int i = 8; i < 16; ++i) out[i] = raw[i];
+    return true;
+}
+
 // 头部 cache GUID 表的**条目顺序**：与发射序（CacheRank/56 项 kinds 表 idx）不同，
 // 是另一张静态 kinds 表。证据（全语料 92 份多记录样本逐个两两约束，DAG 无环，
 // 该线性扩展 92/92 命中）：bfsvc<instrumentation<lodctr<lodctrDat<
@@ -1384,6 +1409,10 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
 
     // ---- 1. 文档扫描（元素顺序 = 文档序）----------------------------------
     std::vector<std::uint32_t> deps, files, cats, sdddefs, membElems, confEls, mofs;
+    std::vector<std::uint32_t> irElems;  // <installerRegistration>（9600 installReg 族）
+    // 每条 <installerRegistration> 的 28B 记录槽 + 它的 cache GUID（= factoryClsid），
+    // 用于头部 GUID 表与注册键 3 的 t8 表（见第 8 节 key == 3 分支）。
+    std::vector<std::pair<std::uint32_t, std::string>> irRecs;
     std::vector<std::pair<std::uint32_t, std::vector<std::uint32_t>>> reslist;
     std::unordered_map<std::uint32_t, std::size_t> resIx;
     std::unordered_map<std::uint32_t, std::size_t> strPath;
@@ -1444,6 +1473,8 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
         } else if (e.local == "gac") {
             hasGac = true;
             gacEl = static_cast<std::int32_t>(i);
+        } else if (e.local == "installerRegistration") {
+            irElems.push_back(idx);
         }
         if (e.local == "trustInfo") hasTrust = true;
         if (e.local == "mof") mofs.push_back(idx);
@@ -1615,6 +1646,18 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
 
 
     // ---- 4. 元素记录（文档序）--------------------------------------------
+    // <installerRegistrations>：真机为每个 <installerRegistration> 发一条 28B
+    // 常量记录 {0,-1,-1,-1,2,-1,0}，位置在依赖组之后、文件组之前（01493/01109/
+    // 02229/02774/02781 在槽 0；01761/01247 在依赖的 48B+16B 之后；03074 在六个
+    // 依赖对之后）。该元素同时让文件名先入字符串池（见下面 file 分支）。
+    for (std::size_t i = 0; i < irElems.size(); ++i) {
+        const std::uint32_t irSlot = static_cast<std::uint32_t>(slots.size());
+        AppendSlot(slots, 1, PackU32({0u, kNoId, kNoId, kNoId, 2u, kNoId, 0u}));
+        std::string irGuid;
+        if (GuidFromText(Attr(AttrsOf(elems[irElems[i]]), "factoryClsid"), irGuid)) {
+            irRecs.push_back({irSlot, irGuid});
+        }
+    }
     std::uint32_t fileOrd = 0;
     for (std::size_t i = 0; i < elems.size(); ++i) {
         const Elem& e = elems[i];
@@ -1622,6 +1665,11 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
         if (e.local == "dependency" && e.parent == 0) {
             continue;  // 已在第 3 节统一发出
         } else if (e.local == "file" && e.parent == 0) {
+            // 有 <installerRegistration> 时真机把文件名（=sourceName，同一串）
+            // 先入池、sdd 名随后：96B[4]/[18]=0、sdd 8B 记录 {1,-1}、sdddef 的
+            // 名字 id=1，字符串值记录里复用的 WRP_FILE_DEFAULT_SDDL 也变成 1。
+            // 没有该元素时相反（sdd=0、name=1，见 02392 mountpointmanager）。
+            if (!irElems.empty()) inter.String(Attr(AttrsOf(e), "name"));
             std::string sddName;
             std::string digest;
             bool haveDigest = false;
@@ -2128,6 +2176,16 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                          [](const std::string& a, const std::string& b) {
                              return CacheGuidRank(a) < CacheGuidRank(b);
                          });
+        // <installerRegistration> 的 cache GUID = factoryClsid，真机把它排在该表
+        // 最前（02229 真块 [installRegs, registryKeys]），与其他静态 kind 的相对
+        // 次序未观测到反例；未识别的 GUID 在 CacheGuidRank 里是 1000，会落到末尾。
+        for (const auto& rec : irRecs) {
+            if (std::find(cacheGuids.begin(), cacheGuids.end(), rec.second) !=
+                cacheGuids.end()) {
+                continue;
+            }
+            cacheGuids.insert(cacheGuids.begin(), rec.second);
+        }
     }
     // t8 行: {guid 表下标, 记录槽}；migration 不参与。
     struct CacheRow {
@@ -2177,7 +2235,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     }
 
     // ---- 8. GeneratePCM 表槽（PCM_KEYS 固定调用序）-----------------------
-    static const int kKeys[] = {12, 1, 4, 5, 6, 7, 8, 2, 9, 10, 11, 13, 16, 17, 19,
+    static const int kKeys[] = {12, 1, 3, 4, 5, 6, 7, 8, 2, 9, 10, 11, 13, 16, 17, 19,
                                 666, 201, 210, 34, 20, 21, 22, 23, 24, 25, 26, 32,
                                 31, 30, 27, 28, 33, 29, 35, 37, 37, 38};
     std::map<int, std::size_t> reg;
@@ -2197,6 +2255,33 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             std::string payload;
             if (!MakeRecordTable(6, rows, true, payload, error)) return false;
             tbls.push_back(Slot{6, payload});
+        } else if (key == 3 && !irRecs.empty()) {
+            // <installerRegistration> 的 cache 记录表（t8）：f1 = GUID 表下标、
+            // f2 = 28B 记录的槽。注册键是 3，位于 key-1（文件表）之后：
+            // 01493 真机 reg {1:10, 2:14, 3:11, 12:9, 210:15}，3→11 正是这张表。
+            std::vector<std::size_t> order(irRecs.size());
+            for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+            std::stable_sort(order.begin(), order.end(),
+                             [&irRecs, &cacheGuids](std::size_t a, std::size_t b) {
+                                 return GuidData1(irRecs[a].second) <
+                                        GuidData1(irRecs[b].second);
+                             });
+            std::vector<Row> rows;
+            rows.reserve(irRecs.size());
+            for (std::size_t i = 0; i < order.size(); ++i) {
+                const auto& rec = irRecs[order[i]];
+                std::uint32_t guidIdx = 0;
+                for (std::size_t g = 0; g < cacheGuids.size(); ++g) {
+                    if (cacheGuids[g] == rec.second) {
+                        guidIdx = static_cast<std::uint32_t>(g);
+                        break;
+                    }
+                }
+                rows.push_back(Row{static_cast<std::uint32_t>(i), guidIdx, rec.first});
+            }
+            std::string payload;
+            if (!MakeRecordTable(8, rows, false, payload, error)) return false;
+            tbls.push_back(Slot{8, payload});
         } else if (key == 210 && !sddRows.empty()) {
             std::vector<std::uint32_t> keys;
             keys.reserve(sddRows.size());
