@@ -580,9 +580,12 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
      同一份 `02895.pcm` 还揭示真机在 `<bfsvc>` 处有**两条**记录：`{Flags, N}`（8 B，`11000000 06000000`）
      + `{uidx}`（4 B，`60000000`），而合成器只写第二条。91 份 9600 bfsvc 差异样本全是这个 8 B 记录：
      `(17,6)`×49、`(17,7)`×35、`(16,8)`×2、`(16,7)`×2、`(24,2)`×1、`(16,2)`×1、`(16,10)`×1。
-     第二字段 N 与清单里的任何计数（子元素数/串数/id 数）都不一致（25 份抽样只 1 份吻合），
-     推测是微域 walker 的内部编号（如 cache 表槽号或 bfsvc 元素在本表里的序），
-     需反编译 wcp 的 bfsvc handler 才能定；未实现（避免拿单样本硬编）。
+     第二字段 N 与清单元素计数的相关性（91 份全量统计，`E:\ocid_verify\pcm9600\bfs_rows.json`）：
+     **N 等于 `categoryMembership` 条数 49/91**，等于 `categoryMembership+1` 37/91（即 `N = cat + [1]` 覆盖 86/91），
+     其余 5 份是 `(24,2)`/`(16,2)`/`(16,10)` 等离群样本（cat=0/4）。
+     同理 `diagnostic.resources` 族（无 categoryMembership）的 N=6，对不上 cat，说明 N 不是单纯的 cat 计数，
+     更像 walker 内部的行号（含固定偏移）。需反编译 wcp 的 bfsvc/file handler 才能定；
+     未实现（避免拿单样本硬编）。
 
      **8419 语料里的 install 记录极端样本**（`x86_…pnpplugininstaller_1122334455667788_6.2.8419.0_neutral_~_…`，
      对应 `03040.pcm`，是 8419 语料 2,534 个配对里唯一带 `<installerRegistrations>` 的清单）：
