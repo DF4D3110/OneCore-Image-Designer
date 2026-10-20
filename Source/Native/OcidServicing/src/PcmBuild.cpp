@@ -2045,7 +2045,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                 return catRank[a] < catRank[b];
             });
             std::vector<std::pair<std::uint32_t, std::size_t>> f1(membElems.size());
-            std::vector<std::uint64_t> subHash(membElems.size(), 0);
+            std::vector<std::uint32_t> rowKey(membElems.size(), 0);
             for (std::size_t i : seq) {
                 std::vector<Row> l9;
                 l9.push_back(Row{0u, static_cast<std::uint32_t>(i),
@@ -2074,13 +2074,18 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                     AppendSlot(slots, 6, payload);
                 }
                 f1[i] = {nDep + static_cast<std::uint32_t>(catRank[i]) + 1u, t6s};
-                subHash[i] = Hash64(sub);
+                // 真机 t10 的行序 = 成员身份哈希（IdentHash 低 32 位）**升序**：
+                // 与 catRank 同一个哈希，但按值排、不是 SitOrder 的桶序。
+                // 9600 语料里 642/642 张多行表吻合（subHash / key1 都不对）。
+                rowKey[i] = i < cats.size()
+                                ? (IdentHash(IdentRows(AttrsOf(elems[cats[i]]), true)) & kM32)
+                                : (Hash64(std::to_string(f1[i].first)) & kM32);
             }
             std::vector<std::size_t> rowOrd(membElems.size());
             for (std::size_t i = 0; i < rowOrd.size(); ++i) rowOrd[i] = i;
             std::stable_sort(rowOrd.begin(), rowOrd.end(),
-                             [&subHash](std::size_t a, std::size_t b) {
-                                 return subHash[a] < subHash[b];
+                             [&rowKey](std::size_t a, std::size_t b) {
+                                 return rowKey[a] < rowKey[b];
                              });
             std::vector<Row> rows;
             rows.reserve(membElems.size());

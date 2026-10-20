@@ -605,6 +605,23 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
      9600 全量：**T1 2,744（98.6%）/ T2 2,737 / T3 2,417 / T4 2,417（86.8%）**（原先 2,331）；
      8419 route9 全量 **T4 2,747/2,757（+1）**，零回归；三个原生测试套全过。
 
+     **t10 行序（已修）**：`type 10` 的行序 = 该成员身份的 `IdentHash`
+     （`CalculateKeysForBuiltinAttributes`）**低 32 位升序**——和算 catRank 用的是同一个哈希，
+     但这里按**值**排，不是 `SitOrder` 的桶序。证据：9600 配对语料里 `type 10` 行数 ≥2 的
+     表共 **642 张**，这条规则 **642/642** 命中真机行序。反例对照（同一 642 张）：
+     按 `Hash64(subcategory)` 升序 264、按 f1 降序 418、按「全属性 64 位 key1」升序 182、
+     按 f1 升序 99；按 `IdentHash` 的 `SitOrder` 桶序也不对（00022/00023 会翻成 `[3,1,2]`）。
+     注意 **Culture=neutral 必须按身份表的定义形态省掉**（`IdentRows(..., true)`），补上 neutral 会
+     破坏 00018/00028；`buildType` 也**不能**当 Type 折进去（会把 00018 打回去，且 02392 的真机
+     type-4 身份表只有 5 行、不含 Type）。此前「57 张差异表里 IdentHash 低 32 位只中 24」是因为
+     那批表的 `(f1,f2)` 配对本身也错（串 id 错位），不是行序判据无效。
+     `PcmBuild.cpp` 的 key-2 分支现用 `rowKey[i] = IdentHash(IdentRows(AttrsOf(elems[cats[i]]), true)) & kM32`
+     做 `stable_sort`（`subHash` 已删）。9600 全量：**T1 2,744（98.6%）/ T2 2,737 / T3 2,534 / T4 2,534（91.0%）**
+     （原先 2,417，+117）；五个行序样本 `00018/00022/00023/00028/02392` 的 `type 10` 全部逐字节一致；
+     33/33 原生单测通过。复现：`E:\ocid_verify\re\t10_collect.py`（全语料 doc 序 dump）→
+     `E:\ocid_verify\re\t10_search_all.py`（穷举属性掩码/排序算子求唯一规则）；单样本对拍用
+     `E:\ocid_verify\re\t10_check5.py`、`t10_one.py`。语料里仍无 count ≥7 的表，f0 列不可观测。
+
      **8419 语料里的 install 记录极端样本**（`x86_…pnpplugininstaller_1122334455667788_6.2.8419.0_neutral_~_…`，
      对应 `03040.pcm`，是 8419 语料 2,534 个配对里唯一带 `<installerRegistrations>` 的清单）：
      真机 37 槽 / 我方 35 槽，且首 9 槽结构不同——真机 slot0 是 28 B
