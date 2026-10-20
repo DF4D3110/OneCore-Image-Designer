@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -2054,6 +2055,23 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                 rows.push_back(Row{static_cast<std::uint32_t>(
                                        Hash64(std::to_string(f1[i].first)) & kM32),
                                    f1[i].first, static_cast<std::uint32_t>(f1[i].second)});
+            }
+            // 临时诊断：OCID_PCM_DEBUG_T10=1 时按最终行序把 (f1, name, subcategory)
+            // 打到 stderr，用来反推真机 f0 的取值（见 CBS-Writer.md §7）。
+            if (std::getenv("OCID_PCM_DEBUG_T10") != nullptr) {
+                for (std::size_t i : rowOrd) {
+                    std::string nm;
+                    std::string sub2;
+                    for (std::uint32_t kk : elems[membElems[i]].kids) {
+                        if (elems[kk].local == "id") {
+                            nm = Attr(AttrsOf(elems[kk]), "name");
+                        } else if (elems[kk].local == "categoryInstance") {
+                            sub2 = Attr(AttrsOf(elems[kk]), "subcategory");
+                        }
+                    }
+                    std::fprintf(stderr, "T10 %u|%s|%s\n", f1[i].first, nm.c_str(),
+                                 sub2.c_str());
+                }
             }
             std::string payload;
             if (!MakeRecordTable(10, rows, false, payload, error)) return false;

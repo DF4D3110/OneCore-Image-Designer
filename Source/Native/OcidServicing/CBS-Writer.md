@@ -517,6 +517,23 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
      `Hash64(to_string(f1))`），真机是「按自己的 f0 排」。要复现就得知道真机给这些行填的 f0 是什么：
      下一步反编译 `GeneratePCM`（RVA 0x976AD，已导出 `decomp_wcp_000976ad.c`）里 add 到 section-10 表的
      调用点，看 f0 取自哪个 id（字符串 id / uidx / 父键），再据此改 `PcmBuild.cpp` 的行序。
+
+     **2026-10-20 续查（关键结论：f0 在这批语料里不可观测）**：
+
+     - `GeneratePCM` 里 section 10 的表就是 `this+2101` 的
+       `CCdfTableBuilder<CStringTableCaseSensitive>`，写表时按 `SortCompare`（只比 f0）排序；
+       小表走 `BUCL::Implementation::InternalShortSort`（0xA2575），第一个比较相等就直接返回，
+       **因此并列的行保持插入序**——真机差异样本都是「全部 subcategory 相同」的并列，行序=插入序。
+     - 扫了全部可用语料（9600 2,787 块 + 8419 3,041 块 + route7/route9 8,245 块）：
+       **没有一张 `type 10` 的 count ≥ 7**，所以 f0 数组从来不落盘，无法从样本里读出 f0。
+     - 对 57 张差异表穷举了「行序 vs 候选键升序」：`IdentHash` 低 32 位 24/57、
+       名字码点哈希高 32 位 30/57、`h32(name|typeName)` 37/57，均不是稳定规则；
+       57 张表里 39 张是「全并列」，其中 n=3 的多数真机序是 `[1,2,0]`、n=2 多数是 `[1,0]`。
+     - 结论：`type 10` 的行序需要知道真机**填行的插入序**（不是 f0 值），而插入序发生在 CMI 侧
+       （`Handler_assembly_memberships_categoryMembership` 只做属性收集，不建表），
+       下一轮应从 Cdf 表的 `AddObject` 调用者往回找。当前 `PcmBuild.cpp` 保持 `subHash` 序不动
+       （单样本不硬凑），`OCID_PCM_DEBUG_T10=1` 可让 `cbs-pcm-build` 把 (f1,name,subcategory)
+       打到 stderr，便于继续对拍。
 2. 覆盖表瘦身：第 4 节剩下的行已逐条试过推导（f256 段序试了架构/文化/CF/组件键哈希序，
    只能解释 56/60 的顺序且方向不定；CT 的归属包不在 `.mum` 声明集合里）⇒ 保留为输入。
    16299 的 865 行里最大一块是 `Drivers` 台账的 14 条虚拟驱动 + identity 71 条历史写法。
