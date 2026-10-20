@@ -649,10 +649,10 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
         并以**注册键 3** 登记（`kKeys` 里紧跟 key 1 之后）。10 份里 7 份整文件一致
         （`01493/02774/02229/02781/01109/01761/03074`）；`01078`（SMBServer）与 `01247`
         （isolationautomation，`<comClass clsid>` 走同一张 key-3 表）仍开放（`6468de6`）。
-     - 仍开放（35 份）：`t2` 串池顺序 6 份（非 ASCII 字体族名与 registry 文本的 intern 次序）、
-        `f0` 撞车 4 份、`migXml` 3 份（−29/−31/−33 槽）、`<comClass>`/`<windowClass>` 记录族
-        （`01286/01287` 各差 29/31 槽，真机把每个 windowClass 名单独入池）、其余 −3/−4/−5/−6 槽
-        （`00028` 是 `<file>` 前多一条 12 B `{id1,0x80000044,id2}` 记录）。
+     - `<genericCommands>`：按 `install` 属性**分两组**，每组一条记录 = 组内 `<genericCommand>` 的 uidx 数组（4 B 起，10 条一组就是 20 B）；发射位置在 migration 记录**之后**、`sppInstaller` 之**前**（真机 01879 槽序 82 migration / 83 install / 84 uninstall / 85 sppInstaller）；cache GUID install `104aa381-5642-6a43-89d6-794b97ca407c`、uninstall `5dfd45c1-9b1b-3847-9961-64034a3da28f`，按 `…sppInstaller < uninstall < install` 排进 GUID 表并注册进注册键 666（`79a323a`）。另：key-666 表的 `f0` 列 = 该行 **cache GUID 的 Data1**（不是行号），只有行数 ≥7 才落盘（`00549` 的 7 行真机就是逐行 Data1 升序）。
+     - 仍开放（30 份，9600 T4 2,582/2,784 = 92.7%）：
+       `t6` 撞车 4 份（`00852/01220/01344/01897`）与 `type 11` 撞车 1 份（`00611`）；`t2` 串池 intern 次序 6 份（`00003` 里 `HKEY_LOCAL_MACHINE` 与 `ja` 对调、`02995` 里 `amd64` 与中文串对调）；`<windowClass>`/`<comClass>` 记录族（`01286/01287` 各少 29/31 槽、`01247` 少 6 槽）；`migXml` 3 份（−29/−31/−33 槽）；其余 −1~−7 槽若干（`00028` 是 `<file>` 前多一条 12 B `{id1,0x80000044,id2}` 记录）。
+       已定论但**不可由比较器复现**的部分：`00852`（profsvc，85 行 event 本地化表）三组 `f0` 撞车的真机次序是「2 组 f1 降、1 组 f1 升」，`00611` 的 `type 11` 两表一升一降 ⇒ 真机用的是**不稳定排序 + 哈希表迭代序**，取决于输入向量的构造顺序；`E:\ocid_verify\pcm9600\_tiescan.py` 扫全语料已确认每条撞车组内部单调、组间方向不一致，所以改比较器永远对不上，必须知道真机输入序（或换一条记录生成路径）。`<windowClass>` 侧：真机把每个 class 名入池并发 `type 2` 串槽外，还发 4 张 `type 4/5` 表（行 `{-1, a, b}` 三元组、b/c 引用串 id）；这 4 张表的语义（哪种元素被折叠成 `{-1,a,b}`）尚未定。
 
      **8419 语料里的 install 记录极端样本**（`x86_…pnpplugininstaller_1122334455667788_6.2.8419.0_neutral_~_…`，
      对应 `03040.pcm`，是该语料 2,757 个配对里唯一带 `<installerRegistrations>` 的清单）：
