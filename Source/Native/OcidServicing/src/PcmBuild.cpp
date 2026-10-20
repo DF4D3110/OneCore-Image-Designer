@@ -1230,6 +1230,9 @@ class RegistryBuilder {
 const char* const kCacheGuidMof = "9fc74e9f973a7247b6352899468900a2";
 const char* const kCacheGuidLodctr = "eeed2ed84e859a4fb458ae1bc62a0e6b";
 const char* const kCacheGuidBfsvc = "d7e9f0c544e8074589e4701b5a747221";
+// <fveUpdateAI>：01039/01281/00952/02417 四份真块的头部 GUID 表里紧挨在
+// bfsvc GUID 之前（bacf4a08-714f-4d8a-a69a-fe4e9c8ce62d）。
+const char* const kCacheGuidFveUpdateAI = "bacf4a084f718a4da69afe4e9c8ce62d";
 const char* const kCacheGuidRescache = "7ad7ecc41185184b89bfc6ebecad4e01";
 const char* const kCacheGuidInstrumentation = "2bfdb93b1e359c4bb1fced0758805998";
 // <instrumentation><counters> 用的是另一个 GUID（00777/00853/02759 三份 counters
@@ -1250,7 +1253,8 @@ const char* const kCacheGuidFirewallRule = "698dce68ae269f4fbea750613e7ab5c1";
 const char* const kCacheGuidLodctrDat = "9bcb3d9a96a7df41b45577eba6a1ec1a";
 
 bool IsCacheRecordElement(const std::string& local) {
-    return local == "lodctr" || local == "bfsvc" || local == "rescache" ||
+    return local == "lodctr" || local == "bfsvc" || local == "fveUpdateAI" ||
+           local == "rescache" ||
            local == "migration" || local == "sppInstaller" || local == "ngen" ||
            local == "rootDevices" || local == "timezoneresourceAI" ||
            local == "taskScheduler" || local == "serviceData" ||
@@ -1276,6 +1280,7 @@ int CacheRank(const std::string& local) {
     if (local == "rescache") return 23;
     if (local == "timezoneresourceAI") return 34;
     if (local == "bfsvc") return 44;
+    if (local == "fveUpdateAI") return 45;
     return 999;
 }
 
@@ -1284,6 +1289,7 @@ std::string CacheGuid(const std::string& local) {
     if (local == "lodctr") return kCacheGuidLodctr;
     if (local == "lodctrDat") return kCacheGuidLodctrDat;
     if (local == "bfsvc") return kCacheGuidBfsvc;
+    if (local == "fveUpdateAI") return kCacheGuidFveUpdateAI;
     if (local == "rescache") return kCacheGuidRescache;
     if (local == "instrumentation" || local == "events") return kCacheGuidInstrumentation;
     if (local == "counters") return kCacheGuidCounters;
@@ -1314,7 +1320,7 @@ std::string GuidBytes(const std::string& hex) {
 // 该顺序来自二进制里的静态表，清单 XML 里没有对应信息；未观测到的对
 // （firewallRule/ngen 与其他 kind 的组合）按已知约束的线性扩展放在末尾。
 const char* const kCacheGuidOrder[] = {
-    "bfsvc", "instrumentation", "counters", "lodctr", "lodctrDat", "securityDescriptor",
+    "fveUpdateAI", "bfsvc", "instrumentation", "counters", "lodctr", "lodctrDat", "securityDescriptor",
     "serviceData", "rootDevices", "sppInstaller", "mof", "rescache",
     "taskScheduler", "timezoneresourceAI", "firewallRule", "ngen",
 };
@@ -1930,6 +1936,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     // key-33 表（CUlong 两列）收集 `(uidx, 记录槽号)`：9600 的 00044/00024 实测
     // 真机 (96,7)/(129,11) 与上面的 uidx / 槽号逐一对应。
     std::vector<Row> bfsvcRows;
+    std::vector<Row> fveRows;
     {
         const char* dbg = std::getenv("OCID_PCM_DEBUG_BFSVC");
         for (std::size_t i = 0; i < elems.size(); ++i) {
@@ -1948,6 +1955,26 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             AppendSlot(slots, 1,
                        PackU32({static_cast<std::uint32_t>(std::strtoul(flags.c_str(), nullptr, 10)),
                                 static_cast<std::uint32_t>(sid)}));
+            break;
+        }
+        // <fveUpdateAI>：真机在 bfsvc 的 8B 记录之后、MdHd 之前多发一条 4B 记录，
+        // 内容是 fveCommand 值在串表里的 id（01039 bootmgr → 9、01281/00952
+        // memtest → 8，都正好是 bfsvc Source 的下一个 id）。元素本身还有一条
+        // cache uidx 记录（见第 6 步）。
+        for (std::size_t i = 0; i < elems.size(); ++i) {
+            if (elems[i].local != "fveUpdateAI") continue;
+            const std::string cmd = Attr(AttrsOf(elems[i]), "fveCommand");
+            if (cmd.empty()) break;
+            const std::int32_t cid = inter.String(cmd);
+            const std::size_t cmdSlot = slots.size();
+            AppendSlot(slots, 1, PackU32({static_cast<std::uint32_t>(cid)}));
+            // key-33 表里 fveUpdateAI 也有一行（uidx, 那条 4B 记录的槽号）：
+            // 01281 真机 t9 有 {0x88=136, 11} 两行里的一行，排在 bfsvc 之后。
+            // 它与 bfsvc 是**两张单行表**，注册键分别是 33 与 35
+            // （01039 真机注册表：{1:20, 2:28, 6:21, 9:30, 12:19, 33:33,
+            // 35:34, 210:32, 666:31}）。
+            fveRows.push_back(Row{0u, elems[i].uidx,
+                                  static_cast<std::uint32_t>(cmdSlot)});
             break;
         }
     }
@@ -2329,6 +2356,17 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             std::string payload;
             if (!MakeRecordTable(8, rows, false, payload, error)) return false;
             tbls.push_back(Slot{8, payload});
+        } else if (key == 33 && !bfsvcRows.empty()) {
+            // CUlong 两列 (uidx, 记录槽号)：9600 真机 00044/00024 的 `(96,7)` /
+            // `(129,11)` 与 bfsvc 元素的 uidx 及其 8B 记录槽号一致。
+            std::string payload;
+            if (!MakeRecordTable(9, bfsvcRows, false, payload, error)) return false;
+            tbls.push_back(Slot{9, payload});
+        } else if (key == 35 && !fveRows.empty()) {
+            // <fveUpdateAI> 同构的表，注册键是 35（01039/01281/00952/02417）。
+            std::string payload;
+            if (!MakeRecordTable(9, fveRows, false, payload, error)) return false;
+            tbls.push_back(Slot{9, payload});
         } else if (key == 201 && !confSlots.empty()) {
             std::vector<std::pair<std::uint32_t, std::size_t>> rs = confSlots;
             if (rs.size() > 1) std::sort(rs.begin(), rs.end());
@@ -2440,16 +2478,8 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             slots.push_back(std::move(tbls[t]));
         }
     }
-
-    // ---- 8b. key-33 表（CUlong 两列：bfsvc 记录的 (uidx, 槽号)）---------
-    // 9600 真机 00044/00024：表内容 `(96,7)` / `(129,11)`，与 bf svc 元素的
-    // uidx 及其 8B 记录槽号完全一致；注册表里 key 33 指向该槽。
-    if (!bfsvcRows.empty()) {
-        std::string payload;
-        if (!MakeRecordTable(9, bfsvcRows, false, payload, error)) return false;
-        reg[33] = slots.size();
-        AppendSlot(slots, 9, payload);
-    }
+    // ---- 8b. key-33 / key-35 表在 GeneratePCM 的固定调用序里发射，见上面
+    // key 循环的 `key == 33` / `key == 35` 分支。
 
     // ---- 9. key → slot 注册表（无 key 的 type-9 表）----------------------
     std::size_t s1 = 0;
