@@ -614,11 +614,42 @@ bool MakeRecordTable(std::uint8_t type, const std::vector<Row>& rows, bool bit0,
     return true;
 }
 
-// key-1/210/17 风格：按 f0 升序（f0 相同按 f1），稳定排序。
+// key-1/210/17 风格：按 f0 升序。
+// f0（32 位哈希）撞车时真机的次序既非 f1 升也非 f1 降（01344 的 4 组 .fon 并列
+// 里 3 组升、1 组降；00852 三组里两组降、一组升），也不是 64 位哈希序，看起来是
+// 不稳定 std::sort 在不同输入序上的结果，尚未反出真规则。
+// OCID_SORT_MODE 逐模式实测（9600 全量 T4）：0=f1 升 2544、1=f1 降 2546（默认）、
+// 2=std::sort 只比 f0 2545、其余更低。mode 1 净 +12（修 13 坏 1，坏例
+// securestartup-core）；确定真规则后应删掉这个开关。
+int SortMode() {
+    static const int mode = [] {
+        const char* s = std::getenv("OCID_SORT_MODE");
+        return s != nullptr ? std::atoi(s) : 1;
+    }();
+    return mode;
+}
+
 void SortAsc(std::vector<Row>& rows) {
-    std::stable_sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
+    const int mode = SortMode();
+    if (mode == 2) {
+        std::sort(rows.begin(), rows.end(),
+                  [](const Row& a, const Row& b) { return a.f0 < b.f0; });
+        return;
+    }
+    if (mode == 3) {
+        std::reverse(rows.begin(), rows.end());
+        std::sort(rows.begin(), rows.end(),
+                  [](const Row& a, const Row& b) { return a.f0 < b.f0; });
+        return;
+    }
+    if (mode == 4) {
+        std::stable_sort(rows.begin(), rows.end(),
+                         [](const Row& a, const Row& b) { return a.f0 < b.f0; });
+        return;
+    }
+    std::stable_sort(rows.begin(), rows.end(), [mode](const Row& a, const Row& b) {
         if (a.f0 != b.f0) return a.f0 < b.f0;
-        return a.f1 < b.f1;
+        return mode == 1 ? a.f1 > b.f1 : a.f1 < b.f1;
     });
 }
 
@@ -642,6 +673,17 @@ void SortByKeys(std::vector<Row>& rows, const std::vector<std::uint32_t>& keys) 
     sorted.reserve(rows.size());
     for (std::size_t i : order) sorted.push_back(rows[i]);
     rows = std::move(sorted);
+}
+
+// 临时诊断（OCID_PCM_DEBUG_TIE=1）：把一张 2 列表的最终行序连同 f1 串打出来，
+// 用来确定 f0（32 位哈希）撞车时真机按什么定序。
+void DbgDumpTable(const char* tag, const std::vector<Row>& rows, const Interner& inter) {
+    if (std::getenv("OCID_PCM_DEBUG_TIE") == nullptr) return;
+    std::fprintf(stderr, "TIE %s n=%zu\n", tag, rows.size());
+    for (const Row& r : rows) {
+        const char* s = r.f1 < inter.order().size() ? inter.order()[r.f1].c_str() : "?";
+        std::fprintf(stderr, "TIE %s %u %u %u %s\n", tag, r.f0, r.f1, r.f2, s);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1428,7 +1470,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     std::unordered_map<std::int32_t, std::size_t> dirSddSlot;
     std::uint32_t hseq = (hasTrust || gacEl >= 0) ? 1u : 0u;
     std::unordered_map<std::string, std::uint32_t> digestBlobSlot;  // 原始摘要字节 → 32B 槽号
-    std::unordered_map<std::uint32_t, std::uint32_t> sigBlobSlot;  // signatureDescriptor 位 → blob id
+    std::unordered_map<std::uint32_t, std::uint32_t> sigBlobSlot;  // (flags,DRMLevel) → blob id
 
     // ---- 3. 根 <dependency> 记录（文档序，永远排在最前）--------------------
     //
@@ -1522,10 +1564,15 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             const Elem* hashEl = nullptr;
             bool hGac = false;
             // <signatureInfo><signatureDescriptor .../>：真机在 16B hash 记录之后、
-            // 该 hash 的 type-9 辅助表之前多发一条 8B 记录 [flags, 0]。
-            // flags 是属性位或：pageHash=2、PETrust=4（4 个样本：00486/02530/02532/02787）。
-            // 相同 flags 只发一次（02532 两个 file 的 descriptor 都是 pageHash → 仅 1 条）。
+            // 该 hash 的 type-9 辅助表之前多发一条 8B 记录 [flags, level]。
+            // flags 是属性位或：DRMLevel 存在=1、pageHash=2、PETrust=4；
+            // level 是该 descriptor 的 DRMLevel 数值（无则 0）。
+            // 4 个 pageHash/PETrust 样本：00486/02530/02532/02787。
+            // DRMLevel 样本（9 个驱动 INF，DRMLevel=1300 ⇒ {1,1300}）：
+            // 00153/00775/01543/01914/02039/02164/02397/02411/02027。
+            // 相同 flags+level 只发一次（02532 两个 file 的 descriptor 都是 pageHash → 仅 1 条）。
             std::uint32_t sigFlags = 0;
+            std::uint32_t sigLevel = 0;
             bool haveSig = false;
             std::int32_t sigBlob = -1;
             for (std::uint32_t k : e.kids) {
@@ -1547,6 +1594,11 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                         haveSig = true;
                         if (Attr(sa, "pageHash") == "true") sigFlags |= 2u;
                         if (Attr(sa, "PETrust") == "true") sigFlags |= 4u;
+                        const std::string lvl = Attr(sa, "DRMLevel");
+                        if (!lvl.empty()) {
+                            sigFlags |= 1u;
+                            sigLevel = static_cast<std::uint32_t>(std::strtoul(lvl.c_str(), nullptr, 10));
+                        }
                     }
                 }
             }
@@ -1645,13 +1697,14 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                 const std::uint32_t h16 = static_cast<std::uint32_t>(slots.size());
                 AppendSlot(slots, 1, PackU32({dw0, kNoId, hnum, hashEl->uidx}));
                 if (haveSig) {
-                    const auto sit = sigBlobSlot.find(sigFlags);
+                    const std::uint32_t sigKey = (sigFlags << 16) | (sigLevel & 0xFFFFu);
+                    const auto sit = sigBlobSlot.find(sigKey);
                     if (sit != sigBlobSlot.end()) {
                         sigBlob = static_cast<std::int32_t>(sit->second);
                     } else {
                         sigBlob = static_cast<std::int32_t>(slots.size());
-                        AppendSlot(slots, 1, PackU32({sigFlags, 0u}));
-                        sigBlobSlot.emplace(sigFlags, static_cast<std::uint32_t>(sigBlob));
+                        AppendSlot(slots, 1, PackU32({sigFlags, sigLevel}));
+                        sigBlobSlot.emplace(sigKey, static_cast<std::uint32_t>(sigBlob));
                         ++hseq;  // 8B signature 记录同样占一个 hash 序列号
                     }
                 }
@@ -2010,6 +2063,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
         if (key == 1 && !fileRows.empty()) {
             std::vector<Row> rows = fileRows;
             SortAsc(rows);
+            DbgDumpTable("k1", rows, inter);
             std::string payload;
             if (!MakeRecordTable(6, rows, true, payload, error)) return false;
             tbls.push_back(Slot{6, payload});
@@ -2021,6 +2075,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             }
             std::vector<Row> rows = sddRows;
             SortByKeys(rows, keys);
+            DbgDumpTable("k210", rows, inter);
             std::string payload;
             if (!MakeRecordTable(6, rows, true, payload, error)) return false;
             tbls.push_back(Slot{6, payload});
@@ -2163,6 +2218,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             // 02512 等）；此前按 64 位 h64 % 桶排是错的经验规则。
             std::vector<Row> rows = dirRows;
             SortAsc(rows);
+            DbgDumpTable("k17", rows, inter);
             std::string payload;
             if (!MakeRecordTable(6, rows, true, payload, error)) return false;
             tbls.push_back(Slot{6, payload});
@@ -2236,6 +2292,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                     rows.push_back(Row{p.f0, sidMap[p.sid], static_cast<std::uint32_t>(p.slot)});
                 }
                 SortAsc(rows);
+                DbgDumpTable("k9", rows, inter);
                 if (!rows.empty()) {
                     std::string payload;
                     if (!MakeRecordTable(6, rows, false, payload, error)) return false;
