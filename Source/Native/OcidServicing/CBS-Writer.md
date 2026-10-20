@@ -486,6 +486,25 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
 
      前两类是 wcp 写侧的取值/排序规则（`b0` 类是输入依赖，不算规则差异），要继续逆 `wcp!PcmWrite*`
      才能定；已有可逐字节验收的配对语料。
+
+     **逆向素材已就位（2026-10-20）**：`E:\ocid_dism\16299\x86\wcp.dll`（10.0.16299，2,680,728 B，x86，imageBase 0x10000000）
+     有公共符号 `wcp.pdb`（key `DD6E26801E24039B6AB8AFC11F9D75831`，4,246,528 B），直接喂 dbghelp 可枚举
+     **14,276** 个名字（注意：`symfull.exe` 要传 **pdb 路径**而不是 dll，传 dll 只拿到 434 个导出）。
+     PCM 生成入口 `CCdfManifestBuilder::GeneratePCM` 在 **RVA 0x976AD**（0x100976AD，3,500 B），
+     它把每张表交给 `CCdfTableBuilder<traits>` 的 `BuildTableIntoBlob`，再按 section id 登记进表清单。
+     section id → traits 的一手映射（与我们的 `PcmBuild.cpp` 对得上）：
+
+     | section | traits |
+     | --- | --- |
+     | 1 / 4 / 17 / 210 | `CStringTableCaseInsensitive` |
+     | 7 / 8 / 10 / 11 / 13 | `CStringTableCaseSensitive` |
+     | 3 / 5 / 666 | `CGuidTableTraits` |
+     | 6 | `CReferenceIdentityTableTraits` |
+     | 19 / 20–50 / 201 等整数表 | `CUlongTableTraits` |
+
+     即 9600 那两类差异的本质是**字符串表的条目集合/顺序**（`type 10` 是 case-sensitive 串表，
+     `type 1` 是 case-insensitive 串表），下一轮从 `CCdfTableBuilder<CStringTable*>::BuildTableIntoBlob`
+     与该表的 `Compare` 入手即可。
 2. 覆盖表瘦身：第 4 节剩下的行已逐条试过推导（f256 段序试了架构/文化/CF/组件键哈希序，
    只能解释 56/60 的顺序且方向不定；CT 的归属包不在 `.mum` 声明集合里）⇒ 保留为输入。
    16299 的 865 行里最大一块是 `Drivers` 台账的 14 条虚拟驱动 + identity 71 条历史写法。
