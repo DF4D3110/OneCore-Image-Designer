@@ -563,6 +563,30 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
      `languagePack` 族 168、`bfsvc/rescache` 族 89、**我们的 DCM 解码直接失败的 82**、
      `categoryMembership+file` 61、无特殊元素 16、`signatureInfo/infFile` 等其余 37。
      即 9600 残差不是一条规则，而是五六个独立形态；其中 `bfsvc` 族已有上面这条明确机制。
+
+     **已修（提交 `b2f8e2c`）**：`<bfsvc>` 的 `Source` 属性现按普通属性做 string interning
+     （`PcmBuild.cpp` 的 bfsvc 分支），`Flags` 不入池。效果：`02895.pcm` 的池/串 id/`type 9`/`type 10`
+     全部对齐、单份逐字节 consistent；但 9600 全语料 T4 仍是 **2,331**（该族 89 份里多数还差别的形态），
+     属预期内的部分修复，零回归（33/33 单测通过）。
+
+     同一份 `02895.pcm` 还揭示真机在 `<bfsvc>` 处有**两条**记录：`{Flags, N}`（8 B，`11000000 06000000`）
+     + `{uidx}`（4 B，`60000000`），而合成器只写第二条。91 份 9600 bfsvc 差异样本全是这个 8 B 记录：
+     `(17,6)`×49、`(17,7)`×35、`(16,8)`×2、`(16,7)`×2、`(24,2)`×1、`(16,2)`×1、`(16,10)`×1。
+     第二字段 N 与清单里的任何计数（子元素数/串数/id 数）都不一致（25 份抽样只 1 份吻合），
+     推测是微域 walker 的内部编号（如 cache 表槽号或 bfsvc 元素在本表里的序），
+     需反编译 wcp 的 bfsvc handler 才能定；未实现（避免拿单样本硬编）。
+
+     **8419 语料里的 install 记录极端样本**（`x86_…pnpplugininstaller_1122334455667788_6.2.8419.0_neutral_~_…`，
+     对应 `03040.pcm`，是 8419 语料 2,534 个配对里唯一带 `<installerRegistrations>` 的清单）：
+     真机 37 槽 / 我方 35 槽，且首 9 槽结构不同——真机 slot0 是 28 B
+     `00000000ffffffff ffffffff ffffffff 02000000 ffffffff 00000000`（我方 8 B 全 `0xffffffff` 的包装记录），
+     slot5 96 B 内部 `[2][3]` 顺序与取值也不同；`MdHd` 段内偏移真机 `0x81` vs 我方 `0xE1`
+     （**我方多 0x60 = 96 B**，正是多出来的一条记录）。⇒ install 历史在 CMI 微域里是独立记录族
+     （真机 `installerRegistration{ factoryClsid, supportedTargets }` + `installers/installer{xpath,passes}`），
+     需要 `<installerRegistration>` 的 CDF 记录布局才能落地；8419 语料只有这一份，无法从差分归纳。
+     同一镜像的 `01014/00777/01914/02643` 属于「真机有值、我方 0」的 `type 1` 单值族，
+     与 `03040` 不是同类问题。
+
 2. 覆盖表瘦身：第 4 节剩下的行已逐条试过推导（f256 段序试了架构/文化/CF/组件键哈希序，
    只能解释 56/60 的顺序且方向不定；CT 的归属包不在 `.mum` 声明集合里）⇒ 保留为输入。
    16299 的 865 行里最大一块是 `Drivers` 台账的 14 条虚拟驱动 + identity 71 条历史写法。
