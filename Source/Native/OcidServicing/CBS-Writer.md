@@ -596,7 +596,23 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
 
 2. 覆盖表瘦身：第 4 节剩下的行已逐条试过推导（f256 段序试了架构/文化/CF/组件键哈希序，
    只能解释 56/60 的顺序且方向不定；CT 的归属包不在 `.mum` 声明集合里）⇒ 保留为输入。
-   16299 的 865 行里最大一块是 `Drivers` 台账的 14 条虚拟驱动 + identity 71 条历史写法。
+   16299 的 865 行分类（`E:\ocid_verify\one16299g\overrides.csv`，按 `override` 种类 × 路径顶层）：
+
+   | 种类 | 顶层 | 行数 | 说明 |
+   | --- | --- | --- | --- |
+   | `remove` | `Drivers` | 357 | 驱动台账的虚拟登记（`Drivers\amd64\<inf>\<hash>` 指向某个包） |
+   | `remove-key` | `Drivers` | 28 | 同上，整键 |
+   | `set` | `CanonicalData` | 323 | 部署记录（321 `Deployments` + 2 `Catalogs`） |
+   | `remove` | `CanonicalData` | 58 | 部署记录（41 `Deployments` + 17 `Catalogs`） |
+   | `remove-key` | `CanonicalData` | 2 | `Catalogs` |
+   | `set` | `DerivedData` | 83 | `TransformSettingsVersion\{Ari,WpnData,…}` 的 `InvokeMap`/`SettingsVersion` |
+   | `remove` | `DerivedData` | 12 | 同上 |
+   | `set` | `CCPInterface` | 2 | 根区形态 |
+
+   合计 865，与覆盖表一致。`CanonicalData\Deployments` 的 321 个 `set` 按值前缀再分：
+   `CatalogThumbprint` 250、`i!`/`p!`/`s!` 各 20、`appid` 11——即部署状态（安装顺序、组件→包映射、
+   目录指纹）与派生转换设置，都是**安装历史输入**，不能从清单推导。⇒ 「覆盖表瘦身」的可做部分
+   只剩把 385 行 `Drivers` 换成确定性生成（14 条虚拟驱动规则已知），其余 480 行保持输入。
 3. KTM 事务化：**注册表写入侧已完成**（`cbs-write --transactional`，见 6.1，提交/回滚都实测过）。
    "文件 + 注册表"的原子性已用顺序约定 + 提交前核对解决（见 6.2，`cbs-verify-files` 已接进
    `assemble-cbs-store.ps1`）；真正把文件复制也包进 KTM（`CreateFileTransacted`）没有做，
