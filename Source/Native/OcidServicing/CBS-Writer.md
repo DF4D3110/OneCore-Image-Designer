@@ -808,3 +808,52 @@ WinSxS 里没有 `ntoskrnl.exe` 时用 `--os-build` 明说。
 `root_info.json`）→ `ocid-assemble.ps1 -ImageRoot <挂载点> -InputsDir <输入> -AutoOverrides`。
 若差额集中在某一整类值（例如所有 `f!`、所有 `S256H`），先核对打印出来的档位是否对得上这张
 镜像的世代，再决定是补一条规则还是当安装历史写进覆盖表。
+
+## 10. PCM 生成器（`cbs-pcm-build`）：当前状态与残差（2026-10-20）
+
+两个语料的整文件（T4）命中率：
+
+| 语料 | 对 | T1 槽数 | T2 type+len | T3 载荷 | T4 整文件 |
+| --- | --- | --- | --- | --- | --- |
+| 6.3.9600（2,784 对） | 2,784 | 2,774（99.6%） | 2,773（99.6%） | 2,592（93.1%） | **2,592（93.1%）** |
+| 6.2.8419 route9（2,757 对） | 2,757 | 2,755（99.9%） | 2,755（99.9%） | 2,753（99.9%） | **2,753（99.9%）** |
+
+9600 的 192 份未命中由 `E:\ocid_verify\pcm9600\_b0split.py` 分诊（对每份把 `b0_extra`
+0..7 全试一遍）：**171 份只差文档根元素记录的 `b0` bit4..6**（真机未初始化栈字节，见下），
+**21 份有真实内容差**。所以 9600 的"可推导上限"是 **2,763 / 2,784（99.2%）**。
+
+### 10.1 本轮新解出并已实现的规则
+
+| 规则 | 提交 |
+| --- | --- |
+| t10（type 10）行序 = `IdentHash(...)` 低 32 位升序（全语料 642 张多行表 642/642） | `ff2af92` |
+| `<signatureDescriptor DRMLevel=>` → 8B `{flags,DRMLevel}`（flags.bit0，9 份 INF） | `0dc977b` |
+| `<instrumentation>` 每子节点一条 `{uidx}`；`<counters>` 用 GUID `218a49b1-0504-4959-adaa-7e78686acfbe`；68B 文档记录 `[14]` = resourceType 依赖序号（无则 −1）；根身份缺 language 时 flags |= 0x10 | `03672e4` |
+| `REG_NONE` 值类型 = 0；依赖 `language="*"` 是清单级（全表生效 0x10）；无 sdd 的 `<directory>` ref = −1 | `67c62ab` |
+| `<fveUpdateAI>` 三条记录：4B interned `fveCommand`、cache GUID `bacf4a08-714f-4d8a-a69a-fe4e9c8ce62d`、注册键 35 的 t9 表 | `292112b` |
+| `<registryKeys>` 只登记**带 `perUserVirtualization`** 的直接子键，一条 uidx 数组记录 + cache GUID `a39bfc2e-d678-8c45-ac19-0b5b6bdae296`（注册键 46） | `3f150c4` |
+| `<installerRegistrations>`：每个 `<installerRegistration>` 一条 28B `{0,-1,-1,-1,2,-1,0}`，`factoryClsid` 进 GUID 表，注册键 3 的 t8 表登记到该 28B 槽，文件名先于 sdd 入池 | `6468de6` |
+| `<genericCommands>` 按 `install` 属性分组，每组一条 uidx 数组记录，位置在 migration 之后、sppInstaller 之前；GUID 安装 `104aa381-…` / 卸载 `5dfd45c1-…`；t8 的 `f0` = 该行 GUID 的 `Data1` 且按它升序（≥7 行才落盘） | `79a323a` |
+| t2 字符串槽的 `SitOrder` 哈希用**码点哈希**（UTF-8 解码成码点后 4 路 65599，不折大小写），不是字节哈希（含非 ASCII 的 6 份） | `45e0c01` |
+| 20B `<directory>` 记录按 20B 内容去重（重叠的 `<directory>` refs 共享一条） | `45e0c01` |
+| `<memberships>`：每个 `<categoryInstance>` 各一条 8B `{uidx,-1}`（按内容去重），t9 按 `subcategory` 分组、`f1` = 该 8B 记录在发射序中的序号（0 起、去重前计数），同一 membership 再发一张 t6（`f0=Hash64(subcategory)&kM32`） | `45e0c01` |
+| `<serviceData>` 只发一条 cache 记录，内容 = 全部 serviceData 元素的 uidx 数组，GUID `ad04d551-6848-4c46-a504-e6cc8a210a97` | `45e0c01` |
+
+### 10.2 仍不可推导（已用全语料证据确认，不写"猜规则"的补丁）
+
+* **MdDl 根元素记录 `b0` bit4..6**：实测同一 `(min,max)` 组合在不同样本上给出不同值
+  （`_b0root.py`：`mn=8,mx=9` 的样本出现过 bit4 和 bit1；`mn=8,mx=9` 与 `mn=8,mx=15`
+  各样本 bit 分别 4/1 和 7）⇒ 真机是未初始化栈字节，只能当 `b0_extra` 输入。
+  `cbs-pcm-build` 的第 3 个参数就是它；**不要**用 `min/max` 之类去拟合。
+* **f0 撞车的行序**（9600 剩 5 份：`00852`/`01220`/`01344`/`01897`/`00611`）：
+  `_tiescan.py` 扫全语料，每组撞车内部单调、组与组之间方向不一致；这是 MSVC `std::sort`
+  在未知输入序上的确定性打乱，输入向量不可观测 ⇒ 不追。
+* **`01286`/`01287`（common-controls）的 4 张 t4/t5 表**：27/29 个 `<windowClass>` 名 +
+  4 张 `{-1, id1, id2}` 三元组表（64/64/52/52 B）+ 注册键 8，语义未定（`+29`/`+31` 槽）。
+* **`02463` 的 membership 组序**：4 个 subcategory 组的发射序不是文档序、也不是任何
+  哈希升降序（`t6` 的 `f1` 映射 LocalService=1/netsvcs=2/LSNR=3/NetworkService=4）。
+
+复现脚本：`E:\ocid_verify\pcm9600\run9600.py`（全量）、`_mk.py <tag…>`（现编对拍）、
+`_fams.py` / `_b0split.py`（分诊）、`_b0root.py`（b0 证据）、`_tiescan.py`（撞车扫描）、
+`_ir2.py` / `_tp.py` / `_sl.py` / `_hex.py`（逐槽/逐表/逐字节）。`run9600.py` 写
+`built/` 与 `fails.json`，**不能并发跑**。
