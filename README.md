@@ -166,14 +166,16 @@ WU 的 container CAB（条目是数字 id，真实文件名与 `PA30` delta 都�
 `PA30` 的基取自同柜另一条目的内容（清单只记目标哈希、不记基是哪一条，所以按内容逐一试并用清单哈希
 校验）。`PA30` 补丁由自研解码器（`Source/Managed/OcidCabinet/Delta/`，原生版
 `Source/Native/OcidServicing/src/Delta.cpp`）应用；只有差分体是 PE（`fileType != 1`）或少数多格式
-补丁时仍借 `msdelta.dll!ApplyDeltaB`，
-是自研 delta 解码器落地前的过渡实现。selfupdate 容器包按清单还原出 696 个文件，与 `expand.exe`
+补丁时仍借 `msdelta.dll!ApplyDeltaB` 作过渡回退（`fileType == 1` 的 RAW 补丁已全部自研，
+22,167 份 DCM 清单逐字节一致、计划哈希与 msdelta 结果相同）。selfupdate 容器包按清单还原出 696 个文件，与 `expand.exe`
 的输出逐个 SHA-256 相同；`dummyrepairpackage_*.cab`（清单用 SHA-256、载荷为空）同样一致。
 
-容器层仍有一类包超出读取器，`Services/CabExtraction.cs` 会把它判为不支持并回退 `expand.exe`：
-sparse CAB（`iFolder` 取 `0xFFFD/0xFFFE/0xFFFF` 的分段文件约定）；多卷包同样回退。桌面侧其它解包
-路径（`CabHelper`、`UpdatePackageService`、`DeviceLayoutService`、`CbsBuildService`、
-`CbsBuildViewModel`）都已改为进程内解包。
+容器层仍有一类包超出读取器：sparse CAB（`iFolder` 取 `0xFFFD/0xFFFE/0xFFFF` 的分段文件约定）
+与多卷包。桌面侧现在**完全不调用 `expand.exe`**——`Services/CabExtraction.cs` 遇到这类包直接抛
+`NotSupportedException`，`CabHelper`、`UpdatePackageService`、`DeviceLayoutService`、
+`CbsBuildService`、`CbsBuildViewModel` 都按失败报错，而不是偷偷退回系统组件。现有全部语料
+（8400 repair content、16299 驱动包、container CAB、系统 servicing 包）都没有触发这条路径；
+`expand.exe` 只在离线测试里作为独立真值 oracle 使用。
 
 CAB 也可以脱离主程序单独使用：`Source/Managed/OcidCabinet.Tool/` 构建出 `ocid_cab.exe`，说明默认中文，
 命令名保持英文以便脚本调用：
@@ -341,7 +343,7 @@ SharpZipLib 与 XNA `LzxDecoder`。
    cab 的 MSZIP/LZX 解压也已自有（`Source/Managed/OcidCabinet`，见上），WU container CAB 的 `cix`
    清单还原也已接进读取器（`PA30` delta 由自研解码器应用，仅 PE 载荷与少数多格式补丁回退 `msdelta.dll`；
    该格式的反编译结论已整理在 `Source/Native/OcidServicing/Delta-Format.md`，解码器本身尚未实现）；
-   桌面侧默认进程内解包，只有 sparse CAB 与多卷包回退 `expand.exe`，不算能力缺口。
+   桌面侧全部解包都在进程内完成，不再调用 `expand.exe`；sparse CAB 与多卷包明确报不支持（现有语料未出现）。
 2. **安装历史类信息必须作为输入。** 有些值（`f256` 多段的段序、identity 文化大小写、`c!` 归属、
    catalog 选择、`MCP_*`/(default) 位图、现代 `f!` 的非 1 状态位）来自镜像的安装历史，不能从包集推导；
    `Extract-CbsInputs.ps1` 从参考镜像导出它们，`make-cbs-overrides.ps1` 生成覆盖表，组装时显式传入。

@@ -188,10 +188,12 @@ format itself has been reversed and written down in `Source/Native/OcidServicing
 layout, rift table, pseudo-LZX symbol stream); the decoder is not implemented yet.
 
 The remaining container-level gap is sparse CABs whose files are split with the `iFolder` =
-`0xFFFD/0xFFFE/0xFFFF` convention; multi-volume cabinets fall back too. `Services/CabExtraction.cs`
-reports those as unsupported so the callers keep using `expand.exe`; every other desktop extraction
-path (`CabHelper`, `UpdatePackageService`, `DeviceLayoutService`, `CbsBuildService`,
-`CbsBuildViewModel`) now decodes in-process.
+`0xFFFD/0xFFFE/0xFFFF` convention, plus multi-volume cabinets. The desktop application no longer calls
+`expand.exe` at all: `Services/CabExtraction.cs` throws `NotSupportedException` for those shapes and
+`CabHelper`, `UpdatePackageService`, `DeviceLayoutService`, `CbsBuildService` and `CbsBuildViewModel`
+report the failure instead of silently falling back to a Windows component. None of the corpora used
+here (8400 repair content, 16299 driver packages, container CABs, servicing cabinets) hits that path;
+`expand.exe` survives only as the independent oracle inside the offline tests.
 
 Cabinets can also be used on their own, outside the desktop app: `Source/Managed/OcidCabinet.Tool/`
 builds `ocid_cab.exe` (Chinese help by default; command names stay English so scripts can call them):
@@ -364,10 +366,10 @@ This is an active work in progress. Three things are worth stating plainly:
    the `WinSxS\ManifestCache` PCM/CDF encoder: its container layer already reproduces files exactly, the
    element-record tables are still being worked out. CAB decompression (MSZIP/LZX) is already
    self-contained in `Source/Managed/OcidCabinet`, and Windows Update container cabs (their `cix`
-   manifest and `PA30` deltas) are handled by the reader too — the delta application still borrows
-   `msdelta.dll` until the project-owned decoder lands. The desktop side decodes in-process by default
-   and only falls back to `expand.exe` for sparse CABs and multi-volume cabinets, which is not a
-   capability gap.
+   manifest and `PA30` deltas) are handled by the reader too, with the project-owned `PA30` decoder
+   (`Delta.cpp`, `OcidCabinet/Delta/`) applying `fileType == 1` (RAW) patches and only PE / multi-format
+   patches still borrowing `msdelta.dll` as a transitional fallback. The desktop side decodes in-process
+   and never calls `expand.exe`; sparse CABs and multi-volume cabinets are reported as unsupported.
 2. **Install-history information has to be supplied as input.** Some values (`f256` segment order,
    identity culture casing, `c!` attribution, catalog choice, `MCP_*` and version-node flag bits) come
    from the image's installation history and cannot be derived from a package set. `Extract-CbsInputs.ps1`

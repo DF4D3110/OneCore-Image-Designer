@@ -1,16 +1,15 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Text.RegularExpressions;
 
 namespace OneCore_Image_Designer.Services
 {
     /// <summary>
-    /// 轻量 CAB 读取器（列条目 + 抽单文件），优先走进程内的
-    /// <see cref="CabExtraction"/>；遇到它不支持的包（sparse / 多卷）再退回 expand.exe。
+    /// 轻量 CAB 读取器（列条目 + 抽单文件），完全走进程内的 <see cref="CabExtraction"/>，
+    /// 不再调用 Windows 自带的 <c>expand.exe</c>。sparse / 多卷包会明确抛
+    /// <see cref="NotSupportedException"/>，由调用方按失败处理。
     /// 结果按 CAB 路径缓存（LastWriteTime 参与键，文件变化自动失效）。
     /// </summary>
     public static class CabHelper
@@ -28,45 +27,9 @@ namespace OneCore_Image_Designer.Services
         {
             var mt = File.GetLastWriteTimeUtc(cab);
             if (_index.TryGetValue(cab, out var info) && info.Mtime == mt) return info;
-            info = new CabInfo { Mtime = mt, Entries = ListEntriesRaw(cab) };
+            info = new CabInfo { Mtime = mt, Entries = CabExtraction.List(cab) };
             _index[cab] = info;
             return info;
-        }
-
-        static List<(string, long)> ListEntriesRaw(string cab)
-        {
-            try { return CabExtraction.List(cab); }
-            catch { /* 回退 expand.exe */ }
-            return ListEntriesViaExpand(cab);
-        }
-
-        /// <summary>expand.exe -D 输出行: "path\to.cab: entryname"。</summary>
-        static List<(string, long)> ListEntriesViaExpand(string cab)
-        {
-            var list = new List<(string, long)>();
-            var psi = new ProcessStartInfo
-            {
-                FileName = "expand.exe",
-                Arguments = $"-D \"{cab}\"",
-                UseShellExecute = false, RedirectStandardOutput = true,
-                RedirectStandardError = true, CreateNoWindow = true,
-            };
-            try
-            {
-                using var p = Process.Start(psi);
-                if (p == null) return list;
-                string outp = p.StandardOutput.ReadToEnd();
-                p.WaitForExit(15000);
-                foreach (var line in outp.Split('\n'))
-                {
-                    int idx = line.IndexOf(".cab: ", StringComparison.OrdinalIgnoreCase);
-                    if (idx < 0) continue;
-                    string name = line.Substring(idx + 6).Trim();
-                    if (name.Length > 0) list.Add((name, 0));
-                }
-            }
-            catch { /* expand 不可用：调用方按失败处理 */ }
-            return list;
         }
 
         public static bool HasXmlEntries(string cab)
@@ -111,48 +74,9 @@ namespace OneCore_Image_Designer.Services
         public static byte[]? ExtractEntry(string cab, string entryName)
         {
             if (string.IsNullOrEmpty(entryName)) return null;
-
-            // 进程内优先：不落临时目录、不受 expand.exe 命名规则影响。
-            try
-            {
-                var bytes = CabExtraction.ReadEntry(cab, entryName);
-                if (bytes != null) return bytes;
-            }
-            catch { /* 不支持的容器：回退 expand.exe */ }
-
-            return ExtractEntryViaExpand(cab, entryName);
-        }
-
-        static byte[]? ExtractEntryViaExpand(string cab, string entryName)
-        {
-            try
-            {
-                string tmp = Path.Combine(Path.GetTempPath(),
-                    "icd_cab_" + Guid.NewGuid().ToString("N").Substring(0, 8));
-                Directory.CreateDirectory(tmp);
-                try
-                {
-                    var psi = new ProcessStartInfo
-                    {
-                        FileName = "expand.exe",
-                        Arguments = $"-F:\"{entryName}\" \"{cab}\" \"{tmp}\"",
-                        UseShellExecute = false, RedirectStandardOutput = true,
-                        RedirectStandardError = true, CreateNoWindow = true,
-                    };
-                    using var p = Process.Start(psi);
-                    p?.WaitForExit(20000);
-                    if (p != null && p.ExitCode != 0) return null;
-
-                    // expand 可能保留目录结构：按条目基名找
-                    string baseName = Path.GetFileName(entryName);
-                    var hit = Directory.GetFiles(tmp, "*", SearchOption.AllDirectories)
-                        .FirstOrDefault(f => Path.GetFileName(f).Equals(baseName,
-                            StringComparison.OrdinalIgnoreCase));
-                    return hit != null ? File.ReadAllBytes(hit) : null;
-                }
-                finally { try { Directory.Delete(tmp, true); } catch { } }
-            }
-            catch { return null; }
+            try { return CabExtraction.ReadEntry(cab, entryName); }
+            catch (NotSupportedException) { return null; }
+            catch (InvalidDataException) { return null; }
         }
     }
 }

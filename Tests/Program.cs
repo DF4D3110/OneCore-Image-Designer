@@ -1445,7 +1445,7 @@ static void CabinetDecompression()
 // compares that path with the Windows cabinet API via expand.exe on real packages; the corpora
 // live outside the repository, so the test is opt-in through environment variables and prints a
 // skip line otherwise. OCID_UNSUPPORTED_CAB may point at a sparse package the in-process reader
-// must still refuse, so callers fall back to expand.exe instead of getting truncated payloads.
+// must still refuse instead of returning truncated payloads (the desktop no longer falls back to expand.exe).
 static void CabExtractionAgainstExpand()
 {
     string? cabDir = Environment.GetEnvironmentVariable("OCID_CAB_TEST_DIR");
@@ -1471,7 +1471,7 @@ static void CabExtractionAgainstExpand()
     foreach (string cab in Directory.EnumerateFiles(cabDir, "*.cab")
                                  .OrderBy(f => new FileInfo(f).Length))
     {
-        // Sparse cabinets need expand.exe; container cabinets are handled in-process now.
+        // Sparse cabinets are refused (expand.exe is only used here as the test oracle); container cabinets are handled in-process.
         if (!CabExtraction.IsSupported(cab)) continue;
 
         string root = NewTempDirectory();

@@ -110,40 +110,11 @@ namespace OneCore_Image_Designer.Services
 
                 try
                 {
-                    // 先用进程内 CAB 读取器；sparse / 多卷包再退回 expand.exe。
-                    bool expanded = CabExtraction.TryExtractAll(cabPath, tempDir, out string cabError);
-                    if (expanded)
-                    {
-                        Log($"进程内解包完成: {Path.GetFileName(cabPath)}");
-                    }
-                    else
-                    {
-                        Log($"进程内解包不可用（{cabError}），回退 expand.exe");
-
-                        var startInfo = new System.Diagnostics.ProcessStartInfo
-                        {
-                            FileName = "expand.exe",
-                            Arguments = $"-F:* \"{cabPath}\" \"{tempDir}\"",
-                            UseShellExecute = false,
-                            RedirectStandardOutput = true,
-                            RedirectStandardError = true,
-                            CreateNoWindow = true
-                        };
-
-                        Log($"执行命令: expand.exe -F:* \"{cabPath}\" \"{tempDir}\"");
-
-                        using var process = System.Diagnostics.Process.Start(startInfo);
-                        var output = process?.StandardOutput.ReadToEnd();
-                        var error = process?.StandardError.ReadToEnd();
-                        process?.WaitForExit();
-                        var exitCode = process?.ExitCode ?? -1;
-
-                        Log($"expand.exe 退出码: {exitCode}");
-                        if (!string.IsNullOrEmpty(output))
-                            Log($"expand输出:\n{output}");
-                        if (!string.IsNullOrEmpty(error))
-                            Log($"expand错误:\n{error}");
-                    }
+                    // 全部走进程内 CAB 读取器；不支持的包（sparse / 多卷）直接报错，
+                    // 不再回退 Windows 自带的 expand.exe。
+                    if (!CabExtraction.TryExtractAll(cabPath, tempDir, out string cabError))
+                        throw new InvalidOperationException($"解 CAB 失败：{cabError}");
+                    Log($"进程内解包完成: {Path.GetFileName(cabPath)}");
 
                     // 列出解压后的所有文件
                     var allFiles = Directory.GetFiles(tempDir, "*", SearchOption.AllDirectories);

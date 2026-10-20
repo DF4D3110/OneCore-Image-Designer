@@ -98,7 +98,7 @@ namespace OneCore_Image_Designer.Services
         {
             string exDir = Path.Combine(tempRoot, "p" + ci);
             Directory.CreateDirectory(exDir);
-            // 展开整个 cab（复用 expand.exe，与 CabHelper 同路）
+            // 展开整个 cab（复用进程内 CabExtraction，与 CabHelper 同路）
             if (!ExpandCab(cab, exDir, r.Log)) { r.FilesMissing++; return; }
 
             var mum = Directory.GetFiles(exDir, "*.mum", SearchOption.AllDirectories).FirstOrDefault()
@@ -300,7 +300,8 @@ namespace OneCore_Image_Designer.Services
 
         static bool ExpandCab(string cab, string dest, List<string> log)
         {
-            // 进程内读取器优先；sparse / 多卷包退回 expand.exe。
+            // 全部走进程内读取器；不支持的包（sparse / 多卷）直接记为失败，
+            // 不再回退 Windows 自带的 expand.exe。
             try
             {
                 CabExtraction.ExtractAll(cab, dest);
@@ -308,20 +309,9 @@ namespace OneCore_Image_Designer.Services
             }
             catch (Exception ex)
             {
-                log.Add($"  进程内解包不可用（{ex.Message}），回退 expand.exe");
+                log.Add($"  解包失败（{ex.Message}）");
+                return false;
             }
-
-            try
-            {
-                var psi = new System.Diagnostics.ProcessStartInfo("expand.exe",
-                    $"-F:* \"{cab}\" \"{dest}\"")
-                { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
-                using var p = System.Diagnostics.Process.Start(psi);
-                p!.WaitForExit(120_000);
-                return Directory.GetFiles(dest, "*", SearchOption.AllDirectories).Length > 0
-                       || Directory.GetDirectories(dest).Length > 0;
-            }
-            catch (Exception ex) { log.Add("expand 失败: " + ex.Message); return false; }
         }
     }
 }

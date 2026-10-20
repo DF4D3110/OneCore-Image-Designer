@@ -14,7 +14,7 @@ namespace OneCore_Image_Designer.Services
     /// 更新包解压（MSUpdateExtractor 的 C# 等价能力）。
     ///
     /// 【为什么不需要照搬它的 C++】原项目内嵌 libmspack 来解 CAB。实测
-    /// **Windows 自带的 `expand.exe` 就能列出并解出这些 CAB**，因此完全不必引入
+    /// 这里的 CAB 由进程内读取器（OcidCabinet）列出并解出，不依赖 Windows 的 `expand.exe`；
     /// 第三方 C++ 解码器，也不会有许可牵连。
     ///
     /// 【支持的包布局】（与 MSUpdateExtractor 的 README 一致）
@@ -162,7 +162,7 @@ namespace OneCore_Image_Designer.Services
         }
 
         // ────────────────────────────────────────────────────────────────
-        // CAB 解出（进程内读取器优先；sparse / 多卷包退回 expand.exe）
+        // CAB 解出（全部走进程内读取器，不再调用 expand.exe）
         // ────────────────────────────────────────────────────────────────
 
         /// <summary>列出 CAB 内容。</summary>
@@ -175,21 +175,10 @@ namespace OneCore_Image_Designer.Services
                 var raw = string.Join("\n", list.Select(e => $"{cabPath}: {e.Name}"));
                 return (true, entries, raw);
             }
-            catch (Exception ex) { _ = ex; }
-
-            var fallbackEntries = new List<string>();
-            var (ok, outp) = RunExpand($"-D \"{cabPath}\"");
-            foreach (var raw in outp.Split('\n'))
+            catch (Exception ex)
             {
-                string l = raw.Trim();
-                // 形如：<cabpath>: <name>
-                int idx = l.LastIndexOf(": ", StringComparison.Ordinal);
-                if (idx < 0 || l.StartsWith("Microsoft", StringComparison.OrdinalIgnoreCase)) continue;
-                if (l.Contains("files total")) continue;
-                string name = l[(idx + 2)..].Trim();
-                if (name.Length > 0) fallbackEntries.Add(name);
+                return (false, new List<string>(), $"列 CAB 失败：{ex.Message}");
             }
-            return (ok, fallbackEntries, outp);
         }
 
         /// <summary>把 CAB 全部解到 outDir。</summary>
@@ -200,29 +189,10 @@ namespace OneCore_Image_Designer.Services
                 CabExtraction.ExtractAll(cabPath, outDir);
                 return (true, $"expanded {cabPath} -> {outDir}");
             }
-            catch (Exception ex) { _ = ex; }
-
-            Directory.CreateDirectory(outDir);
-            return RunExpand($"-F:* \"{cabPath}\" \"{outDir}\"");
-        }
-
-        static (bool ok, string raw) RunExpand(string args)
-        {
-            try
+            catch (Exception ex)
             {
-                string exe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "expand.exe");
-                if (!File.Exists(exe)) exe = "expand.exe";
-                var psi = new ProcessStartInfo(exe, args)
-                {
-                    UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
-                    CreateNoWindow = true
-                };
-                using var p = Process.Start(psi)!;
-                string o = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
-                p.WaitForExit(30 * 60 * 1000);
-                return (p.ExitCode == 0, o);
+                return (false, $"解 CAB 失败：{ex.Message}");
             }
-            catch (Exception ex) { return (false, ex.Message); }
         }
 
         // ────────────────────────────────────────────────────────────────

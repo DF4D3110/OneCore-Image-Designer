@@ -12,7 +12,7 @@ namespace OneCore_Image_Designer.Services
     /// WU container 包（内含 <c>_manifest_.cix.xml</c>，条目按 id 编号、真实名字与 PA30 delta
     /// 都在清单里）由 <c>Cabinet.ContainerCab</c> 按清单还原；sparse 包（同一文件拆成多条
     /// CFFILE，续段用 iFolder 0xFFFD..0xFFFF 标记）与多卷包仍超出本读取器能力，会抛
-    /// <see cref="NotSupportedException"/>，由调用方退回 <c>expand.exe</c>。
+    /// <see cref="NotSupportedException"/>，由调用方按失败处理（桌面侧不再调用 <c>expand.exe</c>）。
     /// </summary>
     public static class CabExtraction
     {
@@ -114,7 +114,7 @@ namespace OneCore_Image_Designer.Services
 
         /// <summary>
         /// sparse 包的续段用 iFolder 0xFFFD..0xFFFF 标记，本读取器不拼分段文件，必须交给
-        /// expand.exe。container 包已由 <c>ContainerCab</c> 支持，不再算不支持。
+        /// 不支持的包。container 包已由 <c>ContainerCab</c> 支持，不再算不支持。
         /// </summary>
         static bool IsUnsupported(Cabinet.Cabinet cab, out string reason)
         {
