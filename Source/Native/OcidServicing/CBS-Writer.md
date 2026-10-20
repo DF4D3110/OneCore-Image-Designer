@@ -502,9 +502,21 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
      | 6 | `CReferenceIdentityTableTraits` |
      | 19 / 20–50 / 201 等整数表 | `CUlongTableTraits` |
 
-     即 9600 那两类差异的本质是**字符串表的条目集合/顺序**（`type 10` 是 case-sensitive 串表，
-     `type 1` 是 case-insensitive 串表），下一轮从 `CCdfTableBuilder<CStringTable*>::BuildTableIntoBlob`
-     与该表的 `Compare` 入手即可。
+     `type 10` 差异的直接原因已经逆到（2026-10-20，wcpwork 库）：
+
+     - `CCdfTableBuilder<CStringTableCaseSensitive>::BuildTableIntoBlob`（RVA **0x9EE15**）在写表之前
+       先 `BUCL::Implementation::QuickSort(TableEntries, SortCompare)`，排序键是每行第一个 dword；
+     - `SortCompare`（RVA **0x9F710**）的实体只有一句：
+       `result = *a2 != *a1 ? (*a1 < *a2 ? -1 : 1) : 0`——**按 f0 升序**；
+     - 载荷格式（与我们的 `PcmEncodeRecordTable` 一致）：`u32 header = (count<<8)|flags`，
+       `flags&0x10` = f1 用 u16、`flags&0x20` = f2 用 u16、`flags&0x40` = count<7（此时 **f0 数组不落盘**），
+       然后 f0 数组（仅 count≥7）、f1 数组（4 字节对齐）、f2 数组。
+
+     这解释 9600 的 `type 10` 残差：差异样本全是 `count=2/3/4`（`0x270/0x370`），**f0 不落盘**，
+     而我们的行序来自 `subHash`（`PcmBuild.cpp` 的 type-10 分支按 `subHash` 排、`f0` 填的是
+     `Hash64(to_string(f1))`），真机是「按自己的 f0 排」。要复现就得知道真机给这些行填的 f0 是什么：
+     下一步反编译 `GeneratePCM`（RVA 0x976AD，已导出 `decomp_wcp_000976ad.c`）里 add 到 section-10 表的
+     调用点，看 f0 取自哪个 id（字符串 id / uidx / 父键），再据此改 `PcmBuild.cpp` 的行序。
 2. 覆盖表瘦身：第 4 节剩下的行已逐条试过推导（f256 段序试了架构/文化/CF/组件键哈希序，
    只能解释 56/60 的顺序且方向不定；CT 的归属包不在 `.mum` 声明集合里）⇒ 保留为输入。
    16299 的 865 行里最大一块是 `Drivers` 台账的 14 条虚拟驱动 + identity 71 条历史写法。
