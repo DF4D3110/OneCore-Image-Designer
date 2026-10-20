@@ -1819,6 +1819,9 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     }
     // <bfsvc> 的 8B 记录 {Flags, InternString(Source)}：真机在**元素记录末尾、
     // MdHd 之前**发射（16299 wcp 的 CCdfManifestBuilder::AddBfsvc 反编译）。
+    // key-33 表（CUlong 两列）收集 `(uidx, 记录槽号)`：9600 的 00044/00024 实测
+    // 真机 (96,7)/(129,11) 与上面的 uidx / 槽号逐一对应。
+    std::vector<Row> bfsvcRows;
     {
         const char* dbg = std::getenv("OCID_PCM_DEBUG_BFSVC");
         for (std::size_t i = 0; i < elems.size(); ++i) {
@@ -1826,9 +1829,14 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             const std::string flags = Attr(AttrsOf(elems[i]), "Flags");
             const std::string src = Attr(AttrsOf(elems[i]), "Source");
             const std::int32_t sid = inter.String(src);
-            (void)dbg;
+            if (dbg != nullptr) {
+                std::fprintf(stderr, "bfsvc flags=%s uidx=%u sid=%d nodes=%zu\n",
+                             flags.c_str(), elems[i].uidx, sid, elems.size());
+            }
             // 真机在同一个位置发这个 8B 记录（16299 wcp 的
             // CCdfManifestBuilder::AddBfsvc：{Flags, InternString(Source)}）。
+            bfsvcRows.push_back(Row{0u, elems[i].uidx,
+                                    static_cast<std::uint32_t>(slots.size())});
             AppendSlot(slots, 1,
                        PackU32({static_cast<std::uint32_t>(std::strtoul(flags.c_str(), nullptr, 10)),
                                 static_cast<std::uint32_t>(sid)}));
@@ -2287,6 +2295,16 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             if (t + 1 == tbls.size()) reg[key] = slots.size();
             slots.push_back(std::move(tbls[t]));
         }
+    }
+
+    // ---- 8b. key-33 表（CUlong 两列：bfsvc 记录的 (uidx, 槽号)）---------
+    // 9600 真机 00044/00024：表内容 `(96,7)` / `(129,11)`，与 bf svc 元素的
+    // uidx 及其 8B 记录槽号完全一致；注册表里 key 33 指向该槽。
+    if (!bfsvcRows.empty()) {
+        std::string payload;
+        if (!MakeRecordTable(9, bfsvcRows, false, payload, error)) return false;
+        reg[33] = slots.size();
+        AppendSlot(slots, 9, payload);
     }
 
     // ---- 9. key → slot 注册表（无 key 的 type-9 表）----------------------
