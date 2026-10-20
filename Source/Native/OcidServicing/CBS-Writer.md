@@ -560,9 +560,16 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
      `<rescache>`）的属性值按普通属性 interning 一次，而不是只写进元素记录。
 
      453 份未过样本按清单特征分类（`E:\ocid_verify\pcm9600\featclass.py`）：
-     `languagePack` 族 168、`bfsvc/rescache` 族 89、**我们的 DCM 解码直接失败的 82**、
+     `languagePack` 族 168、`bfsvc/rescache` 族 89、**82 份是「非 DCM 的普通 XML 清单」**
+     （`cbs-dcm-decode` 对其报 `not a DCM manifest`，属分类脚本把「解码器拒绝」误记成
+     「DCM 解码失败」，实际走的就是普通 XML 路径，差异按下面同一套内容规则处理）、
      `categoryMembership+file` 61、无特殊元素 16、`signatureInfo/infFile` 等其余 37。
      即 9600 残差不是一条规则，而是五六个独立形态；其中 `bfsvc` 族已有上面这条明确机制。
+     抽样 `…c..-controls.resources_6595b64144ccf1df_5.82.9600.16384_ar-sa_…`（`01966.pcm`）：
+     46 槽/4,564 B 全同，只差 slot 15 的 `type 10` 18 B 记录——真机
+     `7003 0000 0100 0200 0300 0000 0a00 0c00 0e00` vs 我方 `7003 0000 0100 0300 0200 0000 0a00 0e00 0c00`，
+     本质是两行的 `(f1,f2)` 配对不同（真机 `(1,12),(2,14)`，我方 `(1,14),(3,12)`），
+     不是单纯排序 ⇒ 归入 t10/f1 语义耦合一类。
 
      **已修（提交 `b2f8e2c`）**：`<bfsvc>` 的 `Source` 属性现按普通属性做 string interning
      （`PcmBuild.cpp` 的 bfsvc 分支），`Flags` 不入池。效果：`02895.pcm` 的池/串 id/`type 9`/`type 10`
