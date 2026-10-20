@@ -99,6 +99,46 @@ std::uint64_t Hash64(const std::string& s) {
            static_cast<std::uint64_t>(lanes[0]) * 0x1E5FFFFFD27ull;
 }
 
+// Í¬ÉÏ£¬µ«°´ UTF-8 ±àÂëµÄÂëµã¶ø·Ç×Ö½ÚÉ¢ÁĞ£º·Ç ASCII ×Ö·û°´ Unicode Âëµã²ÎÓë£¬
+// ²»°Ñ A-Z ½µ³ÉĞ¡Ğ´¡£Ö»ÓĞ 00003/02995/03001/03002/02388/01091 µÄ×Ö·û´®À¸
+// Ë³Ğò¿¿ÕâÒ»Ìõ²ÅÓëÕæ»úÒ»ÖÂ¡£
+std::uint64_t Hash64CodePointsRaw(const std::string& s) {
+    std::uint32_t lanes[4] = {0, 0, 0, 0};
+    std::size_t i = 0, index = 0;
+    while (i < s.size()) {
+        const unsigned char c0 = static_cast<unsigned char>(s[i]);
+        std::uint32_t cp = 0;
+        std::size_t len = 1;
+        if (c0 < 0x80) {
+            cp = c0;
+        } else if ((c0 & 0xE0u) == 0xC0u && i + 1 < s.size()) {
+            cp = ((c0 & 0x1Fu) << 6) | (static_cast<unsigned char>(s[i + 1]) & 0x3Fu);
+            len = 2;
+        } else if ((c0 & 0xF0u) == 0xE0u && i + 2 < s.size()) {
+            cp = ((c0 & 0x0Fu) << 12) |
+                 ((static_cast<unsigned char>(s[i + 1]) & 0x3Fu) << 6) |
+                 (static_cast<unsigned char>(s[i + 2]) & 0x3Fu);
+            len = 3;
+        } else if ((c0 & 0xF8u) == 0xF0u && i + 3 < s.size()) {
+            cp = ((c0 & 0x07u) << 18) |
+                 ((static_cast<unsigned char>(s[i + 1]) & 0x3Fu) << 12) |
+                 ((static_cast<unsigned char>(s[i + 2]) & 0x3Fu) << 6) |
+                 (static_cast<unsigned char>(s[i + 3]) & 0x3Fu);
+            len = 4;
+        } else {
+            cp = c0;
+        }
+        lanes[index & 3u] = lanes[index & 3u] * 65599u + cp;
+        ++index;
+        i += len;
+    }
+    return static_cast<std::uint64_t>(lanes[3]) +
+           static_cast<std::uint64_t>(lanes[2]) * 0x1FFFFFFF7ull +
+           static_cast<std::uint64_t>(lanes[1]) * 0xFFFFFFDC00000051ull +
+           static_cast<std::uint64_t>(lanes[0]) * 0x1E5FFFFFD27ull;
+}
+
+
 // RtlHashEncodedLBlob over a UTF-16 LBlobï¼šæŒ‰"ç ç‚¹"å–‚ 4 è·¯ 65599ï¼ŒA..Z å…ˆé™å°å†™ã€‚
 // Python çš„ h64_u16 é€ç ç‚¹è¿­ä»£ï¼›manifest é‡Œå…¨æ˜¯ BMP å­—ç¬¦ï¼Œè¿™é‡ŒæŒ‰ UTF-8 ç ç‚¹è§£ç å³å¯ã€‚
 std::uint64_t Hash64CodePoints(const std::string& s) {
@@ -1549,6 +1589,10 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     // æ¯ä¸ª <categoryMembership> å„æœ‰ä¸€æ¡ 8B è®°å½• {categoryInstance uidx, -1}ï¼Œ
     // ä¸æ˜¯æ•´ä¸ª <memberships> å…±ç”¨ä¸€æ¡ï¼ˆ02531ï¼šæ§½ 7/8/9 = -1/84/128ï¼‰ã€‚
     std::unordered_map<std::uint32_t, std::size_t> membSlotByElem;
+    std::unordered_map<std::uint32_t, std::uint32_t> membOrd;  // instance uidx -> ordinal
+    std::unordered_map<std::uint32_t, std::uint32_t> membOrdByElem;  // empty membership
+    std::uint32_t membOrdNo = 0;
+    std::unordered_map<std::uint32_t, std::size_t> instSlot;  // categoryInstance uidx -> 8B slot
     std::vector<Row> dirRows;                   // key 17
     std::vector<DirObj> dirObjs;
     std::vector<Row> sddRows;                   // key 210
@@ -1557,6 +1601,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     std::unordered_map<std::int32_t, std::size_t> strValSlot;    // interned value id â†’ 4B slot
     std::unordered_map<std::int32_t, std::size_t> sddSlot;       // interned sdd name id
     std::unordered_map<std::int32_t, std::size_t> dirSddSlot;
+    std::unordered_map<std::string, std::size_t> dirRecSlot;
     std::uint32_t hseq = (hasTrust || gacEl >= 0) ? 1u : 0u;
     std::unordered_map<std::string, std::uint32_t> digestBlobSlot;  // åŸå§‹æ‘˜è¦å­—èŠ‚ â†’ 32B æ§½å·
     std::unordered_map<std::uint32_t, std::uint32_t> sigBlobSlot;  // (flags,DRMLevel) â†’ blob id
@@ -1879,24 +1924,33 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             std::map<std::string, std::size_t> membSeen;
             for (std::uint32_t k : e.kids) {
                 if (elems[k].local != "categoryMembership") continue;
-                std::uint32_t ci = kNoId;
+                std::vector<std::uint32_t> cis;
                 for (std::uint32_t kk : elems[k].kids) {
-                    if (elems[kk].local == "categoryInstance") {
-                        ci = elems[kk].uidx;
-                        break;
+                    if (elems[kk].local == "categoryInstance") cis.push_back(elems[kk].uidx);
+                }
+                if (cis.empty()) {
+                    cis.push_back(kNoId);
+                    membOrdByElem[k] = membOrdNo++;
+                }
+                bool firstCi = true;
+                for (std::uint32_t ci : cis) {
+                    const std::string key8 = PackU32({ci, kNoId});
+                    auto it = membSeen.find(key8);
+                    if (it != membSeen.end()) {
+                        instSlot[ci] = it->second;
+                        if (ci != kNoId) membOrd[ci] = membOrdNo++;
+                        if (firstCi) membSlotByElem[k] = it->second;
+                        firstCi = false;
+                        continue;
                     }
+                    const std::size_t sl = slots.size();
+                    AppendSlot(slots, 1, key8);
+                    membSeen[key8] = sl;
+                    instSlot[ci] = sl;
+                    if (ci != kNoId) membOrd[ci] = membOrdNo++;
+                    if (firstCi) membSlotByElem[k] = sl;
+                    firstCi = false;
                 }
-                const std::string key8 =
-                    PackU32({ci, kNoId});
-                auto it = membSeen.find(key8);
-                if (it != membSeen.end()) {
-                    membSlotByElem[k] = it->second;
-                    continue;
-                }
-                const std::size_t sl = slots.size();
-                AppendSlot(slots, 1, key8);
-                membSeen[key8] = sl;
-                membSlotByElem[k] = sl;
             }
         } else if (e.local == "categoryMembership") {
             membElems.push_back(idx);
@@ -1936,19 +1990,28 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                     continue;
                 }
             }
-            const std::size_t dslot = slots.size();
             // æœ‰ sdd æ—¶ ref = é‚£ä¸€å¯¹ 8B sdd è®°å½•é‡Œ 8B è®°å½•çš„æ§½å·ï¼ˆé¦–æ¬¡å‡ºç°æ—¶æ­£å¥½
             // æ˜¯å‰ä¸€ä¸ªæ§½ï¼‰ï¼›**æ²¡æœ‰ sdd æ—¶æ˜¯çœŸæœºå†™ -1**ï¼Œä¸æ˜¯"å‰ä¸€ä¸ªæ§½"
             // ï¼ˆ02643/01113/02992 ä¸‰ä»½å…¨è¯­æ–™å”¯ä¸€çš„æ—  sdd ç›®å½•ï¼‰ã€‚
             const std::uint32_t ref =
                 haveSdd ? static_cast<std::uint32_t>(dirSddSlot[nid2]) : kNoId;
-            AppendSlot(slots, 1,
-                       PackU32({(Attr(dat, "owner") == "true" || Attr(dat, "owner") == "yes" ||
-                                 Attr(dat, "owner") == "1")
-                                    ? 1u
-                                    : 0u,
-                                0u, kNoId, ref,
-                                AttrFlagsFromText(Attr(dat, "attributes"), 0x080u)}));
+            const std::string drec =
+                PackU32({(Attr(dat, "owner") == "true" || Attr(dat, "owner") == "yes" ||
+                          Attr(dat, "owner") == "1")
+                             ? 1u
+                             : 0u,
+                         0u, kNoId, ref,
+                         AttrFlagsFromText(Attr(dat, "attributes"), 0x080u)});
+            // Õæ»ú°´**¼ÇÂ¼ÄÚÈİ**È¥ÖØ£º01113 Èı¸öÎŞ sdd Ä¿Â¼ÄÚÈİÏàÍ¬ -> Ö»·¢Ò»Ìõ
+            // 20B ¼ÇÂ¼£¨02992 ËÄ¸ö owner=true µÄÎŞ sdd Ä¿Â¼Í¬Àí£©£»02643 Ö»ÓĞÒ»¸ö¡£
+            auto dr = dirRecSlot.find(drec);
+            if (dr != dirRecSlot.end()) {
+                dirObjs.push_back(DirObj{dr->second, idx});
+                continue;
+            }
+            const std::size_t dslot = slots.size();
+            AppendSlot(slots, 1, drec);
+            dirRecSlot[drec] = dslot;
             dirObjs.push_back(DirObj{dslot, idx});
         } else if (e.local == "string" && strPath.find(idx) != strPath.end()) {
             const std::string val = Attr(AttrsOf(e), "value");
@@ -2085,6 +2148,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     std::size_t migrSlot = kNoId;
     bool mofSeen = false;
     bool fwSeen = false;
+    bool sdSeen = false;
     // <genericCommands><genericCommand â€¦/>ï¼šçœŸæœºæŒ‰ **install å±æ€§åˆ†ç»„**ï¼Œæ¯ç»„å‘ä¸€æ¡
     // è®°å½• = è¯¥ç»„å­å‘½ä»¤çš„ uidx æ•°ç»„ï¼ˆå®‰è£…æ€ä¸€ç»„ã€å¸è½½æ€ä¸€ç»„ï¼Œç»„å†…æŒ‰æ–‡æ¡£åºï¼‰ï¼š
     // 01413ï¼ˆ1+1 æ¡ï¼‰å¾—åˆ° 4B `{33}` + 4B `{37}`ï¼›01879ï¼ˆ5+5 æ¡ï¼‰å¾—åˆ°ä¸¤æ¡ 20B
@@ -2187,6 +2251,18 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             cacheSlots.push_back(static_cast<std::uint32_t>(slots.size()));
             AppendSlot(slots, 1, record);
             recGuids.push_back(GuidBytes(kCacheGuidRegistryKeys));
+        } else if (ln == "serviceData") {
+            // <serviceData> È«×åºÏ³ÉÒ»Ìõ uidx ÁĞ±í²Û£¨02364 Á½¸öÊµÀı -> 8B {135,149}£©£¬
+            // ²»ÊÇÃ¿¸öÔªËØÒ»Ìõ 4B ¼ÇÂ¼£»t8 ÀïÒ²Ö»Õ¼Ò»ĞĞ¡£
+            if (sdSeen) continue;
+            sdSeen = true;
+            std::string record;
+            for (const Elem& w : elems) {
+                if (w.local == "serviceData") record += PackU32({w.uidx});
+            }
+            cacheSlots.push_back(static_cast<std::uint32_t>(slots.size()));
+            AppendSlot(slots, 1, record);
+            recGuids.push_back(GuidBytes(kCacheGuidServiceData));
         } else {
             const std::size_t slot = slots.size();
             cacheSlots.push_back(static_cast<std::uint32_t>(slot));
@@ -2363,30 +2439,60 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             std::vector<std::pair<std::uint32_t, std::size_t>> f1(membElems.size());
             std::vector<std::uint32_t> rowKey(membElems.size(), 0);
             for (std::size_t i : seq) {
-                std::vector<Row> l9;
-                l9.push_back(Row{0u, static_cast<std::uint32_t>(i),
-                                 static_cast<std::uint32_t>(membSlotByElem[membElems[i]])});
-                std::string l9payload;
-                if (!MakeRecordTable(9, l9, false, l9payload, error)) return false;
-                const std::uint32_t t9s = static_cast<std::uint32_t>(slots.size());
-                AppendSlot(slots, 9, l9payload);
-                const std::uint32_t t6s = static_cast<std::uint32_t>(slots.size());
-                std::string sub;
+                // åŒä¸€ membership å†…æŒ‰ <categoryInstance subcategory> åˆ†ç»„ï¼š
+                // æ¯ç»„ä¸€å¼  t9ï¼ˆf1=å…¨å±€ instance åºå·ï¼Œf2=8B membership è®°å½•æ§½ï¼‰ï¼Œ
+                // ç„¶åè¯¥ membership ä¸€å¼  t6ï¼ˆæ¯ç»„ä¸€è¡Œï¼šf0=Hash64(sub)ï¼Œf1=inter(sub)ï¼Œf2=t9 æ§½ï¼‰ã€‚
+                std::vector<std::uint32_t> cis;  // element indices (not uidx)
                 for (std::uint32_t kk : elems[membElems[i]].kids) {
-                    if (elems[kk].local == "categoryInstance") {
-                        sub = Attr(AttrsOf(elems[kk]), "subcategory");
-                        break;
-                    }
+                    if (elems[kk].local == "categoryInstance") cis.push_back(kk);
                 }
+                const bool noInst = cis.empty();
+                if (noInst) cis.push_back(0u);
+                std::unordered_map<std::uint32_t, std::uint32_t> instOrd;
+                for (std::uint32_t q = 0; q < static_cast<std::uint32_t>(cis.size()); ++q) {
+                    instOrd[cis[q]] = q;
+                }
+                std::vector<std::string> groupOrder;
+                std::map<std::string, std::vector<std::uint32_t>> groups;
+                for (std::uint32_t ci : cis) {
+                    std::string sub;
+                    if (!noInst) sub = Attr(AttrsOf(elems[ci]), "subcategory");
+                    if (groups.find(sub) == groups.end()) groupOrder.push_back(sub);
+                    groups[sub].push_back(ci);
+                }
+                std::vector<Row> t6rows;
+                for (const std::string& sub : groupOrder) {
+                    std::vector<Row> l9;
+                    for (std::uint32_t ci : groups[sub]) {
+                        std::size_t mslot = membSlotByElem[membElems[i]];
+                        if (!noInst) {
+                            const std::uint32_t cu = elems[ci].uidx;
+                            auto sit = instSlot.find(cu);
+                            if (sit != instSlot.end()) mslot = sit->second;
+                        }
+                        std::uint32_t f1v = 0;
+                        if (noInst) {
+                            auto mo = membOrdByElem.find(membElems[i]);
+                            if (mo != membOrdByElem.end()) f1v = mo->second;
+                        } else {
+                            auto mo = membOrd.find(elems[ci].uidx);
+                            if (mo != membOrd.end()) f1v = mo->second;
+                        }
+                        l9.push_back(Row{0u, f1v, static_cast<std::uint32_t>(mslot)});
+                    }
+                    std::string l9payload;
+                    if (!MakeRecordTable(9, l9, false, l9payload, error)) return false;
+                    const std::uint32_t t9s = static_cast<std::uint32_t>(slots.size());
+                    AppendSlot(slots, 9, l9payload);
+                    t6rows.push_back(Row{static_cast<std::uint32_t>(Hash64(sub) & kM32),
+                                         inter.StringEvenEmpty(sub), t9s});
+                }
+                std::stable_sort(t6rows.begin(), t6rows.end(),
+                                 [](const Row& a, const Row& b) { return a.f0 < b.f0; });
+                const std::uint32_t t6s = static_cast<std::uint32_t>(slots.size());
                 {
-                    // t6 çš„ f1 æ˜¯è¯¥ membership çš„ <categoryInstance subcategory>
-                    // å­—ç¬¦ä¸² idï¼›æ²¡æœ‰ categoryInstance / æ²¡æœ‰ subcategory æ—¶ä¸º
-                    // ç©ºä¸² idï¼ˆ02531: 15/16/17 = ''/AppMgmt/netsvcsï¼‰ã€‚
-                    std::vector<Row> rows;
-                    rows.push_back(Row{static_cast<std::uint32_t>(Hash64("") & kM32),
-                                       inter.StringEvenEmpty(sub), t9s});
                     std::string payload;
-                    if (!MakeRecordTable(6, rows, true, payload, error)) return false;
+                    if (!MakeRecordTable(6, t6rows, true, payload, error)) return false;
                     AppendSlot(slots, 6, payload);
                 }
                 f1[i] = {nDep + static_cast<std::uint32_t>(catRank[i]) + 1u, t6s};
@@ -2683,7 +2789,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
         std::vector<std::uint32_t> hashes;
         hashes.reserve(strs.size());
         for (const std::string& s : strs) {
-            hashes.push_back(static_cast<std::uint32_t>(Hash64(s) & kM32));
+            hashes.push_back(static_cast<std::uint32_t>(Hash64CodePointsRaw(s) & kM32));
         }
         const std::vector<std::size_t> order = SitOrder(hashes);
         const std::size_t base = slots.size();
