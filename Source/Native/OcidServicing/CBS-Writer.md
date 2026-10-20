@@ -548,6 +548,21 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
      `01341` 的行序差则与 `nameStringId`（24 vs 22）同向：疑似真机按 f0=串 id 降序/升序排列，
      待串池对齐后再验。⇒ 下一步应先复刻 `type 9` 的串池合并规则（按串来源/表分组），
      再回头验 `type 10` 行序。
+
+     **2026-10-20 更正（串池本身一致，缺的是一条 `type 2` 串槽）**：把 MdSp 串池
+     （`type 1` 槽里的 `MdHd…MdSp` 段，count 在 `MdSp+8`、串从 `MdSp+12` 起 NUL 分隔）两侧
+     逐串对比，`02895.pcm` **82 串完全相同**；真正的差异是 `type 2` 串槽少 1 条：
+     真机 27 条、我方 26 条，缺的是 **`$(runtime.windows)\boot`**——它来自清单末尾的
+     `<bfsvc xmlns="urn:schemas-microsoft-com:asm.v3" Flags="17" Source="$(runtime.windows)\boot" />`
+     的 `Source` 属性。我方把这个元素的属性写进了元素记录但**没有对它做 string interning**，
+     于是 `type 2` 少一条、所有串 id 整体后移 1（`type 9` 里真机 6 行含 `f1=33`，我方 5 行），
+     `type 10` 的 `nameStringId` 也就跟着差 1。⇒ 修复点是把 `<bfsvc>`（以及同类
+     `<rescache>`）的属性值按普通属性 interning 一次，而不是只写进元素记录。
+
+     453 份未过样本按清单特征分类（`E:\ocid_verify\pcm9600\featclass.py`）：
+     `languagePack` 族 168、`bfsvc/rescache` 族 89、**我们的 DCM 解码直接失败的 82**、
+     `categoryMembership+file` 61、无特殊元素 16、`signatureInfo/infFile` 等其余 37。
+     即 9600 残差不是一条规则，而是五六个独立形态；其中 `bfsvc` 族已有上面这条明确机制。
 2. 覆盖表瘦身：第 4 节剩下的行已逐条试过推导（f256 段序试了架构/文化/CF/组件键哈希序，
    只能解释 56/60 的顺序且方向不定；CT 的归属包不在 `.mum` 声明集合里）⇒ 保留为输入。
    16299 的 865 行里最大一块是 `Drivers` 台账的 14 条虚拟驱动 + identity 71 条历史写法。
