@@ -1254,6 +1254,12 @@ const char* const kCacheGuidFirewallRule = "698dce68ae269f4fbea750613e7ab5c1";
 // 56 项 kinds 表 idx=21 的 GUID（上面 wcp_x86.dll 0x101F35C8 直接读出的第 21 项）；
 // 02915 的头部出现过，元素 local 名未知（可能是 lodctrData 变体）。
 const char* const kCacheGuidLodctrDat = "9bcb3d9a96a7df41b45577eba6a1ec1a";
+// <genericCommands><genericCommand …/>：真机按 install 属性把子命令分两组，每组
+// 发一条 cache 记录（组内子命令的 uidx 数组，文档序）—— 01413（1+1 条）得到
+// 4B `{33}` + 4B `{37}`，01879（5+5 条）得到两条 20B。头部 GUID 表只有两串：
+// 安装态 104aa381-…，卸载态（install="false"）5dfd45c1-…。
+const char* const kCacheGuidGenInstall = "104aa38156426a4389d6794b97ca407c";
+const char* const kCacheGuidGenUninstall = "5dfd45c19b1b3847996164034a3da28f";
 
 bool IsCacheRecordElement(const std::string& local) {
     return local == "lodctr" || local == "bfsvc" || local == "fveUpdateAI" ||
@@ -1306,6 +1312,8 @@ std::string CacheGuid(const std::string& local) {
     if (local == "securityDescriptor") return kCacheGuidSecurityDescriptor;
     if (local == "taskScheduler") return kCacheGuidTaskScheduler;
     if (local == "firewallRule") return kCacheGuidFirewallRule;
+    if (local == "genericCommandInstall") return kCacheGuidGenInstall;
+    if (local == "genericCommandUninstall") return kCacheGuidGenUninstall;
     return std::string();
 }
 
@@ -1353,6 +1361,7 @@ const char* const kCacheGuidOrder[] = {
     "fveUpdateAI", "bfsvc", "instrumentation", "counters", "lodctr", "lodctrDat", "securityDescriptor",
     "serviceData", "rootDevices", "sppInstaller", "mof", "rescache",
     "taskScheduler", "timezoneresourceAI", "registryKeys", "firewallRule", "ngen",
+    "genericCommandUninstall", "genericCommandInstall",
 };
 
 int CacheGuidRank(const std::string& guid) {
@@ -2076,6 +2085,41 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     std::size_t migrSlot = kNoId;
     bool mofSeen = false;
     bool fwSeen = false;
+    // <genericCommands><genericCommand …/>：真机按 **install 属性分组**，每组发一条
+    // 记录 = 该组子命令的 uidx 数组（安装态一组、卸载态一组，组内按文档序）：
+    // 01413（1+1 条）得到 4B `{33}` + 4B `{37}`；01879（5+5 条）得到两条 20B
+    // `{0x3ed,0x3f1,0x3f5,0x3f9,0x3fd}` / `{0x401,0x406,0x40b,0x410,0x415}`。
+    // 位置在所有元素记录之后、68B 文档记录之前，并计入 key-666 表。
+    // 这些数组记录在真机里排在 migration 之后、sppInstaller 之前（01879 的
+    // 4B `{1201}`(migration) 在两条 20B 数组之前，`{1617}`(sppInstaller) 之后），
+    // 所以跟着 migration 那条一起发；清单里没有 migration 时退回到循环末尾。
+    std::vector<std::uint32_t> genInstall, genUninstall;
+    for (std::size_t i = 0; i < elems.size(); ++i) {
+        const Elem& e = elems[i];
+        if (e.local != "genericCommand") continue;
+        const std::string installAttr = Attr(AttrsOf(e), "install");
+        const bool uninstall = installAttr == "false" || installAttr == "no";
+        (uninstall ? genUninstall : genInstall).push_back(e.uidx);
+    }
+    bool genEmitted = false;
+    auto emitGenericCommands = [&]() {
+        if (genEmitted) return;
+        genEmitted = true;
+        if (!genInstall.empty()) {
+            std::string rec;
+            for (std::uint32_t v : genInstall) rec += PackU32({v});
+            cacheSlots.push_back(static_cast<std::uint32_t>(slots.size()));
+            recGuids.push_back(GuidBytes(kCacheGuidGenInstall));
+            AppendSlot(slots, 1, rec);
+        }
+        if (!genUninstall.empty()) {
+            std::string rec;
+            for (std::uint32_t v : genUninstall) rec += PackU32({v});
+            cacheSlots.push_back(static_cast<std::uint32_t>(slots.size()));
+            recGuids.push_back(GuidBytes(kCacheGuidGenUninstall));
+            AppendSlot(slots, 1, rec);
+        }
+    };
     for (std::size_t i : celist) {
         const Elem& e = elems[i];
         const std::string& ln = e.local;
@@ -2161,8 +2205,10 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                 recGuids.push_back(std::string()); // 占位，保持与 cacheSlots 对齐
             }
         }
+        if (ln == "migration") emitGenericCommands();
     }
     // 头部 GUID 表：去重后按静态 kinds 表顺序（不是发射序，也不是文档序）。
+    emitGenericCommands();
     {
         for (const std::string& g : recGuids) {
             if (g.empty()) continue;
@@ -2438,6 +2484,18 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             if (!MakeRecordTable(6, rows, true, payload, error)) return false;
             tbls.push_back(Slot{6, payload});
         } else if (key == 666 && !cacheRows.empty()) {
+            if (std::getenv("OCID_PCM_DEBUG_TIE") != nullptr) {
+                for (std::size_t g = 0; g < cacheGuids.size(); ++g) {
+                    std::fprintf(stderr, "CG %u %s d1=%08x\n",
+                                 static_cast<unsigned>(g), cacheGuids[g].c_str(),
+                                 GuidData1(cacheGuids[g]));
+                }
+                for (std::size_t i = 0; i < cacheSlots.size(); ++i) {
+                    std::fprintf(stderr, "CR %u slot=%u guid=%s\n",
+                                 static_cast<unsigned>(i), cacheSlots[i],
+                                 recGuids[i].c_str());
+                }
+            }
             // 真机行序 = 记录 GUID 的 Data1（前 4 字节小端）升序；f1 = 该 GUID 在
             // 头部 GUID 表里的下标，f2 = 记录槽。f0 只在 count>=7 落盘（语料里没有）。
             std::vector<std::size_t> order(cacheRows.size());
@@ -2457,7 +2515,8 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             rows.reserve(cacheRows.size());
             for (std::size_t i = 0; i < order.size(); ++i) {
                 const CacheRow& cr = cacheRows[order[i]];
-                rows.push_back(Row{static_cast<std::uint32_t>(i), cr.guidIdx, cr.slot});
+                // f0 = 该行 GUID 的 Data1（只有 count>=7 才落盘，00549 的 7 行真机�=逐行 Data1，升序）。
+                rows.push_back(Row{GuidData1(cacheGuids[cr.guidIdx]), cr.guidIdx, cr.slot});
             }
             std::string payload;
             if (!MakeRecordTable(8, rows, false, payload, error)) return false;
