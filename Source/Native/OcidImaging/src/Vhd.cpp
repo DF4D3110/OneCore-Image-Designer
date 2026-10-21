@@ -292,6 +292,41 @@ namespace imaging
         return true;
     }
 
+    // 安全约束：只允许对虚拟磁盘（VHD/VHDX）操作，检测到物理磁盘直接拒绝。
+    bool VhdEnsureVirtualDisk(const std::string& devicePath, std::string& error)
+    {
+        const std::wstring wide(devicePath.begin(), devicePath.end());
+        HANDLE disk = CreateFileW(wide.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                  nullptr, OPEN_EXISTING, 0, nullptr);
+        if (disk == INVALID_HANDLE_VALUE)
+        {
+            error = "只允许对虚拟磁盘操作，但无法打开设备：" + LastErrorText("CreateFileW");
+            return false;
+        }
+        STORAGE_PROPERTY_QUERY query{};
+        query.PropertyId = StorageDeviceProperty;
+        query.QueryType = PropertyStandardQuery;
+        STORAGE_DEVICE_DESCRIPTOR descriptor{};
+        DWORD returned = 0;
+        const BOOL ok = DeviceIoControl(disk, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query),
+                                        &descriptor, sizeof(descriptor), &returned, nullptr);
+        const DWORD code = ok ? 0 : GetLastError();
+        CloseHandle(disk);
+        if (!ok)
+        {
+            error = "无法查询设备总线类型（Win32=" + std::to_string(code) + "）";
+            return false;
+        }
+        if (descriptor.BusType != BusTypeVirtual && descriptor.BusType != BusTypeFileBackedVirtual)
+        {
+            error = "拒绝操作：" + devicePath + " 不是虚拟磁盘（BusType=" +
+                    std::to_string(static_cast<int>(descriptor.BusType)) +
+                    "）。本工具只允许写入虚拟磁盘。";
+            return false;
+        }
+        return true;
+    }
+
     bool VhdWriteGpt(const std::string& devicePath,
                      const std::string& diskId,
                      const std::vector<VhdPartition>& parts,
@@ -304,6 +339,9 @@ namespace imaging
             return false;
         }
         if (sectorSize == 0) sectorSize = 512;
+
+        if (!VhdEnsureVirtualDisk(devicePath, error))
+            return false;
 
         const std::wstring wide(devicePath.begin(), devicePath.end());
         HANDLE disk = CreateFileW(wide.c_str(), GENERIC_READ | GENERIC_WRITE,
@@ -395,6 +433,9 @@ namespace imaging
                     std::uint32_t& sectorSize,
                     std::string& error)
     {
+        if (!VhdEnsureVirtualDisk(devicePath, error))
+            return false;
+
         const std::wstring wide(devicePath.begin(), devicePath.end());
         HANDLE disk = CreateFileW(wide.c_str(), GENERIC_READ,
                                   FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);

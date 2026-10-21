@@ -14,9 +14,9 @@
 #include <vector>
 
 #ifdef OCID_VHD_BUILD
-#define OCID_VHD_API __declspec(dllexport)
+#define    OCID_VHD_API __declspec(dllexport)
 #else
-#define OCID_VHD_API __declspec(dllimport)
+#define    OCID_VHD_API __declspec(dllimport)
 #endif
 
 namespace ocid
@@ -75,6 +75,8 @@ namespace imaging
     OCID_VHD_API bool VhdQuery(const std::wstring& path, VhdInfo& info, std::string& error);
 
     // 写 GPT：清掉已有分区表，按 parts 顺序建（offset/size 用字节，内部换算成扇区）。
+    OCID_VHD_API bool VhdEnsureVirtualDisk(const std::string& devicePath, std::string& error);
+
     OCID_VHD_API bool VhdWriteGpt(const std::string& devicePath,
                                   const std::string& diskId,
                                   const std::vector<VhdPartition>& parts,
