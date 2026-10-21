@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <map>
 #include <memory>
 #include <cstring>
 #include <filesystem>
@@ -757,6 +758,509 @@ int CmdPackageList(const std::vector<std::string>& args)
     OutLn("已写 PackageList：" + outPath + "（条目 " + std::to_string(okCount) +
           "，失败 " + std::to_string(badCount) + "）");
     LogWrite(LogLevel::Info, "packagelist written: " + outPath + " entries=" + std::to_string(okCount));
+    LogClose();
+    return badCount == 0 ? 0 : 1;
+}
+
+// ── devicedb：设备 CompDB（imageapp 的 <前缀>.DeviceDB.xml）─────────────────
+//
+// 语义来源：20279 QEMU 参照产物 + ADK 反编译
+// （compdbcommon\Microsoft.WindowsPhone.CompDB\DeviceCompDB.cs 的 CreateDBFromPackages）。
+// 整份 DeviceDB 都由【包内 update.mum】推出来，不需要 imageapp：
+//   · 每个 FM 一条 BASE 特性：包 = 该 FM 被选中的 BasePackages（文档序）+ FM 自身包（最后）；
+//   · 每个 *.FIP 包一条特性：FeatureID/FMID/Group 取自 update.mum 的 <declareCapability>，
+//     包 = <featurePackage><package> 里"真正存在于镜像里"的那些（文档序），FIP 自身最后；
+//   · 顶层 Packages = 特性包并集 + 驱动 .inf，按 ID 不区分大小写升序；
+//   · EnumeratedPackages = 选中的包（去掉后续阶段会过滤掉的产品包）。
+
+struct MumInfo
+{
+    std::string cab;
+    std::string name;
+    std::string version;
+    std::string arch;
+    std::string language;
+    std::string pkt;
+    std::string partition;
+    std::string identity;
+    std::string fmid;
+    std::string group;
+    std::string featureId;
+    std::string satelliteLang;
+    std::vector<std::string> declared;
+    bool hasCapability = false;
+};
+
+static std::string LowerText(std::string text)
+{
+    for (char& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return text;
+}
+
+static std::string UpperText(std::string text)
+{
+    for (char& c : text) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return text;
+}
+
+static std::string IdentityText(const std::string& name, const std::string& pkt,
+                                const std::string& arch, const std::string& lang)
+{
+    return name + "~" + LowerText(pkt) + "~" + LowerText(arch) + "~" + LowerText(lang) + "~";
+}
+
+static std::string MumKey(const std::string& name, const std::string& arch, const std::string& lang)
+{
+    return LowerText(name) + "|" + LowerText(arch) + "|" + LowerText(lang);
+}
+
+static std::string NowText()
+{
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    char buffer[64] = {0};
+    _snprintf_s(buffer, sizeof(buffer), _TRUNCATE, "%04d-%02d-%02dT%02d:%02d:%02d",
+                static_cast<int>(t.wYear), static_cast<int>(t.wMonth), static_cast<int>(t.wDay),
+                static_cast<int>(t.wHour), static_cast<int>(t.wMinute), static_cast<int>(t.wSecond));
+    return std::string(buffer);
+}
+
+// 包内可能有多个 update.mum（FIP 包会把载荷包的 mum 一起带进来）。
+// 真正描述"这个包自己"的那份带 <declareCapability>，优先取它。
+static bool ReadUpdateMum(const std::wstring& cabPath, std::string& mum, std::string& error)
+{
+    CabInfo info;
+    if (!CabList(cabPath, info, error)) return CabExtractText(cabPath, "update.mum", mum, error);
+    std::vector<std::string> names;
+    for (const CabEntry& entry : info.files)
+    {
+        const std::string lower = LowerText(entry.name);
+        if (lower.size() >= 10 && lower.compare(lower.size() - 10, 10, "update.mum") == 0)
+        {
+            names.push_back(entry.name);
+        }
+    }
+    if (names.empty()) return CabExtractText(cabPath, "update.mum", mum, error);
+    std::string first;
+    for (const std::string& name : names)
+    {
+        std::string text;
+        std::string extractError;
+        if (!CabExtractText(cabPath, name, text, extractError)) continue;
+        if (first.empty()) first = text;
+        if (text.find("declareCapability") != std::string::npos)
+        {
+            mum = text;
+            return true;
+        }
+    }
+    if (first.empty())
+    {
+        error = "包内没有可解的 update.mum：" + WideToUtf8(cabPath);
+        return false;
+    }
+    mum = first;
+    return true;
+}
+
+// 递归找后代（仅按局部名）——清单里 declareCapability 有时嵌在 customInformation 之下。
+static const XmlNode* FindDeep(const XmlNode* node, const char* local)
+{
+    if (node == nullptr) return nullptr;
+    for (const XmlNode* kid : ChildrenAny(node))
+    {
+        if (EqualsNoCase(kid->local, local)) return kid;
+        const XmlNode* found = FindDeep(kid, local);
+        if (found != nullptr) return found;
+    }
+    return nullptr;
+}
+
+int CmdDeviceDb(const std::vector<std::string>& args)
+{
+    std::string oemInput;
+    std::string fmDir;
+    std::string cabsDir;
+    std::string outPath;
+    std::string logPath;
+    std::string arch = "arm64";
+    std::string buildInfo = "fe_release_10x";
+    std::string buildBranch = "fe_release_10x";
+    std::string osVersion;
+    std::vector<std::string> fmFiles;
+
+    for (std::size_t i = 2; i < args.size(); ++i)
+    {
+        const std::string& a = args[i];
+        if (a == "--oem-input" || a == "--fm-dir" || a == "--fm" || a == "--arch" ||
+            a == "--cabs" || a == "--out" || a == "--log" || a == "--build-info" ||
+            a == "--build-branch" || a == "--os-version")
+        {
+            if (i + 1 >= args.size())
+            {
+                Err("参数 " + a + " 需要一个值");
+                return 2;
+            }
+            const std::string value = args[++i];
+            if (a == "--oem-input") oemInput = value;
+            else if (a == "--fm-dir") fmDir = value;
+            else if (a == "--fm") fmFiles.push_back(value);
+            else if (a == "--arch") arch = value;
+            else if (a == "--cabs") cabsDir = value;
+            else if (a == "--out") outPath = value;
+            else if (a == "--log") logPath = value;
+            else if (a == "--build-info") buildInfo = value;
+            else if (a == "--build-branch") buildBranch = value;
+            else osVersion = value;
+            continue;
+        }
+        Err("未知参数：" + a);
+        return 2;
+    }
+    if (oemInput.empty() || cabsDir.empty() || outPath.empty())
+    {
+        Err("用法：ocid_imagegen devicedb --oem-input <OEMInput.xml> --cabs <cab 目录> "
+            "--out <DeviceDB.xml> [--arch arm64] [--fm-dir <目录>] [--build-info <文本>] "
+            "[--build-branch <分支>] [--os-version <版本>] [--log <文件>]");
+        return 2;
+    }
+
+    std::string error;
+    if (!logPath.empty()) LogOpen(Utf8ToWide(logPath), error);
+
+    PlanInput input;
+    input.oemInputPath = oemInput;
+    input.fmDir = fmDir;
+    input.fmFiles = fmFiles;
+    input.arch = arch;
+
+    PlanResult plan;
+    if (!BuildPlan(input, plan, error))
+    {
+        Err(error);
+        LogClose();
+        return 1;
+    }
+
+    OemInput oem;
+    LoadOemInput(oemInput, oem, error);
+
+    // 1) 逐包读 update.mum
+    struct Pkg
+    {
+        PackageRef ref;
+        MumInfo mum;
+        bool haveMum = false;
+    };
+    std::vector<Pkg> packages;
+    std::map<std::string, std::size_t> byKey;
+    std::size_t badCount = 0;
+    for (const PackageRef& ref : plan.packages)
+    {
+        Pkg p;
+        p.ref = ref;
+        const std::wstring cabPath = CombinePath(Utf8ToWide(cabsDir), Utf8ToWide(ref.cab));
+        std::string mum;
+        if (!ReadUpdateMum(cabPath, mum, error))
+        {
+            ++badCount;
+            Err("读 update.mum 失败：" + ref.cab + " -> " + error);
+            packages.push_back(p);
+            continue;
+        }
+        std::unique_ptr<XmlDoc> doc = XmlParseText(mum, error);
+        if (!doc || doc->root == nullptr)
+        {
+            ++badCount;
+            Err("解 update.mum 失败：" + ref.cab + " -> " + error);
+            packages.push_back(p);
+            continue;
+        }
+        const XmlNode* root = doc->root;
+        const XmlNode* idNode = Child(root, "assemblyIdentity");
+        const XmlNode* pkgNode = Child(root, "package");
+
+        MumInfo& m = p.mum;
+        m.cab = ref.cab;
+        m.name = AttrOr(idNode, "name", ref.id.c_str());
+        m.version = AttrOr(idNode, "version", "");
+        m.arch = AttrOr(idNode, "processorArchitecture", ref.arch.c_str());
+        m.language = AttrOr(idNode, "language", "neutral");
+        m.pkt = AttrOr(idNode, "publicKeyToken", "31bf3856ad364e35");
+        m.partition = AttrOr(pkgNode, "targetPartition", "");
+        if (EqualsNoCase(m.language, "neutral")) m.language.clear();
+        m.identity = IdentityText(m.name, m.pkt, m.arch, m.language);
+
+        // 结构是 assembly/package/declareCapability/capability[@group,@fmid]/capabilityIdentity[@name]
+        const XmlNode* dc = Child(pkgNode, "declareCapability");
+        if (dc == nullptr)
+        {
+            const XmlNode* ci = Child(pkgNode, "customInformation");
+            if (ci != nullptr) dc = Child(ci, "declareCapability");
+        }
+        if (dc == nullptr) dc = FindDeep(pkgNode, "declareCapability");
+        if (dc != nullptr)
+        {
+            m.hasCapability = true;
+            const XmlNode* cap = Child(dc, "capability");
+            if (cap == nullptr) cap = dc;
+            m.fmid = AttrOr(cap, "fmid", "");
+            m.group = AttrOr(cap, "group", "");
+            const XmlNode* capId = Child(cap, "capabilityIdentity");
+            if (capId == nullptr) capId = Child(dc, "capabilityIdentity");
+            m.featureId = AttrOr(capId, "Name", "");
+            if (m.featureId.empty()) m.featureId = AttrOr(capId, "name", "");
+            const XmlNode* fpk = Child(cap, "featurePackage");
+            if (fpk == nullptr) fpk = Child(dc, "featurePackage");
+            if (fpk != nullptr)
+            {
+                for (const XmlNode* node : ChildrenAny(fpk))
+                {
+                    if (!EqualsNoCase(node->local, "package")) continue;
+                    const XmlNode* aid = Child(node, "assemblyIdentity");
+                    const std::string dname = AttrOr(aid, "name", "");
+                    if (dname.empty()) continue;
+                    const std::string darch = AttrOr(aid, "processorArchitecture", m.arch.c_str());
+                    std::string dlang = AttrOr(aid, "language", "neutral");
+                    if (EqualsNoCase(dlang, "neutral")) dlang.clear();
+                    const std::string dpkt = AttrOr(aid, "publicKeyToken", "31bf3856ad364e35");
+                    m.declared.push_back(MumKey(dname, darch, dlang));
+                    if (EqualsNoCase(dname, "Microsoft-WindowsCore-LanguagePack-Package") &&
+                        !dlang.empty() && m.satelliteLang.empty())
+                    {
+                        m.satelliteLang = dlang;
+                    }
+                    (void)dpkt;
+                }
+            }
+        }
+
+        p.haveMum = true;
+        byKey[MumKey(m.name, m.arch, m.language)] = packages.size();
+        packages.push_back(p);
+        if (osVersion.empty() && !m.version.empty() &&
+            (ref.section == PackageSection::Base) && !ref.featureIdentifier) osVersion = m.version;
+    }
+
+    // 2) 特性：先 BASE（每 FM 一条），再 FIP（每包一条）
+
+    struct Feature
+    {
+        std::string featureId;
+        std::string fmid;
+        std::string group;
+        std::vector<std::string> ids;
+        std::vector<std::string> keyForms;
+        std::vector<std::string> partitions;
+        std::string satelliteLang;
+    };
+    std::vector<Feature> features;
+
+    std::vector<std::string> fmOrder;
+    for (const Pkg& p : packages)
+    {
+        bool seen = false;
+        for (const std::string& f : fmOrder) if (f == p.ref.fmId) { seen = true; break; }
+        if (!seen) fmOrder.push_back(p.ref.fmId);
+    }
+
+    for (const std::string& fmid : fmOrder)
+    {
+        Feature f;
+        f.featureId = "BASE";
+        f.fmid = fmid;
+        f.group = "Microsoft";
+        for (const Pkg& p : packages)
+        {
+            if (!p.haveMum || p.ref.fmId != fmid) continue;
+            if (p.ref.section != PackageSection::Base) continue;
+            if (p.ref.featureIdentifier) continue;
+            f.ids.push_back(p.mum.identity);
+            f.keyForms.push_back(p.mum.identity + p.mum.version);
+            f.partitions.push_back(p.mum.partition);
+        }
+        for (const Pkg& p : packages)
+        {
+            if (!p.haveMum || p.ref.fmId != fmid) continue;
+            if (p.mum.hasCapability) continue;
+            if (!EqualsNoCase(p.mum.pkt, "628844477771337a")) continue;
+            f.ids.push_back(p.mum.identity);
+            f.keyForms.push_back(p.mum.identity + p.mum.version);
+            f.partitions.push_back(p.mum.partition);
+        }
+        features.push_back(f);
+    }
+
+    for (const Pkg& p : packages)
+    {
+        if (!p.haveMum || !p.mum.hasCapability) continue;
+        if (p.mum.featureId.empty()) continue;
+        // 非 FIP 包的 mum 里也有 declareCapability，只有 *.FIP 包才成特性
+        if (LowerText(p.ref.cab).find(".fip~") == std::string::npos) continue;
+        Feature f;
+        f.featureId = p.mum.featureId;
+        f.fmid = p.mum.fmid.empty() ? p.ref.fmId : p.mum.fmid;
+        f.group = p.mum.group.empty() ? "Microsoft" : p.mum.group;
+        f.satelliteLang = p.mum.satelliteLang;
+        for (const std::string& key : p.mum.declared)
+        {
+            auto it = byKey.find(key);
+            if (it == byKey.end()) continue;
+            const MumInfo& declared = packages[it->second].mum;
+            f.ids.push_back(declared.identity);
+            f.keyForms.push_back(declared.identity + declared.version);
+            f.partitions.push_back(declared.partition);
+        }
+        f.ids.push_back(p.mum.identity);
+        f.keyForms.push_back(p.mum.identity + p.mum.version);
+        f.partitions.push_back(p.mum.partition);
+        features.push_back(f);
+    }
+
+    // 排序：FMID 不区分大小写升序（空 FMID 最后），同组内 BASE 在前、其余保持 plan 顺序
+    std::stable_sort(features.begin(), features.end(), [](const Feature& a, const Feature& b) {
+        if (a.fmid.empty() != b.fmid.empty()) return b.fmid.empty();
+        const std::string la = LowerText(a.fmid);
+        const std::string lb = LowerText(b.fmid);
+        if (la != lb) return la < lb;
+        const bool ab = (a.featureId == "BASE");
+        const bool bb = (b.featureId == "BASE");
+        if (ab != bb) return ab;
+        return false;
+    });
+
+    // 3) 顶层 Packages：特性包并集，按 ID 不区分大小写升序
+    std::vector<std::string> unionIds;
+    std::vector<std::string> unionKeys;
+    for (const Feature& f : features)
+    {
+        for (const std::string& id : f.ids)
+        {
+            const std::string key = LowerText(id);
+            bool seen = false;
+            for (const std::string& k : unionKeys) if (k == key) { seen = true; break; }
+            if (seen) continue;
+            unionKeys.push_back(key);
+            unionIds.push_back(id);
+        }
+    }
+    std::stable_sort(unionIds.begin(), unionIds.end(), [](const std::string& a, const std::string& b) {
+        return LowerText(a) < LowerText(b);
+    });
+
+    std::map<std::string, const MumInfo*> byIdentity;
+    for (const Pkg& p : packages) if (p.haveMum) byIdentity[LowerText(p.mum.identity)] = &p.mum;
+
+    // 4) 写 XML
+    std::string xml;
+    xml += "<?xml version='1.0' encoding='utf-8'?>\r\n";
+    xml += "<CompDB xmlns=\"http://schemas.microsoft.com/embedded/2004/10/ImageUpdate\" CreatedDate=\"";
+    xml += NowText();
+    xml += "\" Revision=\"1\" SchemaVersion=\"1.0\" BuildInfo=\"";
+    XmlEscapeTo(xml, buildInfo);
+    xml += "\" OSVersion=\"";
+    XmlEscapeTo(xml, osVersion);
+    xml += "\" Type=\"Device\">\r\n<Features>\r\n";
+    for (const Feature& f : features)
+    {
+        xml += "<Feature Type=\"MobileFeature\" FeatureID=\"";
+        XmlEscapeTo(xml, f.featureId);
+        xml += "\" FMID=\"";
+        XmlEscapeTo(xml, f.fmid);
+        xml += "\" Group=\"";
+        XmlEscapeTo(xml, f.group);
+        xml += "\">\r\n<Packages>\r\n";
+        for (const std::string& id : f.ids)
+        {
+            xml += "<Package ID=\"";
+            XmlEscapeTo(xml, id);
+            xml += "\"/>\r\n";
+        }
+        xml += "</Packages>\r\n<Token value=\"INSTALLED\"/>\r\n<Intent value=\"PREINSTALL\"/>\r\n";
+        xml += (f.featureId.compare(0, 9, "Language.") == 0) ? "<Intent value=\"USER\"/>\r\n"
+                                                              : "<Intent value=\"SYSTEM\"/>\r\n";
+        if (!f.satelliteLang.empty())
+        {
+            xml += "<DeclareSatellite type=\"LANGUAGE\" value=\"";
+            XmlEscapeTo(xml, f.satelliteLang);
+            xml += "\"/>\r\n";
+        }
+        xml += "</Feature>\r\n";
+    }
+    xml += "</Features>\r\n<Packages>\r\n";
+    for (const std::string& id : unionIds)
+    {
+        const auto it = byIdentity.find(LowerText(id));
+        if (it == byIdentity.end()) continue;
+        xml += "<Package ID=\"";
+        XmlEscapeTo(xml, id);
+        xml += "\" KeyForm=\"";
+        XmlEscapeTo(xml, id + it->second->version);
+        xml += "\" Partition=\"";
+        XmlEscapeTo(xml, it->second->partition);
+        xml += "\"/>\r\n";
+    }
+    xml += "</Packages>\r\n<EnumeratedPackages>\r\n";
+    std::size_t enumCount = 0;
+    for (const Pkg& p : packages)
+    {
+        if (!p.haveMum) continue;
+        // 后续阶段会过滤掉产品包（参照里 194 个 cab 只剩 193）
+        if (EqualsNoCase(p.mum.name, "Microsoft-OneCoreUpdateOS-Product-Package") && !p.mum.language.empty())
+        {
+            continue;
+        }
+        xml += "<Package ID=\"";
+        XmlEscapeTo(xml, p.mum.identity);
+        xml += "\" KeyForm=\"";
+        XmlEscapeTo(xml, p.mum.identity + p.mum.version);
+        xml += "\" Partition=\"";
+        XmlEscapeTo(xml, p.mum.partition);
+        xml += "\">\r\n<Token value=\"INSTALLED\"/>\r\n</Package>\r\n";
+        ++enumCount;
+    }
+    xml += "</EnumeratedPackages>\r\n<FailedDiffs/>\r\n<DeferredUpdates/>\r\n<Languages>\r\n";
+    std::vector<std::string> languages = oem.languages;
+    std::stable_sort(languages.begin(), languages.end(), [](const std::string& a, const std::string& b) {
+        return LowerText(a) < LowerText(b);
+    });
+    for (const std::string& lang : languages)
+    {
+        xml += "<Language Id=\"";
+        XmlEscapeTo(xml, lang);
+        xml += "\"/>\r\n";
+    }
+    xml += "</Languages>\r\n<Architectures/>\r\n<ValuePair>\r\n";
+    xml += "<Pair Name=\"Arch\" Value=\"x86\"/>\r\n";
+    xml += "<Pair Name=\"BuildBranch\" Value=\"" + buildBranch + "\"/>\r\n";
+    xml += "<Pair Name=\"BuildLayer.Branch.ModernPC\" Value=\"" + buildBranch + "\"/>\r\n";
+    xml += "<Pair Name=\"BuildLayer.Branch.OnecoreUAP\" Value=\"" + buildBranch + "\"/>\r\n";
+    xml += "<Pair Name=\"BuildLayer.OrderNumber.ModernPC\" Value=\"8192\"/>\r\n";
+    xml += "<Pair Name=\"BuildLayer.OrderNumber.OnecoreUAP\" Value=\"4096\"/>\r\n";
+    xml += "<Pair Name=\"BuildLayer.TopLevel\" Value=\"ModernPC\"/>\r\n";
+    xml += "<Pair Name=\"BuildLayer.Version.ModernPC\" Value=\"" + osVersion + "\"/>\r\n";
+    xml += "<Pair Name=\"BuildLayer.Version.OnecoreUAP\" Value=\"" + osVersion + "\"/>\r\n";
+    xml += "<Pair Name=\"CompactOS\" Value=\"1\"/>\r\n";
+    xml += "<Pair Name=\"FreeDataStorage\" Value=\"0\"/>\r\n";
+    xml += "<Pair Name=\"FreeSystemStorage\" Value=\"0\"/>\r\n";
+    xml += "<Pair Name=\"MobileStoreVersion\" Value=\"4\"/>\r\n";
+    xml += "<Pair Name=\"OSVersion\" Value=\"" + osVersion + "\"/>\r\n";
+    xml += "<Pair Name=\"ProcessorArchitecture\" Value=\"" + UpperText(arch) + "\"/>\r\n";
+    xml += "<Pair Name=\"TotalRam\" Value=\"0\"/>\r\n";
+    xml += "<Pair Name=\"TotalStorage\" Value=\"0\"/>\r\n";
+    xml += "<Pair Name=\"WinREVersion\"/>\r\n";
+    xml += "</ValuePair>\r\n</CompDB>\r\n";
+
+    if (!WriteFileText(Utf8ToWide(outPath), xml, error))
+    {
+        Err(error);
+        LogClose();
+        return 1;
+    }
+    OutLn("已写 DeviceDB：" + outPath + "（特性 " + std::to_string(features.size()) +
+          "，顶层包 " + std::to_string(unionIds.size()) + "，枚举包 " + std::to_string(enumCount) +
+          "，mum 失败 " + std::to_string(badCount) + "）");
+    LogWrite(LogLevel::Info, "devicedb written: " + outPath);
     LogClose();
     return badCount == 0 ? 0 : 1;
 }
@@ -1601,6 +2105,10 @@ int wmain(int argc, wchar_t** wargv)
     if (command == "cab")
     {
         return CmdCab(args);
+    }
+    if (command == "devicedb")
+    {
+        return CmdDeviceDb(args);
     }
     if (command == "layout")
     {
