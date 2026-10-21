@@ -1034,6 +1034,7 @@ void Base64Decode(const std::string& text, std::string& out) {
 struct RegVal {
     std::string name;
     std::uint32_t type = 1;
+    std::uint32_t hint = 1;  // operationHint: replace=1, append=2
     std::string text;
 };
 
@@ -1165,6 +1166,7 @@ class RegistryBuilder {
                 val.name = Attr(at, "name");
                 val.type = RegistryValueType(Attr(at, "valueType"));
                 val.text = Attr(at, "value");
+                val.hint = (Attr(at, "operationHint") == "append") ? 2u : 1u;
                 nodes_[static_cast<std::size_t>(node)].vals.push_back(std::move(val));
             }
         }
@@ -1250,7 +1252,7 @@ class RegistryBuilder {
                 const RegVal& v = n.vals[i];
                 const std::uint32_t tid =
                     v.text.empty() ? kNoId : inter_.StringEvenEmpty(v.text);
-                const int rec = Blob(PackU32({1u, 1u, v.type, tid, kNoId}), 1);
+                const int rec = Blob(PackU32({1u, v.hint, v.type, tid, kNoId}), 1);
                 recs.push_back(Rec{static_cast<std::uint32_t>(Hash64(LowerAscii(v.name)) & kM32),
                                    v.name, rec});
             }
@@ -1429,11 +1431,11 @@ bool GuidFromText(const std::string& text, std::string& out) {
 // 该顺序来自二进制里的静态表，清单 XML 里没有对应信息；未观测到的对
 // （firewallRule/ngen 与其他 kind 的组合）按已知约束的线性扩展放在末尾。
 const char* const kCacheGuidOrder[] = {
-    "fveUpdateAI", "bfsvc", "instrumentation", "counters", "lodctr", "lodctrDat", "securityDescriptor",
-    "WinsockAppPermittedLspCategories",
-    "serviceData", "rootDevices", "sppInstaller", "mof", "rescache",
+    "fveUpdateAI", "bfsvc", "instrumentation", "lodctr", "lodctrDat", "sppInstaller",
+    "genericCommandUninstall", "securityDescriptor", "WinsockAppPermittedLspCategories",
+    "serviceData", "counters", "rootDevices", "mof", "rescache",
     "taskScheduler", "timezoneresourceAI", "registryKeys", "firewallRule", "ngen",
-    "genericCommandUninstall", "genericCommandInstall",
+    "genericCommandInstall",
 };
 
 int CacheGuidRank(const std::string& guid) {
