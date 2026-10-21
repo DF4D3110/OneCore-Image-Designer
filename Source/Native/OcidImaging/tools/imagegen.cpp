@@ -1154,9 +1154,8 @@ for (const std::string& fmFile : fmFiles)
         const bool ae = a.fmid.empty();
         const bool be = b.fmid.empty();
         if (ae != be) return be;
-        const std::string la = LowerText(a.fmid);
-        const std::string lb = LowerText(b.fmid);
-        if (la != lb) return la < lb;
+        // 用 ASCII 原样比较：参照里 MODERNPCEMULATOR 在 MODERNPC_CORE_OPTIONAL 之前（'E' < '_'）。
+        if (a.fmid != b.fmid) return a.fmid < b.fmid;
         const bool ab = (a.featureId == "BASE");
         const bool bb = (b.featureId == "BASE");
         if (ab != bb) return ab;
