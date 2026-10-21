@@ -181,7 +181,12 @@ Build-Target 'ocid_dmi_tests.exe'      @('src\DriverPackage.cpp', 'tests\driverp
 Build-Target 'ocid_dmiinf_tests.exe'    @('src\DriverPackage.cpp', 'src\DriverInf.cpp', 'tests\driverinf_tests.cpp')
 Build-Target 'ocid_cbs_tests.exe'      @('src\CbsStore.cpp', 'src\CbsProfile.cpp', 'src\Sha256.cpp', 'src\Pcm.cpp', 'src\PcmBuild.cpp', 'src\Microdom.cpp', 'src\Dcm.cpp', 'src\Delta.cpp', 'tests\cbsstore_tests.cpp')
 Build-Target 'ocid_microdom_tests.exe' @('src\Microdom.cpp', 'tests\microdom_tests.cpp')
-    Build-Target 'ocid_manifest.exe'       ($core + @('tools\ocid_manifest.cpp'))
+# Two console entry points share the same command implementations
+# (tools/ocid_manifest.cpp): ocid_manifest = the primitives, ocid_wssm = the
+# unified workbench (Windows Servicing Stack Manager). Each exe supplies its own
+# main() so the shared translation unit never defines one.
+Build-Target 'ocid_manifest.exe' ($core + @('tools\ocid_manifest.cpp', 'tools\ocid_manifest_main.cpp'))
+Build-Target 'ocid_wssm.exe'     ($core + @('tools\ocid_manifest.cpp', 'tools\ocid_wssm.cpp'))
 
 Write-Host "[build] done -> $(Join-Path $root 'Output')"
 

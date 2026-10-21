@@ -3596,9 +3596,9 @@ static const CommandDoc kCommandDocs[] = {
 
     // ── ManifestCache（PCM/微 DOM）────────────────────────────────────────
     {"cbs-pcm-tables", "ManifestCache（PCM/CDF）",
-     "列出 PcmH 的表目录（35 项）与槽详情。",
-     "ocid_manifest cbs-pcm-tables <pcmFile>",
-     "例：ocid_manifest cbs-pcm-tables small_pcm.bin"},
+     "逐个 .pcm 解码表再重编码，按类型统计总数与逐字节一致数（表编码器自检）。",
+     "ocid_manifest cbs-pcm-tables <pcmDir>",
+     "目录里每个 .pcm 都会被解表并重编码，不打印表内容，只报逐字节一致率。\r\n例：ocid_manifest cbs-pcm-tables E:\ocid_verify\pcm9600\blocks"},
     {"cbs-pcm-reencode", "ManifestCache（PCM/CDF）",
      "拆 PcmH 再按容器语义重编码，报是否逐字节一致。",
      "ocid_manifest cbs-pcm-reencode <realPcm> <outPcm>",
@@ -6023,7 +6023,10 @@ std::wstring TrimCopy(const std::wstring& text)
     return text.substr(begin, end - begin);
 }
 
-int main(int argc, char** argv)
+// 统一入口：把这条命令行入口暴露成普通函数，供 ocid_wssm（Windows Servicing
+// Stack Manager）复用同一套命令实现。ocid_manifest.exe 自己的 main 在
+// tools/ocid_manifest_main.cpp 里，只做一次透传。
+int OcidManifestRun(int argc, char** argv)
 {
     SetupConsole();
 
