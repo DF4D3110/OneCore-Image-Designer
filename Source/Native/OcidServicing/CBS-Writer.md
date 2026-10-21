@@ -838,7 +838,7 @@ WinSxS 里没有 `ntoskrnl.exe` 时用 `--os-build` 明说。
 | 20B `<directory>` 记录按 20B 内容去重（重叠的 `<directory>` refs 共享一条） | `45e0c01` |
 | `<memberships>`：每个 `<categoryInstance>` 各一条 8B `{uidx,-1}`（按内容去重），t9 按 `subcategory` 分组、`f1` = 该 8B 记录在发射序中的序号（0 起、去重前计数），同一 membership 再发一张 t6（`f0=Hash64(subcategory)&kM32`） | `45e0c01` |
 | `<serviceData>` 只发一条 cache 记录，内容 = 全部 serviceData 元素的 uidx 数组，GUID `ad04d551-6848-4c46-a504-e6cc8a210a97` | `45e0c01` |
-| `<windowClass>`（`01286/01287` 两份 9600 全对）：类名在 `BuildFileRecord` 里、`importPath` 之后按 `SitOrder(Hash64(name)&kM32)`（7 桶、插入序=文档序）入池，正好占 id 2..28/2..30；每个含类的 `<file>` 在摘要 blob 之前发一条 8B `{0, 该类是否 versioned="yes"}`；整张类名表 = key 8 的 t6（`f0=Hash64(name)&kM32`、`f1=串 id`、`f2=2`、`bit0=false`），排在 t11 之后；注册键 8 自然落到该表槽号。注意：多 `<file>` 且各自带类的样本至今未见，当前实现把全部类名累积进**同一张** key-8 表，每个含类的 `<file>` 各发一条 8B `{0,versioned}` | `6e3d3f0` |
+| `<windowClass>`（`01286/01287` 两份 9600 全对）：类名在 `BuildFileRecord` 里、`importPath` 之后按 `SitOrder(Hash64(name)&kM32)`（7 桶、插入序=文档序）入池，正好占 id 2..28/2..30；每个含类的 `<file>` 在摘要 blob 之前发一条 8B `{0, 该类是否 versioned="yes"}`；整张类名表 = key 8 的 t6（`f0=Hash64(name)&kM32`、`f1=串 id`、`f2=2`、`bit0=false`），排在 t11 之后；注册键 8 自然落到该表槽号。注意：多 `<file>` 且各自带类的样本至今未见，当前实现把全部类名累积进**同一张** key-8 表，每个含类的 `<file>` 各发一条 8B `{0,versioned}` | `22df921` |
 
 ### 10.2 仍不可推导（已用全语料证据确认，不写"猜规则"的补丁）
 
