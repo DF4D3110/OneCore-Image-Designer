@@ -111,6 +111,12 @@ $vhdObjs = @()
 $vhdObjs += Build-Object 'vhd' 'src\Vhd.cpp' @('/DOCID_VHD_BUILD')
 $vhdLib = Join-Path $out 'ocid_vhd.wcos.lib'
 Build-Dll 'vhd' 'ocid_vhd' $vhdObjs @("`"$commonLib`"", 'virtdisk.lib', 'ole32.lib', 'uuid.lib')
+# ---- 3c) pool (ImageStorageService.dll wrapper: pool/space) ----
+$poolObjs = @()
+$poolObjs += Build-Object 'pool' 'src\Pool.cpp' @('/DOCID_POOL_BUILD')
+$poolLib = Join-Path $out 'ocid_pool.wcos.lib'
+Build-Dll 'pool' 'ocid_pool' $poolObjs @("`"$commonLib`"")
+
 
 
 # ---- 4) exe ----
@@ -119,7 +125,7 @@ $exeObjs += Build-Object 'imagegen' 'tools\imagegen.cpp'
 $exe = Join-Path $out 'ocid_imagegen.exe'
 $planLib = Join-Path $out 'ocid_plan.wcos.lib'
 $exeObjArgs = ($exeObjs | ForEach-Object { '"' + $_ + '"' }) -join ' '
-$linkLines = @("link /nologo /OUT:`"$exe`" $exeObjArgs `"$planLib`" `"$cabLib`" `"$vhdLib`" `"$commonLib`" virtdisk.lib ole32.lib")
+$linkLines = @("link /nologo /OUT:`"$exe`" $exeObjArgs `"$planLib`" `"$cabLib`" `"$vhdLib`" `"$poolLib`" `"$commonLib`" virtdisk.lib ole32.lib")
 $null = Invoke-Batch 'imagegen' $linkLines
 Write-Host "[build] OK ocid_imagegen.exe"
 
