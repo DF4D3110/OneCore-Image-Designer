@@ -847,7 +847,7 @@ WinSxS 里没有 `ntoskrnl.exe` 时用 `--os-build` 明说。
 | `registryValue` 的 `operationHint`：`append` = 2，其余/缺省 = 1（20B 记录第 2 个 dword） | `58275a5` |
 
 | `<HTTPAI><AddUrl sddl=… url=…/>`（`00549` 全对）：`sddl` 串在 §4 字符串槽循环末尾入池并发 4 B `{sddlSlot}`；`url` 串在 kKeys 的 key-34 分支里入池并发 t6（`f0=0`、`f1=url 串 id`、`f2=4 B 记录槽`、`bit0=true`）；cache 记录 = §6 的 `{uidx}` + GUID `1ae0fe86-4a95-5df1-bc0c-cea7dfd72085` | `7f4a9be` |
-| 16299+ 的 `<file>` 记录是 **104 B**（26 个 u32）：将 9600/8419 的 96 B 记录在末列 `0` 之前插入 `{1,-1}`（`PcmBuildAtLeast(16299)`）| 本次 |
+| 16299+ 的 `<file>` 记录是 **104 B**（26 个 u32）：将 9600/8419 的 96 B 记录在末列 `0` 之前插入 `{1,-1}`（`PcmBuildAtLeast(16299)`）| `31f96ff` |
 
 ### 10.2 仍不可推导（已用全语料证据确认，不写"猜规则"的补丁）
 
@@ -874,7 +874,8 @@ WinSxS 里没有 `ntoskrnl.exe` 时用 `--os-build` 明说。
 - 记录格式：`[16 B hash][u32 ? @0x10][u32 解压后长度 @0x14][u32 alg=2 @0x18][LZNT1 @0x1C]`，mcp.csv 的 offset 直指记录头。
 - **解压必须用 ntdll** `RtlDecompressBuffer(COMPRESSION_FORMAT_LZNT1=2, …)`；`E:\ocid_verify\mcp\unlz.py` 的纯 Python 实现有 bug。
 - 清单配对键 = `(arch, name, pkt, version, lang)`（清单名 `arch_name_pkt_VERSION_LANG_hash.manifest`）；mcp family 目录里的 hash **不是**清单文件名的 hash。
-- 当前基线：329 对，`T1 280(85.1%) / T2 0 / T3 0 / T4 0`（未包含 104 B 修正）。
+- 当前基线：329 对，`T1 280(85.1%) / T2 0 / T3 0 / T4 0`（已含 104 B 修正；t2 槽序不对使得所有引用槽号的记录全部错位，所以 T2 横为 0）。
+- 另有 280/329 份存在非 t2 槽的差异（需 t2 先解才能继续定位），49 份槽数不等。
 - **未解：字符串槽序**。页头串表 `0x54` 每条 4 B = string id → 槽号；身份表（t4/t5）引用 **id**，其它记录引用 **槽号**；id 序（intern 插入序）两边完全一致，差异只在 t2 槽序。
   穷举了 `{码点,字节,u16} × {原样,A-Z 折小写} × poly{65599,33,37,31,131,16777619,0x01000193} × lanes{1..4} × mask{0xFFFFFFFF,0x1FFFFFFF,2^64} × 位移 0..28 × 取反 × 前缀 × 模数 2..6000`，
   没有任何组合能让桶号沿真机序单调；MdSp 下标序、开放寻址（步长 1/3/5/7、n=16..209）也不行 ⇒ 判为 10.x 换了表实现，暂停。
