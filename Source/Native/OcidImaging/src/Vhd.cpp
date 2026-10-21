@@ -52,10 +52,14 @@ namespace imaging
                 bytes[i] = static_cast<std::uint8_t>((hi << 4) | lo);
             }
             // 前 8 字节按小端拼回 Data1/Data2/Data3。
-            out.Data1 = 0;
-            for (int i = 3; i >= 0; --i) out.Data1 = (out.Data1 << 8) | bytes[i];
-            out.Data2 = static_cast<unsigned short>((bytes[5] << 8) | bytes[4]);
-            out.Data3 = static_cast<unsigned short>((bytes[7] << 8) | bytes[6]);
+            // 文本里的 16 个字节是"大端书写"：Data1 直接按 hex 值放，靠结构体
+            // 自身的 LE 内存布局落盘（EFI_GUID 与 Windows GUID 内存布局一致）。
+            out.Data1 = (static_cast<unsigned long>(bytes[0]) << 24) |
+                        (static_cast<unsigned long>(bytes[1]) << 16) |
+                        (static_cast<unsigned long>(bytes[2]) << 8) |
+                        static_cast<unsigned long>(bytes[3]);
+            out.Data2 = static_cast<unsigned short>((bytes[4] << 8) | bytes[5]);
+            out.Data3 = static_cast<unsigned short>((bytes[6] << 8) | bytes[7]);
             for (int i = 0; i < 8; ++i) out.Data4[i] = bytes[8 + i];
             return true;
         }
