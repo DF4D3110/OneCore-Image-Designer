@@ -2262,6 +2262,7 @@ int CmdLayout(const std::vector<std::string>& args)
         std::uint64_t size = 0, block = 0;
         std::uint32_t sectorSize = 512;
         bool fixed = false, readOnly = false, dry = false, keepAttached = false, wantPartitions = false;
+        bool apply = false, physicalView = false;
 
         for (std::size_t i = 3; i < args.size(); ++i)
         {
@@ -2276,6 +2277,8 @@ int CmdLayout(const std::vector<std::string>& args)
             else if (a == "--fixed") fixed = true;
             else if (a == "--dry") dry = true;
             else if (a == "--keep-attached") keepAttached = true;
+            else if (a == "--apply") apply = true;
+            else if (a == "--physical") physicalView = true;
             else if (a == "--partition") wantPartitions = true;
             else if (a == "--size") { std::string v; if (!next(v)) { Err("--size 缺少值"); return 2; } size = VhdScaled(v); }
             else if (a == "--block") { std::string v; if (!next(v)) { Err("--block 缺少值"); return 2; } block = VhdScaled(v); }
@@ -2387,7 +2390,29 @@ int CmdLayout(const std::vector<std::string>& args)
                 if (VhdQuery(wideFile, info, error)) diskBytes = info.virtualBytes;
             }
             std::vector<VhdPartition> parts;
-            if (!BuildPartitionsFromLayout(model, diskBytes, parts, error))
+            if (physicalView)
+            {
+                // 物理盘面视图（与真机 Flash.vhdx 一致）：只放 BS_EFIESP + OSPool。
+                // MainOS/BSP/OSData/Data 等都在 OSPool 池内的 space 里，不能写进物理 GPT。
+                const std::uint64_t mb = 1024ull * 1024ull;
+                const std::uint64_t efiespOffset = 2 * mb;
+                const std::uint64_t efiespSize = 260 * mb;
+                VhdPartition boot;
+                boot.name = "BS_EFIESP";
+                boot.type = "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}";
+                boot.offsetBytes = efiespOffset;
+                boot.sizeBytes = efiespSize;
+                parts.push_back(boot);
+                VhdPartition pool;
+                pool.name = "OSPool";
+                pool.type = "{e75caf8f-f680-4cee-afa3-b001e56efc2d}";
+                pool.offsetBytes = efiespOffset + efiespSize;
+                // 末尾要给备份 GPT 留位（至少 33 扇区），否则 SET_DRIVE_LAYOUT 报 87。
+                const std::uint64_t tail = 1 * mb;
+                pool.sizeBytes = diskBytes > (pool.offsetBytes + tail) ? (diskBytes - pool.offsetBytes - tail) : 0;
+                parts.push_back(pool);
+            }
+            else if (!BuildPartitionsFromLayout(model, diskBytes, parts, error))
             {
                 Err("排分区失败：" + error);
                 return 1;
@@ -2403,9 +2428,9 @@ int CmdLayout(const std::vector<std::string>& args)
                 end = parts[i].offsetBytes + parts[i].sizeBytes;
             }
             OutLn("合计占用：" + FormatBytes(end) + "（虚拟盘 " + FormatBytes(diskBytes) + "）");
-            if (dry)
+            if (!apply)
             {
-                OutLn("--dry：不写盘");
+                OutLn("（演练）默认不写盘：确认无误后加 --apply。");
                 return 0;
             }
 
