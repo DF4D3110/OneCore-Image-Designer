@@ -84,7 +84,7 @@ internal static class Help
 
     internal static void PrintAll(TextWriter writer)
     {
-        writer.WriteLine("ocid_cab —— CAB 控制台（自带 MSZIP / LZX 解码）");
+        writer.WriteLine("ocid_cab —— OneCore Image Designer CAB 控制台（自带 MSZIP / LZX 解码）");
         writer.WriteLine();
         writer.WriteLine("用法：ocid_cab <命令> [参数...]");
         writer.WriteLine("      ocid_cab help            列出全部命令");
