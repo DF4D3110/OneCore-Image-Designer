@@ -2492,7 +2492,7 @@ int CmdLayout(const std::vector<std::string>& args)
             OutLn("用法：");
             OutLn("  pool probe [--all]            探测 ImageStorageService.dll 的导出函数（不碰磁盘；--all 列全部）");
             OutLn("  pool plan --layout <xml>      打印存储池 / space 计划（只读 XML）");
-            OutLn("  pool create --vhd <vhdx> [--name OSPool] [--version 24|26] [--dir <临时目录>] [--space <名> --size 1G]");
+            OutLn("  pool create --vhd <vhdx> [--disk <设备>] [--name OSPool] [--version 24|26] [--dir <临时目录>] [--space <名> --size 1G]");
             OutLn("                                在虚拟磁盘上真建池（服务句柄 → 池 → 可选 space），仅限虚拟盘");
             OutLn("说明：真建池需 CreateStorageService + STORE_ID + TI 权限，暂未接通。");
             return sub.empty() ? 2 : 0;
@@ -2592,10 +2592,12 @@ int CmdLayout(const std::vector<std::string>& args)
             std::wstring directory;
             unsigned long long spaceSize = 0;
             unsigned int version = 24;
+            std::string deviceArg;
             for (std::size_t i = 3; i < args.size(); ++i)
             {
                 const std::string& a = args[i];
                 if (a == "--vhd" && i + 1 < args.size()) vhdPath = Utf8ToWide(args[++i]);
+                else if (a == "--disk" && i + 1 < args.size()) deviceArg = args[++i];
                 else if (a == "--name" && i + 1 < args.size()) poolName = Utf8ToWide(args[++i]);
                 else if (a == "--space" && i + 1 < args.size()) spaceName = Utf8ToWide(args[++i]);
                 else if (a == "--dir" && i + 1 < args.size()) directory = Utf8ToWide(args[++i]);
@@ -2611,14 +2613,23 @@ int CmdLayout(const std::vector<std::string>& args)
                     spaceSize = std::strtoull(text.c_str(), nullptr, 0) * mult;
                 }
             }
-            if (vhdPath.empty()) { Err("pool create 需要 --vhd <虚拟磁盘>"); return 2; }
             std::string device;
             std::string error;
-            if (!VhdAttach(vhdPath, false, device, error)) { Err("挂载虚拟磁盘失败：" + error); return 1; }
+            const bool fromDisk = !deviceArg.empty();
+            if (fromDisk) device = deviceArg;
+            else if (!vhdPath.empty())
+            {
+                if (!VhdAttach(vhdPath, false, device, error)) { Err("挂载虚拟磁盘失败：" + error); return 1; }
+            }
+            if (device.empty())
+            {
+                Err("pool create 需要 --vhd <虚拟磁盘> 或 --disk <设备路径>");
+                return 2;
+            }
             if (!VhdEnsureVirtualDisk(device, error))
             {
                 std::string detachError;
-                VhdDetach(vhdPath, detachError);
+                if (!fromDisk) VhdDetach(vhdPath, detachError);
                 Err("拒绝操作：" + error);
                 return 1;
             }
@@ -2632,11 +2643,11 @@ int CmdLayout(const std::vector<std::string>& args)
             std::string detail;
             const bool ok = PoolCreateSandbox(options, detail, error);
             std::string detachError;
-            const bool detached = VhdDetach(vhdPath, detachError);
+            const bool detached = fromDisk ? true : VhdDetach(vhdPath, detachError);
             if (!detail.empty()) Out(detail);
             if (!detached) Err("卸载虚拟磁盘失败：" + detachError);
             if (!ok) { Err("建池失败：" + error); return 1; }
-            OutLn("建池成功：" + std::string(vhdPath.begin(), vhdPath.end()) + "（池 " +
+            OutLn("建池成功：" + (fromDisk ? device : std::string(vhdPath.begin(), vhdPath.end())) + "（池 " +
                   std::string(poolName.begin(), poolName.end()) + "，版本 " + NumText(static_cast<unsigned long long>(version)) + "）");
             return 0;
         }
