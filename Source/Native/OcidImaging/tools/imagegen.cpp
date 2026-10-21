@@ -13,6 +13,7 @@
 #include "ocid/imaging/Common.h"
 #include "ocid/imaging/Plan.h"
 #include "ocid/imaging/Vhd.h"
+#include "ocid/imaging/Pool.h"
 
 #include <algorithm>
 #include <cctype>
@@ -2483,6 +2484,109 @@ int CmdLayout(const std::vector<std::string>& args)
         return 2;
     }
 
+    int CmdPool(const std::vector<std::string>& args)
+    {
+        const std::string sub = args.size() > 2 ? args[2] : std::string();
+        if (sub == "help" || sub == "--help" || sub.empty())
+        {
+            OutLn("用法：");
+            OutLn("  pool probe [--all]            探测 ImageStorageService.dll 的导出函数（不碰磁盘；--all 列全部）");
+            OutLn("  pool plan --layout <xml>      打印存储池 / space 计划（只读 XML）");
+            OutLn("说明：真建池需 CreateStorageService + STORE_ID + TI 权限，暂未接通。");
+            return sub.empty() ? 2 : 0;
+        }
+        if (sub == "probe")
+        {
+            std::string dll, error;
+            std::vector<std::string> found, missing;
+            if (!PoolProbe(dll, found, missing, error))
+            {
+                Err("探测失败：" + error);
+                return 1;
+            }
+            OutLn("ImageStorageService.dll：" + dll);
+            OutLn("导出命中 " + NumText(found.size()) + " 个，缺失 " + NumText(missing.size()) + " 个");
+            for (const std::string& name : found) OutLn("  + " + name);
+            for (const std::string& name : missing) OutLn("  - " + name);
+
+            bool dumpAll = false;
+            for (std::size_t i = 3; i < args.size(); ++i) if (args[i] == "--all") dumpAll = true;
+            if (dumpAll)
+            {
+                std::vector<std::string> names;
+                std::string exportError;
+                if (!PoolExports(dll, names, exportError)) { Err("列导出失败：" + exportError); return 1; }
+                std::sort(names.begin(), names.end());
+                OutLn("全部导出 " + NumText(names.size()) + " 个：");
+                for (const std::string& name : names) OutLn("  " + name);
+            }
+            return 0;
+        }
+                if (sub == "plan")
+        {
+            std::string layout, error;
+            for (std::size_t i = 3; i < args.size(); ++i)
+            {
+                if (args[i] == "--layout" && i + 1 < args.size()) layout = args[++i];
+            }
+            if (layout.empty()) { Err("pool plan 需要 --layout <DeviceLayout.xml>"); return 2; }
+            std::unique_ptr<XmlDoc> doc = XmlParseFile(Utf8ToWide(layout), error);
+            if (!doc) { Err("读布局失败：" + error); return 1; }
+            auto kidsOf = [](const XmlNode* node, const char* local) {
+                std::vector<const XmlNode*> out;
+                if (node != nullptr)
+                {
+                    for (const std::unique_ptr<XmlNode>& kid : node->kids)
+                    {
+                        if (kid->local == local) out.push_back(kid.get());
+                    }
+                }
+                return out;
+            };
+            const XmlNode* rootNode = doc->Root() == nullptr ? nullptr : doc->Root();
+            std::vector<const XmlNode*> pools = kidsOf(rootNode, "StoragePools");
+            if (pools.empty()) { Err("布局里没有 <StoragePools>（v1 布局无存储池）"); return 1; }
+            int printed = 0;
+            for (const XmlNode* poolNode : kidsOf(pools[0], "StoragePool"))
+            {
+                const std::string name = TextOf(poolNode, "Name");
+                std::vector<const XmlNode*> stores = kidsOf(poolNode, "Stores");
+                OutLn("存储池：" + (name.empty() ? std::string("(无名)") : name));
+                OutLn("版本：低于 Manganese 用 24（19H1），否则 >= Manganese 用 26");
+                unsigned long long total = 0;
+                int index = 0;
+                for (const XmlNode* store : stores.empty() ? std::vector<const XmlNode*>() : kidsOf(stores[0], "Store"))
+                {
+                    ++index;
+                    const std::string type = TextOf(store, "StoreType");
+                    const std::string sid = TextOf(store, "Id");
+                    unsigned long long sectors = 0;
+                    const std::string sectorsText = TextOf(store, "SizeInSectors");
+                    if (!sectorsText.empty()) sectors = std::strtoull(sectorsText.c_str(), nullptr, 0);
+                    unsigned long long bytes = sectors * 512ull;
+                    std::vector<const XmlNode*> parts = kidsOf(store, "Partitions");
+                    std::string partNames;
+                    for (const XmlNode* part : parts.empty() ? std::vector<const XmlNode*>() : kidsOf(parts[0], "Partition"))
+                    {
+                        if (!partNames.empty()) partNames += ",";
+                        partNames += TextOf(part, "Name");
+                    }
+                    total += bytes;
+                    OutLn("  [" + NumText(static_cast<unsigned long long>(index)) + "] " + type + "  " + FormatBytes(bytes) +
+                          "  thin=1  id=" + (sid.empty() ? std::string("(无)") : sid) + "  分区=" + (partNames.empty() ? std::string("(空)") : partNames));
+                }
+                OutLn("合计：" + FormatBytes(total) + "；另加 IU_RESERVE_DISK（thin，预留）");
+                ++printed;
+            }
+            if (printed == 0) { Err("布局的 <StoragePool> 为空"); return 1; }
+            OutLn("（演练）pool create 尚未接通：需要 CreateStorageService / STORE_ID / TI 权限。");
+            return 0;
+        }
+        Err("未知 pool 子命令：" + sub);
+        return 2;
+    }
+
+
 } // namespace
 
 // 用 wmain 取宽字符命令行：
@@ -2533,6 +2637,7 @@ int wmain(int argc, wchar_t** wargv)
         return CmdDeviceDb(args);
     }
     if (command == "vhd") return CmdVhd(args);
+    if (command == "pool") return CmdPool(args);
     if (command == "layout")
     {
         return CmdLayout(args);
