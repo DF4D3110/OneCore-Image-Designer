@@ -31,4 +31,21 @@ OCID_POOL_API bool PoolExports(std::string& dllPath,
                               std::vector<std::string>& names,
                               std::string& error);
 
+// 沙箱建池：只在调用方给的虚拟磁盘设备上执行（调用方负责先过 VhdEnsureVirtualDisk）。
+// 流程 = CreateStorageService → CreateStoragePool →（可选）CreateStorageSpace → CloseStoragePool。
+// 不做格式化、不建分区表，目的是先验证服务句柄能开、池能落盘。
+struct PoolCreateOptions
+{
+    std::wstring devicePath;      // \\.\PhysicalDriveN
+    std::wstring poolName;        // 默认 OSPool
+    unsigned int version;         // 24 = Windows 19H1，26 = Manganese
+    std::wstring directory;       // 临时目录（MS 传 TempDirectory）
+    std::wstring spaceName;       // 空 = 不建 space
+    unsigned long long spaceSize; // 字节；0 = 不建 space
+};
+
+OCID_POOL_API bool PoolCreateSandbox(const PoolCreateOptions& options,
+                                    std::string& detail,
+                                    std::string& error);
+
 } // namespace ocid::imaging

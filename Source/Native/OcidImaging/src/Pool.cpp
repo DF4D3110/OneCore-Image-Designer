@@ -158,4 +158,135 @@ bool PoolExports(std::string& dllPath, std::vector<std::string>& names, std::str
     return true;
 }
 
+namespace {
+
+std::string g_poolLog;
+
+std::string WideToUtf8Local(const wchar_t* text)
+{
+    if (text == nullptr) return std::string();
+    const int chars = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
+    if (chars <= 1) return std::string();
+    std::string out(static_cast<std::size_t>(chars - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text, -1, &out[0], chars, nullptr, nullptr);
+    return out;
+}
+
+void __stdcall PoolLogCallback(const wchar_t* message)
+{
+    if (message == nullptr) return;
+    g_poolLog += WideToUtf8Local(message);
+    g_poolLog += "\n";
+}
+
+typedef long(__stdcall* CreateServiceFn)(void** service, void(__stdcall* log)(const wchar_t*), unsigned int count,
+                                         const void* storeIds, int imaging);
+typedef long(__stdcall* CloseServiceFn)(void* service);
+typedef long(__stdcall* CreatePoolFn)(void* service, void* disk, const wchar_t* name, unsigned int version,
+                                      const wchar_t* directory, void** pool);
+typedef long(__stdcall* ClosePoolFn)(void* service, void* pool, int detachSpaces);
+typedef long(__stdcall* CreateSpaceFn)(void* service, void* pool, const wchar_t* spaceName, unsigned long long size,
+                                       unsigned long long extentSize, int thin, GUID* spaceId, GUID* reserveId,
+                                       unsigned int usage);
+
+} // namespace
+
+bool PoolCreateSandbox(const PoolCreateOptions& options, std::string& detail, std::string& error)
+{
+    detail.clear();
+    g_poolLog.clear();
+    if (options.devicePath.empty())
+    {
+        error = "未指定虚拟磁盘设备路径";
+        return false;
+    }
+    std::string dllPath;
+    std::vector<std::string> found;
+    std::vector<std::string> missing;
+    if (!PoolProbe(dllPath, found, missing, error)) return false;
+    if (!missing.empty())
+    {
+        error = "ImageStorageService 缺少导出：" + missing[0];
+        return false;
+    }
+    const std::wstring wideDll(dllPath.begin(), dllPath.end());
+    HMODULE module = LoadLibraryW(wideDll.c_str());
+    if (module == nullptr)
+    {
+        error = "LoadLibraryW 失败（win32=" + std::to_string(GetLastError()) + "）";
+        return false;
+    }
+    CreateServiceFn createService = reinterpret_cast<CreateServiceFn>(GetProcAddress(module, "CreateStorageService"));
+    CloseServiceFn closeService = reinterpret_cast<CloseServiceFn>(GetProcAddress(module, "CloseImageStorageService"));
+    CreatePoolFn createPool = reinterpret_cast<CreatePoolFn>(GetProcAddress(module, "CreateStoragePool"));
+    ClosePoolFn closePool = reinterpret_cast<ClosePoolFn>(GetProcAddress(module, "CloseStoragePool"));
+    CreateSpaceFn createSpace = reinterpret_cast<CreateSpaceFn>(GetProcAddress(module, "CreateStorageSpace"));
+    if (createService == nullptr || closeService == nullptr || createPool == nullptr || closePool == nullptr ||
+        createSpace == nullptr)
+    {
+        FreeLibrary(module);
+        error = "GetProcAddress 失败";
+        return false;
+    }
+
+    const HANDLE disk = CreateFileW(options.devicePath.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (disk == INVALID_HANDLE_VALUE)
+    {
+        const DWORD last = GetLastError();
+        FreeLibrary(module);
+        error = "打开 " + std::string(options.devicePath.begin(), options.devicePath.end()) + " 失败（win32=" +
+                std::to_string(last) + "）";
+        return false;
+    }
+
+    void* service = nullptr;
+    void* pool = nullptr;
+    long rc = createService(&service, PoolLogCallback, 0, nullptr, 1);
+    if (rc < 0 || service == nullptr)
+    {
+        error = "CreateStorageService 失败（hr=0x" + std::to_string(static_cast<unsigned long>(rc)) + "）\n" + g_poolLog;
+        CloseHandle(disk);
+        FreeLibrary(module);
+        return false;
+    }
+    const std::wstring poolName = options.poolName.empty() ? std::wstring(L"OSPool") : options.poolName;
+    rc = createPool(service, disk, poolName.c_str(), options.version, options.directory.c_str(), &pool);
+    if (rc < 0 || pool == nullptr)
+    {
+        error = "CreateStoragePool 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "）\n" + g_poolLog;
+        closeService(service);
+        CloseHandle(disk);
+        FreeLibrary(module);
+        return false;
+    }
+    bool spaceOk = true;
+    if (!options.spaceName.empty() && options.spaceSize != 0)
+    {
+        GUID spaceId = { 0, 0, 0, { 0, 0, 0, 0, 0, 0, 0, 0 } };
+        GUID reserveId = { 0, 0, 0, { 0, 0, 0, 0, 0, 0, 0, 0 } };
+        rc = createSpace(service, pool, options.spaceName.c_str(), options.spaceSize, 1048576ull, 1, &spaceId, &reserveId, 2);
+        if (rc < 0)
+        {
+            error = "CreateStorageSpace 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "）\n" + g_poolLog;
+            spaceOk = false;
+        }
+        else
+        {
+            detail += "space " + std::string(options.spaceName.begin(), options.spaceName.end()) + " 已创建\n";
+        }
+    }
+    const long rcClose = closePool(service, pool, 1);
+    closeService(service);
+    CloseHandle(disk);
+    FreeLibrary(module);
+    detail += g_poolLog;
+    if (!spaceOk) return false;
+    if (rcClose < 0)
+    {
+        error = "CloseStoragePool 失败（hr=" + std::to_string(static_cast<long long>(rcClose)) + "）";
+        return false;
+    }
+    return true;
+}
 } // namespace ocid::imaging
