@@ -807,7 +807,9 @@ std::string BuildIdentTable(Interner& inter,
 // ---------------------------------------------------------------------------
 std::string BuildFileRecord(Interner& inter, const Elem& e, int sddBlob, std::uint32_t targets,
                             int hashAttrBlob, int gacBlob, const std::string& sddName,
-                            std::uint32_t writeType, std::uint32_t attrFlags, int sigBlob = -1) {
+                            std::uint32_t writeType, std::uint32_t attrFlags,
+                            const std::vector<std::string>& classNames,
+                            std::vector<Row>& wcRows, int sigBlob = -1) {
     const auto a = AttrsOf(e);
     // AddFile 的 interning 顺序：sdd 名、name、loadFrom、""、""、destinationPath、
     // sourceName、sourcePath、importPath。空串返回 -1 且不入池。
@@ -821,6 +823,22 @@ std::string BuildFileRecord(Interner& inter, const Elem& e, int sddBlob, std::ui
     const int idSrcPath = inter.String(Attr(a, "sourcePath"));
     const int idImpPath = inter.String(Attr(a, "importPath"));
     (void)nSdd;
+
+    // <windowClass> class names: reference order = Hash64(name)&kM32 SitOrder (7 buckets),
+    // and interning must happen right after importPath (01286: 0=name, 1=importPath,
+    // 2..28 = 27 class names). Row = {f0 = Hash64(name)&kM32, f1 = string id, f2 = 2}.
+    if (!classNames.empty()) {
+        std::vector<std::uint32_t> keys;
+        keys.reserve(classNames.size());
+        for (const std::string& nm : classNames) {
+            keys.push_back(static_cast<std::uint32_t>(Hash64(nm) & kM32));
+        }
+        const std::vector<std::size_t> order = SitOrder(keys);
+        for (std::size_t j : order) {
+            wcRows.push_back(Row{keys[j],
+                                 static_cast<std::uint32_t>(inter.String(classNames[j])), 2u});
+        }
+    }
 
     // [14] 是生成期的 "targets" 伪 blob id，等于**本条 96B 文件记录自己的
     // blob 号减一**：真机 3244 条 96B 记录全部满足 [14] == slotIndex-1
@@ -1586,6 +1604,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     }
 
     std::vector<Row> fileRows;                  // key 1
+    std::vector<Row> wcRows;                    // key 7: windowClass class-name table
     // 每个 <categoryMembership> 各有一条 8B 记录 {categoryInstance uidx, -1}，
     // 不是整个 <memberships> 共用一条（02531：槽 7/8/9 = -1/84/128）。
     std::unordered_map<std::uint32_t, std::size_t> membSlotByElem;
@@ -1724,6 +1743,17 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             // 名字 id=1，字符串值记录里复用的 WRP_FILE_DEFAULT_SDDL 也变成 1。
             // 没有该元素时相反（sdd=0、name=1，见 02392 mountpointmanager）。
             if (!irElems.empty()) inter.String(Attr(AttrsOf(e), "name"));
+            // <windowClass> class names in document order. Reference emits one 8B {0,0}
+            // record for a file that has them (01286 real slot 2), before the digest blob.
+            std::vector<std::string> cls;
+            bool clsVersioned = false;
+            for (std::uint32_t k : e.kids) {
+                if (elems[k].local == "windowClass") {
+                    cls.push_back(Strip(elems[k].text));
+                    if (Attr(AttrsOf(elems[k]), "versioned") == "yes") clsVersioned = true;
+                }
+            }
+            if (!cls.empty()) AppendSlot(slots, 1, PackU32({0u, clsVersioned ? 1u : 0u}));
             std::string sddName;
             std::string digest;
             bool haveDigest = false;
@@ -1901,7 +1931,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                 AttrFlagsFromText(Attr(AttrsOf(e), "attributes"), 0x0A0u);
             AppendSlot(slots, 1,
                        BuildFileRecord(inter, e, sddBlob, targets, hashAttrBlob, gblob, sddName,
-                                       writeType, attrFlags, sigBlob));
+                                       writeType, attrFlags, cls, wcRows, sigBlob));
             ++fileOrd;
         } else if (e.local == "securityDescriptorDefinition") {
             const auto at = AttrsOf(e);
@@ -2376,6 +2406,15 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             DbgDumpTable("k1", rows, inter);
             std::string payload;
             if (!MakeRecordTable(6, rows, true, payload, error)) return false;
+            tbls.push_back(Slot{6, payload});
+        } else if (key == 8 && !wcRows.empty()) {
+            // key 7 = <windowClass> class-name table (t6): rows sorted by f0 ascending,
+            // f0 = Hash64(name)&kM32, f1 = string id, f2 = 2 constant, header flags=0x30 (bit0 clear).
+            std::vector<Row> rows = wcRows;
+            SortAsc(rows);
+            DbgDumpTable("k7", rows, inter);
+            std::string payload;
+            if (!MakeRecordTable(6, rows, false, payload, error)) return false;
             tbls.push_back(Slot{6, payload});
         } else if (key == 3 && !irRecs.empty()) {
             // <installerRegistration> 的 cache 记录表（t8）：f1 = GUID 表下标、
