@@ -13,10 +13,25 @@
 //              u32 csum  u16 cbData  u16 cbUncomp  u8 data[cbData]  [保留字节]
 //
 // 压缩法：0 = NONE，1 = MSZIP（每块以 "CK" 开头，其后是 raw Deflate，跨块共享 32KB 字典），
-//         2 = Quantum，3 = LZX。本实现只做 NONE / MSZIP；其余明确报错。
+//         2 = Quantum，3 = LZX。
+//
+// 【为什么 LZX 走系统 FDI】真实的 20348/10.x 包里 .cab 几乎全是 LZX（例如
+// Microsoft-OneCore-BcdCoreCore-Package~…~ARM64~~.cab 是 LZX）。自己写 LZX 解码器风险高、
+// 收益为零；系统自带的 cabinet.dll 就导出了 FDI（FDICreate/FDICopy），LZX/Quantum 全支持。
+// cabinet.dll 是 Windows 自带组件（不是第三方库、不是 ADK 工具），所以这里：
+//   NONE / MSZIP → 自己的解码器（已与 expand.exe 逐字节对拍）
+//   LZX / Quantum → FDI 解到内存/目录
 #include "ocid/imaging/Cab.h"
 
 #include "ocid/imaging/Common.h"
+
+#include <windows.h>
+
+#include <fdi.h>
+
+#include <cstdlib>
+#include <map>
+#include <memory>
 
 #include <cstring>
 
@@ -509,6 +524,161 @@ bool LoadCab(const std::wstring& path, CabFile& cab, std::string& error)
     return true;
 }
 
+// ── LZX / Quantum：借系统 cabinet.dll 的 FDI 解包 ─────────────────────────
+//
+// FDI 的回调没有"用户数据指针"，所以用一个文件级单例把上下文传进去（本工具单线程、
+// 一次只解一个 CAB，够用）。列目录不需要解压，所以 CabList 仍走上面的纯解析。
+struct FdiFile
+{
+    std::string name;
+    std::vector<std::uint8_t> data;
+};
+
+struct FdiContext
+{
+    std::wstring path;
+    std::vector<FdiFile*> files; // FdiNotify 里 new，调用方 delete
+};
+
+FdiContext* g_fdi = nullptr;
+
+void* DIAMONDAPI FdiAlloc(ULONG cb)
+{
+    return std::malloc(cb);
+}
+
+void DIAMONDAPI FdiFree(void* pv)
+{
+    std::free(pv);
+}
+
+// FDICopy 传进来的是 ANSI 拼好的路径；中文/空格路径在 ANSI 里会失真，所以忽略它，
+// 直接用 ctx 里保存的宽字符路径打开（一次只有一个 CAB 文件）。
+INT_PTR DIAMONDAPI FdiOpen(char* /*name*/, int /*oflag*/, int /*pmode*/)
+{
+    if (g_fdi == nullptr)
+    {
+        return 0;
+    }
+    HANDLE handle = CreateFileW(g_fdi->path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE)
+    {
+        return 0;
+    }
+    return reinterpret_cast<INT_PTR>(handle);
+}
+
+UINT DIAMONDAPI FdiRead(INT_PTR hf, void* pv, UINT cb)
+{
+    DWORD read = 0;
+    if (!ReadFile(reinterpret_cast<HANDLE>(hf), pv, cb, &read, nullptr))
+    {
+        return static_cast<UINT>(-1);
+    }
+    return read;
+}
+
+// 写回调的句柄是 fdintCOPY_FILE 里返回的 FdiFile*，不是 Win32 句柄。
+UINT DIAMONDAPI FdiWrite(INT_PTR hf, void* pv, UINT cb)
+{
+    FdiFile* file = reinterpret_cast<FdiFile*>(hf);
+    if (file == nullptr)
+    {
+        return static_cast<UINT>(-1);
+    }
+    const std::uint8_t* bytes = static_cast<const std::uint8_t*>(pv);
+    file->data.insert(file->data.end(), bytes, bytes + cb);
+    return cb;
+}
+
+int DIAMONDAPI FdiClose(INT_PTR hf)
+{
+    CloseHandle(reinterpret_cast<HANDLE>(hf));
+    return 0;
+}
+
+long DIAMONDAPI FdiSeek(INT_PTR hf, long distance, int seekType)
+{
+    DWORD moveMethod = FILE_BEGIN;
+    if (seekType == 1)
+    {
+        moveMethod = FILE_CURRENT;
+    }
+    else if (seekType == 2)
+    {
+        moveMethod = FILE_END;
+    }
+    const DWORD result =
+        SetFilePointer(reinterpret_cast<HANDLE>(hf), static_cast<LONG>(distance), nullptr, moveMethod);
+    return result == INVALID_SET_FILE_POINTER ? -1 : static_cast<long>(result);
+}
+
+INT_PTR DIAMONDAPI FdiNotify(FDINOTIFICATIONTYPE fdint, PFDINOTIFICATION notification)
+{
+    switch (fdint)
+    {
+    case fdintCOPY_FILE:
+    {
+        if (g_fdi == nullptr)
+        {
+            return 0;
+        }
+        FdiFile* file = new FdiFile();
+        file->name = notification->psz1 != nullptr ? notification->psz1 : "";
+        g_fdi->files.push_back(file);
+        return reinterpret_cast<INT_PTR>(file);
+    }
+    case fdintCLOSE_FILE_INFO:
+        // 数据已经在 FdiWrite 里收齐；不在这里写盘（由调用方决定目标目录）。
+        return TRUE;
+    case fdintNEXT_CABINET:
+        return -1; // 不支持跨卷 CAB
+    default:
+        return 0;
+    }
+}
+
+bool ExtractCabViaFdi(const std::wstring& path, std::map<std::string, std::vector<std::uint8_t>>& out,
+                      std::string& error)
+{
+    FdiContext context;
+    context.path = path;
+    g_fdi = &context;
+
+    ERF erf{};
+    HFDI fdi = FDICreate(FdiAlloc, FdiFree, FdiOpen, FdiRead, FdiWrite, FdiClose, FdiSeek, cpuUNKNOWN, &erf);
+    if (fdi == nullptr)
+    {
+        g_fdi = nullptr;
+        error = "FDICreate 失败（cabinet.dll）：erfOper=" + std::to_string(erf.erfOper) +
+                " erfType=" + std::to_string(erf.erfType) + " GetLastError=" + std::to_string(GetLastError());
+        return false;
+    }
+    // 名字只是给 FDI 拼路径用；我们的 FdiOpen 不看它。
+    char cabinetName[] = "x.cab";
+    char cabinetDir[] = "x";
+    const BOOL ok = FDICopy(fdi, cabinetName, cabinetDir, 0, FdiNotify, nullptr, nullptr);
+    FDIDestroy(fdi);
+    g_fdi = nullptr;
+
+    if (!ok)
+    {
+        for (FdiFile* file : context.files)
+        {
+            delete file;
+        }
+        error = "cabinet.dll（FDI）解包失败：" + WideToUtf8(path);
+        return false;
+    }
+    for (FdiFile* file : context.files)
+    {
+        out[file->name] = std::move(file->data);
+        delete file;
+    }
+    return true;
+}
+
 // 把一个 folder 的全部 CFDATA 块解成连续数据。
 bool ExpandFolder(const CabFile& cab, std::uint16_t folderIndex, std::vector<std::uint8_t>& out,
                   std::string& error)
@@ -641,6 +811,31 @@ bool CabExtractEntry(const std::wstring& path, const std::string& entryName, std
         return false;
     }
 
+    if (found->folder >= cab.folders.size())
+    {
+        error = "条目 folder 越界：" + entryName;
+        return false;
+    }
+    // LZX / Quantum 走系统 FDI（一次性把整包解到内存，再取那一条）。
+    if (cab.folders[found->folder].compression > 1)
+    {
+        std::map<std::string, std::vector<std::uint8_t>> files;
+        if (!ExtractCabViaFdi(path, files, error))
+        {
+            return false;
+        }
+        for (const auto& pair : files)
+        {
+            if (EqualsNoCase(pair.first, entryName))
+            {
+                out = pair.second;
+                return true;
+            }
+        }
+        error = "CAB 里没有这个条目：" + entryName;
+        return false;
+    }
+
     std::vector<std::uint8_t> folderData;
     if (!ExpandFolder(cab, found->folder, folderData, error))
     {
@@ -672,6 +867,38 @@ bool CabExtractText(const std::wstring& path, const std::string& entryName, std:
     return true;
 }
 
+// 把一条解压后的内容写到 targetDir 下，保留 CAB 内的相对路径。
+bool WriteCabEntry(const std::wstring& targetDir, const std::string& name, const std::uint8_t* data,
+                   std::size_t size, std::string& error)
+{
+    std::wstring target = targetDir;
+    // CAB 内用反斜杠；这里统一成反斜杠拼接，不处理 ".."（CAB 里不应出现）。
+    std::string normalized = name;
+    for (char& ch : normalized)
+    {
+        if (ch == '/')
+        {
+            ch = '\\';
+        }
+    }
+    if (!target.empty() && target.back() != L'\\' && target.back() != L'/')
+    {
+        target.push_back(L'\\');
+    }
+    target += Utf8ToWide(normalized);
+
+    const std::size_t slash = target.find_last_of(L"\\/");
+    if (slash != std::wstring::npos)
+    {
+        const std::wstring dir = target.substr(0, slash);
+        if (!EnsureDirectory(dir, error))
+        {
+            return false;
+        }
+    }
+    return WriteFileBytes(target, data, size, error);
+}
+
 bool CabExtractAll(const std::wstring& path, const std::wstring& targetDir, std::vector<std::string>& written,
                    std::string& error)
 {
@@ -683,7 +910,35 @@ bool CabExtractAll(const std::wstring& path, const std::wstring& targetDir, std:
         return false;
     }
 
-    // 按 folder 分组，避免同一个 folder 反复解压。
+    // LZX / Quantum：借 cabinet.dll 一次解到内存，再逐条写盘。
+    bool viaFdi = false;
+    for (const Folder& folder : cab.folders)
+    {
+        if (folder.compression > 1)
+        {
+            viaFdi = true;
+            break;
+        }
+    }
+    if (viaFdi)
+    {
+        std::map<std::string, std::vector<std::uint8_t>> files;
+        if (!ExtractCabViaFdi(path, files, error))
+        {
+            return false;
+        }
+        for (const auto& pair : files)
+        {
+            if (!WriteCabEntry(targetDir, pair.first, pair.second.data(), pair.second.size(), error))
+            {
+                return false;
+            }
+            written.push_back(pair.first);
+        }
+        return true;
+    }
+
+    // NONE / MSZIP：用自研解码器，按 folder 分组避免同一个 folder 反复解压。
     std::vector<std::vector<std::uint8_t>> folderData(cab.folders.size());
     std::vector<bool> folderDone(cab.folders.size(), false);
 
@@ -709,32 +964,7 @@ bool CabExtractAll(const std::wstring& path, const std::wstring& targetDir, std:
             return false;
         }
 
-        std::wstring target = targetDir;
-        // CAB 内用反斜杠；这里统一成反斜杠拼接，不处理 ".."（CAB 里不应出现）。
-        std::string normalized = entry.name;
-        for (char& ch : normalized)
-        {
-            if (ch == '/')
-            {
-                ch = '\\';
-            }
-        }
-        if (!target.empty() && target.back() != L'\\' && target.back() != L'/')
-        {
-            target.push_back(L'\\');
-        }
-        target += Utf8ToWide(normalized);
-
-        const std::size_t slash = target.find_last_of(L"\\/");
-        if (slash != std::wstring::npos)
-        {
-            const std::wstring dir = target.substr(0, slash);
-            if (!EnsureDirectory(dir, error))
-            {
-                return false;
-            }
-        }
-        if (!WriteFileBytes(target, data.data() + entry.offset, entry.size, error))
+        if (!WriteCabEntry(targetDir, entry.name, data.data() + entry.offset, entry.size, error))
         {
             return false;
         }

@@ -52,7 +52,7 @@ void PrintUsage()
     OutLn("  list     打印压缩法、块数、包内条目（名字 / 大小 / folder / 时间）");
     OutLn("  entry    抽出一个条目；--out 给文件则写文件，不给则把内容写到 stdout");
     OutLn("  extract  全解到 --out 目录，保留 CAB 内相对路径");
-    OutLn("  目前只解 NONE / MSZIP；LZX / Quantum 会明确报错（不静默出错数据）");
+    OutLn("  NONE / MSZIP 用自带解码器；LZX / Quantum 走系统 cabinet.dll 的 FDI（结果与 expand.exe 逐字节一致）");
     OutLn("");
     OutLn("通用选项：");
     OutLn("  --schema-dir <目录>      放 XSD 的目录（默认找 <exe>\\schemas 再找仓库 Schemas\\）");

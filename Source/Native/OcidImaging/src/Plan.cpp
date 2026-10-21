@@ -364,6 +364,34 @@ std::set<std::string> SplitUpper(const std::string& text)
     return out;
 }
 
+// PackageFile 的 CPUType 属性 = 该包允许的目标 CPU（分号列表）。空 = 不限。
+//
+// 参照实测（20279 QEMU arm64）：`CPUType="X86;AMD64"` 的 HyperV / Graphics-HyperV /
+// SingleScreen-ACPITable 等 21 条包不进 ARM64 镜像 —— 只看"展开后的 cab 架构段"不够，
+// 这类包在 FM 里是显式声明了架构限制的。
+// ARM64 镜像里的 32 位 ARM 包可能写成 "ARM" 或 "ARM64.ARM"，都算命中。
+bool CpuTypeAllows(const std::string& cpuType, const std::string& arch)
+{
+    const std::set<std::string> tokens = SplitUpper(cpuType);
+    if (tokens.empty())
+    {
+        return true;
+    }
+    const std::string want = Upper(arch);
+    for (const std::string& token : tokens)
+    {
+        if (token == want)
+        {
+            return true;
+        }
+        if (want == "ARM64" && (token == "ARM" || token == "ARM64.ARM" || token == "ARM32"))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool KeepPackage(PackageSection section, const FmPackage& package, const OemFilters& filters)
 {
     switch (section)
@@ -410,9 +438,28 @@ bool KeepPackage(PackageSection section, const FmPackage& package, const OemFilt
 // 规则实测（2026-10）：显式 Name 原样；否则 `<ID>~31bf3856ad364e35~<arch>~<lang>~.cab`；
 // Language="*" → neutral + 全部 OEM 语言；Wow="*" → AMD64 + wow64；
 // 顺序 = 语言在外层、架构在内层（先出全部 neutral 的各架构，再出各语言的）。
+// 目标架构 → (基础 cab 架构段, Wow="*" 时追加的架构段)
+//
+// 实测（20279 QEMU arm64 参照）：ARM64 镜像里同一个包会出 `~ARM64~` 与 `~arm64.arm~`
+// 两条；amd64 镜像里则是 `~AMD64~` 与 `~wow64~`。所以 Wow="*" 的追加段取决于目标架构，
+// 不能写死（写死 AMD64 会把 arm64 镜像的包全判成"架构不匹配"）。
+struct ArchTokens
+{
+    const char* base;
+    const char* wow;
+};
+
+ArchTokens ArchTokensFor(const std::string& arch)
+{
+    if (EqualsNoCase(arch, "arm64")) return {"ARM64", "arm64.arm"};
+    if (EqualsNoCase(arch, "x86")) return {"X86", "wow64"};
+    if (EqualsNoCase(arch, "arm")) return {"ARM", "arm"};
+    return {"AMD64", "wow64"};
+}
+
 std::vector<PackageRef> ExpandPackage(const FmPackage& package, PackageSection section,
                                       const std::string& fmId, const std::string& fmFile,
-                                      const std::vector<std::string>& languages)
+                                      const std::vector<std::string>& languages, const std::string& arch)
 {
     std::vector<PackageRef> out;
     if (!package.name.empty())
@@ -433,10 +480,15 @@ std::vector<PackageRef> ExpandPackage(const FmPackage& package, PackageSection s
     {
         return out;
     }
-    std::vector<std::string> archs{"AMD64"};
+    const ArchTokens tokens = ArchTokensFor(arch);
+    std::vector<std::string> archs{tokens.base};
     if (package.wow == "*")
     {
-        archs.push_back("wow64");
+        archs.push_back(tokens.wow);
+    }
+    else if (!package.wow.empty())
+    {
+        archs.push_back(package.wow);
     }
     std::vector<std::string> langs{std::string()};
     if (package.language == "*")
@@ -639,8 +691,13 @@ bool BuildPlan(const PlanInput& input, PlanResult& result, std::string& err)
                     ++result.stats.skippedFilter;
                     continue;
                 }
+                if (!CpuTypeAllows(package.cpuType, input.arch))
+                {
+                    ++result.stats.skippedArch;
+                    continue;
+                }
                 ++result.stats.selected;
-                for (PackageRef& ref : ExpandPackage(package, section.section, fm.id, fm.file, oem.languages))
+                for (PackageRef& ref : ExpandPackage(package, section.section, fm.id, fm.file, oem.languages, input.arch))
                 {
                     ++result.stats.expanded;
                     const std::string archToken = Lower(ArchOfCab(ref.cab));

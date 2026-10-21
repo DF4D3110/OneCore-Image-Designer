@@ -100,11 +100,11 @@ $planObjs += Build-Object 'plan' 'src\Plan.cpp' @('/DOCID_PLAN_BUILD')
 $commonLib = Join-Path $out 'ocid_common.wcos.lib'
 Build-Dll 'plan' 'ocid_plan' $planObjs @("`"$commonLib`"")
 
-# ---- 3) cab（.cab 读取：CFHEADER/CFFOLDER/CFFILE/CFDATA + NONE/MSZIP）----
+# ---- 3) cab（.cab 读取：CFHEADER/CFFOLDER/CFFILE/CFDATA + NONE/MSZIP；LZX 走 cabinet.dll 的 FDI）----
 $cabObjs = @()
 $cabObjs += Build-Object 'cab' 'src\Cab.cpp' @('/DOCID_CAB_BUILD')
 $cabLib = Join-Path $out 'ocid_cab.wcos.lib'
-Build-Dll 'cab' 'ocid_cab' $cabObjs @("`"$commonLib`"")
+Build-Dll 'cab' 'ocid_cab' $cabObjs @("`"$commonLib`"", 'cabinet.lib')
 
 # ---- 4) exe ----
 $exeObjs = @()
