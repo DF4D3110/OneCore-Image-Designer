@@ -649,7 +649,7 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
         并以**注册键 3** 登记（`kKeys` 里紧跟 key 1 之后）。10 份里 7 份整文件一致
         （`01493/02774/02229/02781/01109/01761/03074`）；`01078`（SMBServer）仍开放（`6468de6`）。
         `01247`（isolationautomation）的 `<comClass progid=…>` 复用同一张 key-3 表，已由
-        `@@WC_COMMIT@@` 解决（见 §10.1）。
+        `32064aa` 解决（见 §10.1）。
      - `<genericCommands>`：按 `install` 属性**分两组**，每组一条记录 = 组内 `<genericCommand>` 的 uidx 数组（4 B 起，10 条一组就是 20 B）；发射位置在 migration 记录**之后**、`sppInstaller` 之**前**（真机 01879 槽序 82 migration / 83 install / 84 uninstall / 85 sppInstaller）；cache GUID install `104aa381-5642-6a43-89d6-794b97ca407c`、uninstall `5dfd45c1-9b1b-3847-9961-64034a3da28f`，按 `…sppInstaller < uninstall < install` 排进 GUID 表并注册进注册键 666（`79a323a`）。另：key-666 表的 `f0` 列 = 该行 **cache GUID 的 Data1**（不是行号），只有行数 ≥7 才落盘（`00549` 的 7 行真机就是逐行 Data1 升序）。
      - 仍开放（187 份 = 171 份只差文档根记录 `b0` bit4..6 的不可复现样本 + 16 份真实残差，
        9600 T4 2,597/2,784 = 93.3%）：
@@ -841,8 +841,8 @@ WinSxS 里没有 `ntoskrnl.exe` 时用 `--os-build` 明说。
 | `<memberships>`：每个 `<categoryInstance>` 各一条 8B `{uidx,-1}`（按内容去重），t9 按 `subcategory` 分组、`f1` = 该 8B 记录在发射序中的序号（0 起、去重前计数），同一 membership 再发一张 t6（`f0=Hash64(subcategory)&kM32`） | `45e0c01` |
 | `<serviceData>` 只发一条 cache 记录，内容 = 全部 serviceData 元素的 uidx 数组，GUID `ad04d551-6848-4c46-a504-e6cc8a210a97` | `45e0c01` |
 | `<windowClass>`（`01286/01287` 两份 9600 全对）：类名在 `BuildFileRecord` 里、`importPath` 之后按 `SitOrder(Hash64(name)&kM32)`（7 桶、插入序=文档序）入池，正好占 id 2..28/2..30；每个含类的 `<file>` 在摘要 blob 之前发一条 8B `{0, 该类是否 versioned="yes"}`；整张类名表 = key 8 的 t6（`f0=Hash64(name)&kM32`、`f1=串 id`、`f2=2`、`bit0=false`），排在 t11 之后；注册键 8 自然落到该表槽号。注意：多 `<file>` 且各自带类的样本至今未见，当前实现把全部类名累积进**同一张** key-8 表，每个含类的 `<file>` 各发一条 8B `{0,versioned}` | `22df921` |
-| `<lodctrDat>`（`02037/00733` 两份 9600 全对）：一条 cache 记录 = 该清单**全部** `<lodctrDat>` 元素的 uidx 数组（02037 4 个 → 16 B `{117,151,185,219}`），GUID `9a3dcb9b-a796-41df-b455-77eba6a1ec1a`（rank 21，落在 `lodctr`=20 与 `rescache`=23 之间） | `@@WC_COMMIT@@` |
-| `<comClass progid=…>`（`01247` 全对）：`progid` 属性与子 `<progid>` 文本在 `BuildFileRecord` 里、`importPath` 之后入池（id 2/3）；摘要 blob 之前发 28 B `{0,-1,-1,tlbidGuidIdx,threading,−1,0}` + 4 B `{clsidGuidIdx}`；`tlbid`/`clsid` 两个 GUID 都进头部 GUID 表（插入序），key-3 的 t8 登记 `{clsidGuidIdx, 28B 槽}`，key-4 的 t6 行 = F1 列放**槽号**、F2 恒 3（`{(slot4,3),(slot28,3)}`）。**没有 `progid` 属性的裸 `<comClass clsid=… />` 不发任何记录**（`01493/02229/01109/01761/03074/02774/02781` 七份） | `@@WC_COMMIT@@` |
+| `<lodctrDat>`（`02037/00733` 两份 9600 全对）：一条 cache 记录 = 该清单**全部** `<lodctrDat>` 元素的 uidx 数组（02037 4 个 → 16 B `{117,151,185,219}`），GUID `9a3dcb9b-a796-41df-b455-77eba6a1ec1a`（rank 21，落在 `lodctr`=20 与 `rescache`=23 之间） | `32064aa` |
+| `<comClass progid=…>`（`01247` 全对）：`progid` 属性与子 `<progid>` 文本在 `BuildFileRecord` 里、`importPath` 之后入池（id 2/3）；摘要 blob 之前发 28 B `{0,-1,-1,tlbidGuidIdx,threading,−1,0}` + 4 B `{clsidGuidIdx}`；`tlbid`/`clsid` 两个 GUID 都进头部 GUID 表（插入序），key-3 的 t8 登记 `{clsidGuidIdx, 28B 槽}`，key-4 的 t6 行 = F1 列放**槽号**、F2 恒 3（`{(slot4,3),(slot28,3)}`）。**没有 `progid` 属性的裸 `<comClass clsid=… />` 不发任何记录**（`01493/02229/01109/01761/03074/02774/02781` 七份） | `32064aa` |
 
 ### 10.2 仍不可推导（已用全语料证据确认，不写"猜规则"的补丁）
 
