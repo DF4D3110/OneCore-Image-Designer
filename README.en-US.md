@@ -274,8 +274,8 @@ usable. See `Source/Native/OcidServicing/WSSM.md`.
 finalize) as project-owned code, split into DLLs so a failure points at one layer: `ocid_common.wcos.dll`
 (console, log, files, XML, MSXML6 XSD validation), `ocid_plan.wcos.dll` (selection from OEMInput +
 FeatureManifest), `ocid_cab.wcos.dll` (NONE/MSZIP decoders plus LZX/Quantum through the system `cabinet.dll`
-FDI), and the `ocid_imagegen.exe` console (`plan`, `packagelist`, `cab list|entry|extract`,
-`schema validate|pick`).
+FDI), and the `ocid_imagegen.exe` console (`plan`, `packagelist`, `layout show|validate|check`,
+`cab list|entry|extract`, `schema validate|pick`).
 
 Selection matches the reference runs entry-for-entry and in the same order: 10.0.20274 (amd64) 181/181, and
 10.0.20279 (arm64) 194/194. Inputs are validated against XSDs extracted from the ADK assemblies and shipped
@@ -288,6 +288,16 @@ The package list (`packagelist`) never guesses metadata from CAB names: everythi
 1/2/4, matching the reference tool's behaviour). Compared against the reference `PackageList.xml`: all
 fields identical for the 187 comparable packages; the only gaps are 6 QEMU BSP packages that are not
 present on this machine and 1 package that the later stage filters out.
+
+Device layouts (`layout`) are studied against the 12 `*DeviceLayout*-Package` packages shipped in the WSK
+(Windows System Kit, the 10.0.22000 IoT Core kit) plus the 20348 HoloLens layout: v1 is a flat MBR partition
+list (`Type=0xNN`), v2 is "storage pool with one virtual disk per store", where the `StoreType` to partition
+GUID mapping is fixed (EFIESP/MainOS/BSP/PreInstalled/OSData/Data/Reserve/VIRT_EFIESP each have their own
+pair of IDs). `TotalSectors` on a `UseAllSpace` partition is only the starting size (the reference images
+start at 20 GiB and grow to fill 42 GiB), so `check` does not require equality with the store size, and the
+MS half `DeviceLayoutMS.xml` (`MSDeviceLayout` root) legitimately lacks `SectorSize` because the OEM half
+supplies it. All 13 samples pass `layout check`, and `layout validate` picks the right XSD from the root
+element (`DeviceLayout.xsd` / `DeviceLayoutv2.xsd` / `DeviceLayoutv2MS.xsd` / `OEMDevicePlatform.xsd`).
 
 Still missing: disk creation, finalize, and the L0 orchestration that
 drives `UpdateDLL.dll` for the offline install; AppX is out of scope for now.

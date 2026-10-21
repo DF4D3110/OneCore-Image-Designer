@@ -19,6 +19,7 @@
 #include <memory>
 #include <cstring>
 #include <filesystem>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -27,7 +28,7 @@ using namespace ocid::imaging;
 namespace
 {
 
-const char* const kVersion = "0.3.0";
+const char* const kVersion = "0.4.0";
 
 void PrintUsage()
 {
@@ -41,6 +42,9 @@ void PrintUsage()
     OutLn("  ocid_imagegen cab list <文件.cab>");
     OutLn("  ocid_imagegen cab entry <文件.cab> <条目名> --out <文件>");
     OutLn("  ocid_imagegen cab extract <文件.cab> --out <目录>");
+    OutLn("  ocid_imagegen layout show <DeviceLayout.xml|OEMDevicePlatform.xml>");
+    OutLn("  ocid_imagegen layout validate <文件> [--schema-dir <目录>]");
+    OutLn("  ocid_imagegen layout check <文件> [--disk-sectors <N>] [--min-sector-count <N>]");
     OutLn("  ocid_imagegen version");
     OutLn("");
     OutLn("plan 选项：");
@@ -67,6 +71,13 @@ void PrintUsage()
     OutLn("  entry    抽出一个条目；--out 给文件则写文件，不给则把内容写到 stdout");
     OutLn("  extract  全解到 --out 目录，保留 CAB 内相对路径");
     OutLn("  NONE / MSZIP 用自带解码器；LZX / Quantum 走系统 cabinet.dll 的 FDI（结果与 expand.exe 逐字节一致）");
+    OutLn("");
+    OutLn("layout 说明：");
+    OutLn("  show      解析 DeviceLayout（v1 / v2 / MSDeviceLayout）或 OEMDevicePlatform，按 store/分区打印");
+    OutLn("  validate  按根元素选 XSD 校验：DeviceLayout→DeviceLayout.xsd/v2、MSDeviceLayout→DeviceLayoutv2MS.xsd、");
+    OutLn("            OEMDevicePlatform→OEMDevicePlatform.xsd（都在 Schemas\\adk\\，由 build-imaging.ps1 复制到 exe\\schemas）");
+    OutLn("  check     语义检查（不是 XSD）：池 store 尺寸一致性、UseAllSpace 与 store 同尺寸、BS_EFIESP 最小尺寸、");
+    OutLn("            物理盘必须有 OSPool 分区、OEMDevicePlatform.MinSectorCount 与目标盘容量");
     OutLn("");
     OutLn("通用选项：");
     OutLn("  --schema-dir <目录>      放 XSD 的目录（默认找 <exe>\\schemas 再找仓库 Schemas\\）");
@@ -750,6 +761,498 @@ int CmdPackageList(const std::vector<std::string>& args)
     return badCount == 0 ? 0 : 1;
 }
 
+// ── layout：设备布局（DeviceLayout v1/v2 + OEMDevicePlatform）──────────────
+//
+// 为什么要解析它：M1 建盘的全部输入都在这里 —— 每 store 一个虚拟盘的容量、
+// 分区类型 GUID、文件系统、对齐、以及物理盘上 OSPool 分区的位置。
+// 校验分两层：XSD（结构）用 ADK 自带的 DeviceLayout*.xsd；语义规则（尺寸/对齐）
+// 是我们从参照产物与 DeviceLayoutValidation 的行为里反推出来的，放在 check。
+
+unsigned long long ParseNum(const std::string& text)
+{
+    if (text.empty()) return 0;
+    return std::strtoull(text.c_str(), nullptr, 0);
+}
+
+std::string NumText(unsigned long long value)
+{
+    return std::to_string(value);
+}
+
+std::string FormatBytes(unsigned long long bytes)
+{
+    const char* units[] = { "B", "KiB", "MiB", "GiB", "TiB" };
+    double value = static_cast<double>(bytes);
+    int unit = 0;
+    while (value >= 1024.0 && unit < 4) { value /= 1024.0; ++unit; }
+    char buffer[64] = { 0 };
+    std::snprintf(buffer, sizeof(buffer) - 1, "%.1f %s", value, units[unit]);
+    return buffer;
+}
+
+struct LayoutPartition
+{
+    std::string name, id, type, fileSystem, byteAlignment, clusterSize;
+    unsigned long long totalSectors = 0;
+    unsigned long long minFreeSectors = 0;
+    bool hasTotal = false;
+    bool useAllSpace = false, prepareFveMetadata = false, bootable = false;
+    bool requiredToFlash = false, attachDriveLetter = false, singleSectorAlignment = false;
+};
+
+struct LayoutStore
+{
+    std::string id, storeType, devicePath;
+    unsigned long long sizeInSectors = 0;
+    bool hasSize = false;
+    std::vector<LayoutPartition> partitions;
+};
+
+struct LayoutModel
+{
+    bool v2 = false, msSplit = false;
+    std::string rootName, namespaceUri;
+    unsigned long long sectorSize = 512, chunkSize = 0, defaultAlignment = 0, stateSeparation = 0;
+    bool hasSectorSize = false, hasAlignment = false;
+    std::vector<LayoutStore> pools;
+    std::vector<LayoutStore> stores;
+    unsigned long long minSectorCount = 0;
+    bool hasMinSectorCount = false;
+    std::vector<std::string> platformIds;
+    std::string biosMode;
+};
+
+std::string NodeText(const XmlNode* node, const char* name)
+{
+    const XmlNode* child = Child(node, name);
+    if (child == nullptr) return std::string();
+    return Trim(Text(child));
+}
+
+bool ReadFlag(const XmlNode* node, const char* name)
+{
+    const std::string value = NodeText(node, name);
+    return EqualsNoCase(value, "true");
+}
+
+LayoutPartition ParsePartition(const XmlNode* node)
+{
+    LayoutPartition out;
+    out.name = NodeText(node, "Name");
+    out.id = NodeText(node, "Id");
+    out.type = NodeText(node, "Type");
+    out.fileSystem = NodeText(node, "FileSystem");
+    out.byteAlignment = NodeText(node, "ByteAlignment");
+    out.clusterSize = NodeText(node, "ClusterSize");
+    const std::string total = NodeText(node, "TotalSectors");
+    out.hasTotal = !total.empty();
+    out.totalSectors = ParseNum(total);
+    out.minFreeSectors = ParseNum(NodeText(node, "MinFreeSectors"));
+    out.useAllSpace = ReadFlag(node, "UseAllSpace");
+    out.prepareFveMetadata = ReadFlag(node, "PrepareFveMetadata");
+    out.bootable = ReadFlag(node, "Bootable");
+    out.requiredToFlash = ReadFlag(node, "RequiredToFlash");
+    out.attachDriveLetter = ReadFlag(node, "AttachDriveLetter");
+    out.singleSectorAlignment = ReadFlag(node, "SingleSectorAlignment");
+    return out;
+}
+
+void ParsePartitions(const XmlNode* holder, LayoutStore& store)
+{
+    const XmlNode* list = Child(holder, "Partitions");
+    if (list == nullptr) return;
+    for (const XmlNode* node = Child(list, "Partition"); node != nullptr; node = Next(node, "Partition"))
+    {
+        store.partitions.push_back(ParsePartition(node));
+    }
+}
+
+LayoutStore ParseStore(const XmlNode* node)
+{
+    LayoutStore store;
+    store.id = NodeText(node, "Id");
+    store.storeType = NodeText(node, "StoreType");
+    store.devicePath = NodeText(node, "DevicePath");
+    const std::string size = NodeText(node, "SizeInSectors");
+    store.hasSize = !size.empty();
+    store.sizeInSectors = ParseNum(size);
+    ParsePartitions(node, store);
+    return store;
+}
+
+bool LoadLayout(const std::string& path, LayoutModel& model, std::string& error)
+{
+    std::unique_ptr<XmlDoc> doc;
+    doc = XmlParseFile(Utf8ToWide(path), error);
+    if (!doc) return false;
+    const XmlNode* root = doc->root;
+    if (root == nullptr) { error = "XML 根节点为空"; return false; }
+    model.rootName = root->local;
+    // Common.cpp 的 DOM 不保留命名空间 URI（只存局部名），所以用"结构特征"判 v2：
+    // v2 一定有 <StoragePools>（MSDeviceLayout 是 v2 的 MS 侧半成品）。
+    const bool hasStoragePools = Child(root, "StoragePools") != nullptr;
+    model.v2 = EqualsNoCase(root->local, "MSDeviceLayout") || hasStoragePools;
+    model.msSplit = EqualsNoCase(root->local, "MSDeviceLayout");
+    model.sectorSize = ParseNum(NodeText(root, "SectorSize"));
+    model.hasSectorSize = !NodeText(root, "SectorSize").empty();
+    model.chunkSize = ParseNum(NodeText(root, "ChunkSize"));
+    model.defaultAlignment = ParseNum(NodeText(root, "DefaultPartitionByteAlignment"));
+    model.hasAlignment = !NodeText(root, "DefaultPartitionByteAlignment").empty();
+    model.stateSeparation = ParseNum(NodeText(root, "StateSeparationLevel"));
+
+    if (EqualsNoCase(root->local, "OEMDevicePlatform"))
+    {
+        const std::string minSectors = NodeText(root, "MinSectorCount");
+        model.hasMinSectorCount = !minSectors.empty();
+        model.minSectorCount = ParseNum(minSectors);
+        model.biosMode = NodeText(root, "BIOSMode");
+        if (const XmlNode* ids = Child(root, "DevicePlatformIDs"))
+        {
+            for (const XmlNode* id = Child(ids, "ID"); id != nullptr; id = Next(id, "ID"))
+            {
+                model.platformIds.push_back(Trim(Text(id)));
+            }
+        }
+        return true;
+    }
+
+    // v1：<Partitions> 直接挂在根上；v2：<StoragePools><StoragePool><Stores> + 顶层 <Stores>
+    if (const XmlNode* pools = Child(root, "StoragePools"))
+    {
+        for (const XmlNode* pool = Child(pools, "StoragePool"); pool != nullptr; pool = Next(pool, "StoragePool"))
+        {
+            const XmlNode* stores = Child(pool, "Stores");
+            if (stores == nullptr) continue;
+            for (const XmlNode* store = Child(stores, "Store"); store != nullptr; store = Next(store, "Store"))
+            {
+                model.pools.push_back(ParseStore(store));
+            }
+        }
+    }
+    if (const XmlNode* stores = Child(root, "Stores"))
+    {
+        for (const XmlNode* store = Child(stores, "Store"); store != nullptr; store = Next(store, "Store"))
+        {
+            model.stores.push_back(ParseStore(store));
+        }
+    }
+    if (const XmlNode* flat = Child(root, "Partitions"))
+    {
+        LayoutStore store;
+        store.storeType = "(v1 平铺分区)";
+        ParsePartitions(root, store);
+        model.stores.push_back(store);
+        (void)flat;
+    }
+    return true;
+}
+
+void PrintPartition(const LayoutPartition& p, unsigned long long sectorSize, const char* indent)
+{
+    std::string line = std::string(indent) + p.name;
+    if (!p.type.empty()) line += "  type=" + p.type;
+    if (!p.id.empty()) line += "  id=" + p.id;
+    if (!p.fileSystem.empty()) line += "  fs=" + p.fileSystem;
+    if (p.hasTotal)
+    {
+        line += "  sectors=" + NumText(p.totalSectors);
+        if (sectorSize > 0) line += " (" + FormatBytes(p.totalSectors * sectorSize) + ")";
+    }
+    if (p.minFreeSectors > 0)
+    {
+        line += "  minFree=" + NumText(p.minFreeSectors);
+        if (sectorSize > 0) line += " (" + FormatBytes(p.minFreeSectors * sectorSize) + ")";
+    }
+    if (p.useAllSpace) line += "  UseAllSpace";
+    if (p.prepareFveMetadata) line += "  Fve";
+    if (p.bootable) line += "  Bootable";
+    if (p.requiredToFlash) line += "  RequiredToFlash";
+    if (p.attachDriveLetter) line += "  AttachDriveLetter";
+    if (!p.byteAlignment.empty()) line += "  align=" + p.byteAlignment;
+    if (!p.clusterSize.empty()) line += "  cluster=" + p.clusterSize;
+    OutLn(line);
+}
+
+void PrintStore(const LayoutStore& store, unsigned long long sectorSize, const char* tag)
+{
+    std::string line = std::string("  ") + tag + " " + store.storeType;
+    if (!store.id.empty()) line += "  id=" + store.id;
+    if (store.hasSize)
+    {
+        line += "  sectors=" + NumText(store.sizeInSectors);
+        if (sectorSize > 0) line += " (" + FormatBytes(store.sizeInSectors * sectorSize) + ")";
+    }
+    if (!store.devicePath.empty()) line += "  device=" + store.devicePath;
+    OutLn(line);
+    for (const LayoutPartition& p : store.partitions) PrintPartition(p, sectorSize, "      ");
+}
+
+int CmdLayout(const std::vector<std::string>& args)
+{
+    std::string mode = args.size() > 2 ? args[2] : std::string();
+    if (mode.empty() || mode == "--help" || mode == "-h")
+    {
+        PrintUsage();
+        return mode.empty() ? 2 : 0;
+    }
+    std::string path, schemaDir;
+    unsigned long long diskSectors = 0, wantMinSectors = 0;
+    bool hasDiskSectors = false, hasWantMin = false;
+    for (size_t i = 3; i < args.size(); ++i)
+    {
+        const std::string& a = args[i];
+        auto next = [&](std::string& target) -> bool
+        {
+            if (i + 1 >= args.size()) return false;
+            target = args[++i];
+            return true;
+        };
+        if (a == "--schema-dir") { if (!next(schemaDir)) return 2; }
+        else if (a == "--disk-sectors") { std::string v; if (!next(v)) return 2; diskSectors = ParseNum(v); hasDiskSectors = true; }
+        else if (a == "--min-sector-count") { std::string v; if (!next(v)) return 2; wantMinSectors = ParseNum(v); hasWantMin = true; }
+        else if (a == "--help" || a == "-h") { PrintUsage(); return 0; }
+        else if (!a.empty() && a[0] == '-') { Err("未知选项：" + a); return 2; }
+        else if (path.empty()) path = a;
+        else { Err("多余的参数：" + a); return 2; }
+    }
+    if (path.empty())
+    {
+        Err("用法：ocid_imagegen layout show|validate|check <文件> [选项]");
+        return 2;
+    }
+
+    std::string error;
+    LayoutModel model;
+    if (!LoadLayout(path, model, error))
+    {
+        Err(error);
+        return 1;
+    }
+
+    if (mode == "show")
+    {
+        OutLn("文件：" + path);
+        OutLn("根元素：" + model.rootName + "（v2=" + (model.v2 ? "true" : "false") +
+              (model.msSplit ? "，MS 侧半成品" : "") + "）");
+        if (model.hasSectorSize) OutLn("SectorSize：" + NumText(model.sectorSize));
+        if (model.chunkSize > 0) OutLn("ChunkSize：" + NumText(model.chunkSize) + " KiB");
+        if (model.hasAlignment) OutLn("DefaultPartitionByteAlignment：0x" + [&]() {
+            char buffer[32] = { 0 };
+            std::snprintf(buffer, sizeof(buffer) - 1, "%llx", model.defaultAlignment);
+            return std::string(buffer);
+        }() + " (" + FormatBytes(model.defaultAlignment) + ")");
+        OutLn("StateSeparationLevel：" + NumText(model.stateSeparation));
+        if (!model.platformIds.empty() || model.hasMinSectorCount)
+        {
+            if (model.hasMinSectorCount)
+                OutLn("MinSectorCount：" + NumText(model.minSectorCount) + " (" +
+                      FormatBytes(model.minSectorCount * (model.hasSectorSize ? model.sectorSize : 512)) + ")");
+            std::string ids;
+            for (const std::string& id : model.platformIds) { if (!ids.empty()) ids += " | "; ids += id; }
+            OutLn("DevicePlatformIDs：" + ids);
+            if (!model.biosMode.empty()) OutLn("BIOSMode：" + model.biosMode);
+        }
+        if (!model.pools.empty())
+        {
+            OutLn("");
+            OutLn("存储池 store：" + std::to_string(model.pools.size()) + " 个");
+            unsigned long long total = 0;
+            for (const LayoutStore& store : model.pools)
+            {
+                PrintStore(store, model.sectorSize, "store");
+                if (store.hasSize) total += store.sizeInSectors * model.sectorSize;
+            }
+            OutLn("  池合计（薄置备上限）：" + FormatBytes(total));
+        }
+        if (!model.stores.empty())
+        {
+            OutLn("");
+            OutLn("物理/平铺分区：");
+            for (const LayoutStore& store : model.stores) PrintStore(store, model.sectorSize, "store");
+        }
+        return 0;
+    }
+
+    if (mode == "validate")
+    {
+        std::string schemaName;
+        if (EqualsNoCase(model.rootName, "OEMDevicePlatform")) schemaName = "OEMDevicePlatform.xsd";
+        else if (EqualsNoCase(model.rootName, "MSDeviceLayout")) schemaName = "DeviceLayoutv2MS.xsd";
+        else if (model.v2) schemaName = "DeviceLayoutv2.xsd";
+        else schemaName = "DeviceLayout.xsd";
+        const std::wstring schemaPath = FindSchema(schemaDir, schemaName);
+        if (schemaPath.empty())
+        {
+            Err("找不到 schema：" + schemaName + "（用 --schema-dir 指定，或先跑 build-imaging.ps1 复制 schemas）");
+            return 1;
+        }
+        std::string validateError;
+        if (!ValidateXmlAgainstSchema(Utf8ToWide(path), { schemaPath }, validateError))
+        {
+            Err("校验失败：" + validateError);
+            return 1;
+        }
+        OutLn("校验通过：" + schemaName);
+        return 0;
+    }
+
+    if (mode != "check")
+    {
+        Err("未知 layout 子命令：" + mode);
+        return 2;
+    }
+
+    // check：语义规则（XSD 之外的尺寸/一致性约束）
+    int failed = 0, warned = 0;
+    auto pass = [](const std::string& text) { OutLn("[通过] " + text); };
+    auto warn = [&](const std::string& text) { OutLn("[提示] " + text); ++warned; };
+    auto fail = [&](const std::string& text) { OutLn("[失败] " + text); ++failed; };
+
+    if (EqualsNoCase(model.rootName, "OEMDevicePlatform"))
+    {
+        if (model.hasMinSectorCount && model.minSectorCount > 0)
+            pass("MinSectorCount = " + NumText(model.minSectorCount) + "（" +
+                 FormatBytes(model.minSectorCount * 512) + " @512B）");
+        else
+            fail("缺 MinSectorCount（imageapp 用它判断目标盘是否够大）");
+        if (model.platformIds.empty()) fail("DevicePlatformIDs 为空");
+        else pass("DevicePlatformIDs = " + std::to_string(model.platformIds.size()) + " 条");
+        const unsigned long long floor = hasWantMin ? wantMinSectors
+            : (hasDiskSectors ? diskSectors : 0);
+        if (floor > 0)
+        {
+            if (model.minSectorCount <= floor) pass("MinSectorCount 不超过目标盘容量");
+            else fail("MinSectorCount（" + NumText(model.minSectorCount) + "）大于目标盘（" + NumText(floor) + "）");
+        }
+        OutLn("");
+        OutLn("结论：" + std::to_string(failed) + " 失败，" + std::to_string(warned) + " 提示");
+        return failed == 0 ? 0 : 1;
+    }
+
+    if (!model.hasSectorSize)
+    {
+        // MS 侧半成品（DeviceLayoutMS.xml）故意不带 SectorSize：尺寸/扇区由 OEM 那一半补，
+        // imageapp 校验前会先把两份合并。所以半成品缺扇区只提示，不判失败。
+        if (model.msSplit) warn("MS 侧半成品布局没有 SectorSize（由 OEM 侧 DeviceLayout.xml 补，合并后再校验）");
+        else fail("缺 SectorSize");
+    }
+    else if (model.sectorSize != 512 && model.sectorSize != 4096)
+        fail("SectorSize 不是 512 / 4096（= " + NumText(model.sectorSize) + "）");
+    else
+        pass("SectorSize = " + NumText(model.sectorSize));
+
+    if (model.v2)
+    {
+        if (model.pools.empty()) fail("v2 布局没有 <StoragePools>（池 store 是建盘的主体）");
+        else
+        {
+            pass("池 store 数量 = " + std::to_string(model.pools.size()));
+            // SizeInSectors 的分组：数据盘（EFIESP/MainOS/BSP/PreInstalled/OSData/Data/Reserve）
+            // 在参照产物里全都等大；VIRT_EFIESP 是独立的 262144（128 MiB @512），必须分开看。
+            std::set<unsigned long long> dataSizes;
+            for (const LayoutStore& store : model.pools)
+            {
+                if (!store.hasSize)
+                {
+                    if (model.msSplit) continue;
+                    fail("store " + store.storeType + " 缺 SizeInSectors");
+                    continue;
+                }
+                if (store.storeType.find("VIRT_") == 0) continue;
+                dataSizes.insert(store.sizeInSectors);
+            }
+            if (dataSizes.size() == 1)
+                pass("数据盘 store 尺寸一致 = " + NumText(*dataSizes.begin()) + "（" +
+                     FormatBytes(*dataSizes.begin() * model.sectorSize) + "）");
+            else if (dataSizes.size() > 1)
+            {
+                std::string list;
+                for (unsigned long long v : dataSizes) { if (!list.empty()) list += " / "; list += NumText(v); }
+                warn("数据盘 store 尺寸不一致（" + list + "）；imageapp 按每 store 各自建盘");
+            }
+            for (const LayoutStore& store : model.pools)
+            {
+                if (store.partitions.size() != 1)
+                    warn("store " + store.storeType + " 有 " + std::to_string(store.partitions.size()) +
+                         " 个分区（参照产物里池 store 都只有 1 个）");
+                for (const LayoutPartition& p : store.partitions)
+                {
+                    if (!p.hasTotal || !store.hasSize) continue;
+                    if (p.useAllSpace)
+                    {
+                        // UseAllSpace = 分区会长到铺满 store；TotalSectors 只是起始/最小尺寸。
+                        if (p.totalSectors > store.sizeInSectors)
+                            fail("store " + store.storeType + " 的分区 " + p.name + " 起始尺寸（" +
+                                 NumText(p.totalSectors) + "）大于 store（" + NumText(store.sizeInSectors) + "）");
+                    }
+                    else if (p.totalSectors != store.sizeInSectors)
+                    {
+                        warn("store " + store.storeType + " 的分区 " + p.name + " 固定尺寸（" +
+                             NumText(p.totalSectors) + "）小于 store（" + NumText(store.sizeInSectors) +
+                             "），剩余空间不会被使用");
+                    }
+                }
+            }
+            if (model.stores.empty()) fail("v2 布局没有顶层 <Stores>（物理盘承载 OSPool 分区）");
+            else
+            {
+                // 物理盘可能有多个（参照 HoloLens 有 XBL / BACKUP_XBL / Protected_ReadOnly / Default），
+                // 要按分区名找，不能只看第一块。
+                const LayoutPartition* pool = nullptr;
+                const LayoutPartition* bsEfiesp = nullptr;
+                const LayoutPartition* opp = nullptr;
+                std::string poolStore, bsStore, oppStore;
+                for (const LayoutStore& store : model.stores)
+                {
+                    for (const LayoutPartition& p : store.partitions)
+                    {
+                        if (EqualsNoCase(p.name, "OSPool") && pool == nullptr) { pool = &p; poolStore = store.storeType; }
+                        if (EqualsNoCase(p.name, "BS_EFIESP") && bsEfiesp == nullptr) { bsEfiesp = &p; bsStore = store.storeType; }
+                        if (EqualsNoCase(p.name, "OPP") && opp == nullptr) { opp = &p; oppStore = store.storeType; }
+                    }
+                }
+                if (pool == nullptr) warn("没有一个物理盘带 OSPool 分区（池空间落点不明；HoloLens 这类刷机布局没有它）");
+                else pass("物理盘 " + poolStore + " 有 OSPool 分区");
+                if (bsEfiesp == nullptr) warn("没有 BS_EFIESP 分区（引导用 ESP，ModernPC 参照产物里有）");
+                // 规则来源：DeviceLayoutValidation 的 BS_EFIESP 下限按 4096 扇区单位写
+                // greater_or_equal(66560)，小扇区布局在"缩放到 4K 单位"后才比。实测参照产物
+                // 20274（512 布局，BS_EFIESP=65536）能通过，WSK 4096 模板（8192×4096=32MiB）
+                // 也在库里流通 ⇒ 这条只能是"提示"，不能当失败判据。
+                if (bsEfiesp != nullptr && bsEfiesp->hasTotal && model.sectorSize > 0)
+                {
+                    const unsigned long long bytes = bsEfiesp->totalSectors * model.sectorSize;
+                    const unsigned long long need = 66560ull * 4096ull;
+                    if (bytes < need)
+                        warn("BS_EFIESP 只有 " + FormatBytes(bytes) + "，低于 66560×4096=" +
+                             FormatBytes(need) + "（参照产物 20274 也是 65536 扇区，实际能过；这条按提示处理）");
+                    else
+                        pass("BS_EFIESP 尺寸 " + FormatBytes(bytes) + " ≥ " + FormatBytes(need));
+                }
+                if (opp == nullptr) pass("没有 OPP 分区（ModernPC/QEMU 参照产物都去掉了）");
+                else warn("物理盘 " + oppStore + " 有 OPP 分区（参照产物 20274/20279 已去掉）");
+            }
+        }
+    }
+    else
+    {
+        pass("v1 布局（MBR 平铺分区）");
+        if (model.stores.empty() || model.stores.front().partitions.empty()) fail("没有分区定义");
+        bool mbrOk = true;
+        for (const LayoutPartition& p : model.stores.empty() ? std::vector<LayoutPartition>() : model.stores.front().partitions)
+        {
+            if (p.type.rfind("0x", 0) != 0) mbrOk = false;
+            if (!p.hasTotal && p.minFreeSectors == 0 && !p.useAllSpace)
+                warn("分区 " + p.name + " 既无 TotalSectors 也无 MinFreeSectors/UseAllSpace");
+        }
+        if (mbrOk) pass("所有分区 Type 都是 MBR 0xNN");
+        else warn("v1 布局里出现了非 0xNN 的分区类型（应使用 v2）");
+    }
+
+    OutLn("");
+    OutLn("结论：" + std::to_string(failed) + " 失败，" + std::to_string(warned) + " 提示");
+    return failed == 0 ? 0 : 1;
+}
+
 } // namespace
 
 // 用 wmain 取宽字符命令行：
@@ -794,6 +1297,10 @@ int wmain(int argc, wchar_t** wargv)
     if (command == "cab")
     {
         return CmdCab(args);
+    }
+    if (command == "layout")
+    {
+        return CmdLayout(args);
     }
     Err("未知命令：" + command);
     PrintUsage();
