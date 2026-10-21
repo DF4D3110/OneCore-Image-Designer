@@ -264,13 +264,15 @@ ocid_wssm pcm build a.manifest out.pcm
 | `ocid_common.wcos.dll` | 控制台与日志、文件与 XML、MSXML6 XSD 校验 |
 | `ocid_plan.wcos.dll` | 选包：OEMInput + FeatureManifest → 包计划（8 类 section，含架构/语言展开） |
 | `ocid_cab.wcos.dll` | CAB 读取：NONE/MSZIP 自研解码，LZX/Quantum 走系统 `cabinet.dll` 的 FDI |
-| `ocid_imagegen.exe` | 入口：`plan` / `packagelist` / `layout show|validate|check` / `cab list|entry|extract` / `schema validate|pick` / `version` / `help` |
+| `ocid_imagegen.exe` | 入口：`plan` / `packagelist` / `layout show|merge|plan|validate|check` / `cab list|entry|extract` / `schema validate|pick` / `version` / `help` |
 
 ```powershell
 Source\Native\build-imaging.ps1              # -> Source\Native\Output\Imaging\ocid_imagegen.exe
 ocid_imagegen plan --oem-input OEMInput.xml --fm-dir ProcessedFiles --arch arm64 --out plan.xml --list cabs.txt
 ocid_imagegen packagelist --oem-input OEMInput.xml --fm-dir ProcessedFiles --arch arm64 --cabs <包集目录> --out PackageList.xml
 ocid_imagegen layout show DeviceLayout.xml    # 池 store / 分区 / 物理盘
+ocid_imagegen layout merge DeviceLayoutMS.xml --oem DeviceLayoutOEM.xml --out merged.xml
+ocid_imagegen layout plan merged.xml          # 造盘计划：几块盘、每块多大、几个分区
 ocid_imagegen layout check DeviceLayout.xml   # 结构与尺寸自检（造盘前先跑）
 ocid_imagegen cab extract a.cab --out dir
 ocid_imagegen schema validate OEMInput.xml --schema Schemas\adk\OEMInput.V2.OEMInputV2.xsd
@@ -294,7 +296,9 @@ ocid_imagegen schema validate OEMInput.xml --schema Schemas\adk\OEMInput.V2.OEMI
 PreInstalled/OSData/Data/Reserve/VIRT_EFIESP 各自一组 ID）。`UseAllSpace` 分区的 `TotalSectors` 只是
 起始尺寸（参照产物里 20 GiB 起始、长到 42 GiB 铺满 store），所以 `check` 不拿它当等值判据；MS 侧
 `DeviceLayoutMS.xml`（`MSDeviceLayout` 根）由 OEM 侧补尺寸，缺 `SectorSize` 只提示。13 份样本
-`layout check` 全通过，`layout validate` 按根元素自动选 XSD 也全通过（`DeviceLayout.xsd` /
+`layout merge` 把「MS 半份 + OEM 半份」拼成完整布局（去掉物理盘 `OPP`、OEM 的 `DevicePath` 只做刷机提示、
+对齐值保持 `0x200000` 原样），用 19541 模板 + Surface OEM 半份合并出来的结果与 imageapp 的
+`Flash.DeviceLayout.xml` 参照产物**逐字段零差异**；`layout check` 全通过，`layout validate` 按根元素自动选 XSD 也全通过（`DeviceLayout.xsd` /
 `DeviceLayoutv2.xsd` / `DeviceLayoutv2MS.xsd` / `OEMDevicePlatform.xsd`）。
 
 `Source/Native/OcidServicing/UNRESOLVED-16299-pcm.md` 记录 10.0.16299 语料上 `t2` 串槽序这条未解规则。

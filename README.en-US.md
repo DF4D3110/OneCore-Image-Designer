@@ -274,7 +274,7 @@ usable. See `Source/Native/OcidServicing/WSSM.md`.
 finalize) as project-owned code, split into DLLs so a failure points at one layer: `ocid_common.wcos.dll`
 (console, log, files, XML, MSXML6 XSD validation), `ocid_plan.wcos.dll` (selection from OEMInput +
 FeatureManifest), `ocid_cab.wcos.dll` (NONE/MSZIP decoders plus LZX/Quantum through the system `cabinet.dll`
-FDI), and the `ocid_imagegen.exe` console (`plan`, `packagelist`, `layout show|validate|check`,
+FDI), and the `ocid_imagegen.exe` console (`plan`, `packagelist`, `layout show|merge|plan|validate|check`,
 `cab list|entry|extract`, `schema validate|pick`).
 
 Selection matches the reference runs entry-for-entry and in the same order: 10.0.20274 (amd64) 181/181, and
@@ -298,6 +298,13 @@ start at 20 GiB and grow to fill 42 GiB), so `check` does not require equality w
 MS half `DeviceLayoutMS.xml` (`MSDeviceLayout` root) legitimately lacks `SectorSize` because the OEM half
 supplies it. All 13 samples pass `layout check`, and `layout validate` picks the right XSD from the root
 element (`DeviceLayout.xsd` / `DeviceLayoutv2.xsd` / `DeviceLayoutv2MS.xsd` / `OEMDevicePlatform.xsd`).
+
+`layout merge` assembles the two halves (MS `DeviceLayout.xml`/`DeviceLayoutMS.xml` plus the OEM
+`DeviceLayoutOEM.xml`) into one canonical layout: the physical `OPP` partition is dropped (matching what
+imageapp writes), the OEM `DevicePath` is reported for UFP flashing only and not written into the layout,
+and hex alignment text such as `0x200000` is preserved. Merging the 19541 template with the Surface OEM
+half reproduces imageapp's `Flash.DeviceLayout.xml` reference artifact field for field. `layout plan`
+turns a merged layout into the disk plan (how many disks, their size, their partitions) used by M1.
 
 Still missing: disk creation, finalize, and the L0 orchestration that
 drives `UpdateDLL.dll` for the offline install; AppX is out of scope for now.

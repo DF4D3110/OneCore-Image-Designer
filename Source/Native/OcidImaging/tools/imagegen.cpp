@@ -795,6 +795,10 @@ struct LayoutPartition
     std::string name, id, type, fileSystem, byteAlignment, clusterSize;
     unsigned long long totalSectors = 0;
     unsigned long long minFreeSectors = 0;
+    // 10.0.19602 起的布局用字节表达尺寸（SizeInBytes/TotalBytes），与旧的扇区表达并存
+    unsigned long long totalBytes = 0;
+    unsigned long long minFreeBytes = 0;
+    bool hasTotalBytes = false;
     bool hasTotal = false;
     bool useAllSpace = false, prepareFveMetadata = false, bootable = false;
     bool requiredToFlash = false, attachDriveLetter = false, singleSectorAlignment = false;
@@ -804,7 +808,9 @@ struct LayoutStore
 {
     std::string id, storeType, devicePath;
     unsigned long long sizeInSectors = 0;
+    unsigned long long sizeInBytes = 0;
     bool hasSize = false;
+    bool hasSizeBytes = false;
     std::vector<LayoutPartition> partitions;
 };
 
@@ -814,6 +820,13 @@ struct LayoutModel
     std::string rootName, namespaceUri;
     unsigned long long sectorSize = 512, chunkSize = 0, defaultAlignment = 0, stateSeparation = 0;
     bool hasSectorSize = false, hasAlignment = false;
+    std::string alignmentText;   // 原始写法（0x200000），输出时照抄
+    std::string mergeVersionTag;
+    bool updateByOSTag = false;
+    bool byteUnits = false;
+    // MergeVersionTag 只是合并协议标记，最终布局产物里不出现（v2 schema 无此元素）
+    bool emitMergeTag = false;
+    std::vector<std::string> oemDevicePaths;  // OEM 半份的 DevicePath（仅信息）
     std::vector<LayoutStore> pools;
     std::vector<LayoutStore> stores;
     unsigned long long minSectorCount = 0;
@@ -848,6 +861,10 @@ LayoutPartition ParsePartition(const XmlNode* node)
     out.hasTotal = !total.empty();
     out.totalSectors = ParseNum(total);
     out.minFreeSectors = ParseNum(NodeText(node, "MinFreeSectors"));
+    const std::string totalBytes = NodeText(node, "TotalBytes");
+    out.hasTotalBytes = !totalBytes.empty();
+    out.totalBytes = ParseNum(totalBytes);
+    out.minFreeBytes = ParseNum(NodeText(node, "MinFreeBytes"));
     out.useAllSpace = ReadFlag(node, "UseAllSpace");
     out.prepareFveMetadata = ReadFlag(node, "PrepareFveMetadata");
     out.bootable = ReadFlag(node, "Bootable");
@@ -876,6 +893,9 @@ LayoutStore ParseStore(const XmlNode* node)
     const std::string size = NodeText(node, "SizeInSectors");
     store.hasSize = !size.empty();
     store.sizeInSectors = ParseNum(size);
+    const std::string sizeBytes = NodeText(node, "SizeInBytes");
+    store.hasSizeBytes = !sizeBytes.empty();
+    store.sizeInBytes = ParseNum(sizeBytes);
     ParsePartitions(node, store);
     return store;
 }
@@ -897,8 +917,12 @@ bool LoadLayout(const std::string& path, LayoutModel& model, std::string& error)
     model.hasSectorSize = !NodeText(root, "SectorSize").empty();
     model.chunkSize = ParseNum(NodeText(root, "ChunkSize"));
     model.defaultAlignment = ParseNum(NodeText(root, "DefaultPartitionByteAlignment"));
-    model.hasAlignment = !NodeText(root, "DefaultPartitionByteAlignment").empty();
+    model.alignmentText = NodeText(root, "DefaultPartitionByteAlignment");
+    model.hasAlignment = !model.alignmentText.empty();
     model.stateSeparation = ParseNum(NodeText(root, "StateSeparationLevel"));
+    model.mergeVersionTag = NodeText(root, "MergeVersionTag");
+    model.updateByOSTag = ReadFlag(root, "UpdateByOSTag");
+
 
     if (EqualsNoCase(root->local, "OEMDevicePlatform"))
     {
@@ -936,6 +960,16 @@ bool LoadLayout(const std::string& path, LayoutModel& model, std::string& error)
             model.stores.push_back(ParseStore(store));
         }
     }
+    for (const LayoutStore& s : model.pools)
+    {
+        if (s.hasSizeBytes) model.byteUnits = true;
+        for (const LayoutPartition& p : s.partitions) if (p.hasTotalBytes) model.byteUnits = true;
+    }
+    for (const LayoutStore& s : model.stores)
+    {
+        if (s.hasSizeBytes) model.byteUnits = true;
+        for (const LayoutPartition& p : s.partitions) if (p.hasTotalBytes) model.byteUnits = true;
+    }
     if (const XmlNode* flat = Child(root, "Partitions"))
     {
         LayoutStore store;
@@ -953,7 +987,12 @@ void PrintPartition(const LayoutPartition& p, unsigned long long sectorSize, con
     if (!p.type.empty()) line += "  type=" + p.type;
     if (!p.id.empty()) line += "  id=" + p.id;
     if (!p.fileSystem.empty()) line += "  fs=" + p.fileSystem;
-    if (p.hasTotal)
+    if (p.hasTotalBytes)
+    {
+        line += "  bytes=" + NumText(p.totalBytes) + " (" + FormatBytes(p.totalBytes) + ")";
+        if (sectorSize > 0) line += "  sectors=" + NumText(p.totalBytes / sectorSize);
+    }
+    else if (p.hasTotal)
     {
         line += "  sectors=" + NumText(p.totalSectors);
         if (sectorSize > 0) line += " (" + FormatBytes(p.totalSectors * sectorSize) + ")";
@@ -977,7 +1016,12 @@ void PrintStore(const LayoutStore& store, unsigned long long sectorSize, const c
 {
     std::string line = std::string("  ") + tag + " " + store.storeType;
     if (!store.id.empty()) line += "  id=" + store.id;
-    if (store.hasSize)
+    if (store.hasSizeBytes)
+    {
+        line += "  bytes=" + NumText(store.sizeInBytes) + " (" + FormatBytes(store.sizeInBytes) + ")";
+        if (sectorSize > 0) line += "  sectors=" + NumText(store.sizeInBytes / sectorSize);
+    }
+    else if (store.hasSize)
     {
         line += "  sectors=" + NumText(store.sizeInSectors);
         if (sectorSize > 0) line += " (" + FormatBytes(store.sizeInSectors * sectorSize) + ")";
@@ -987,6 +1031,264 @@ void PrintStore(const LayoutStore& store, unsigned long long sectorSize, const c
     for (const LayoutPartition& p : store.partitions) PrintPartition(p, sectorSize, "      ");
 }
 
+
+// ── 布局合并：MS 半份 + OEM 半份 ──────────────────────────────────────────
+//
+// 依据（2026-10-21 从 20274 Surface / 19602 Monza / 19541 WSK 四份样本实测）：
+//   MS 半份  = 布局包 payload 的 DeviceLayout.xml（完整）或 DeviceLayoutMS.xml
+//              （只有 <StoragePools>，没有物理盘 <Stores>、没有 SectorSize）
+//   OEM 半份 = *-DeviceLayout-Customization-Package payload 的 DeviceLayoutOEM.xml
+//              （物理盘的 Id/StoreType/DevicePath/SizeInBytes + SectorSize + UpdateByOSTag）
+// imageapp 把它们合并成一份完整布局后再造盘；本函数复现这个合并。
+std::string Esc(const std::string& text)
+{
+    std::string out;
+    XmlEscapeTo(out, text);
+    return out;
+}
+
+void FillUnits(LayoutModel& m)
+{
+    if (m.sectorSize == 0) return;
+    for (std::vector<LayoutStore>* list : {&m.pools, &m.stores})
+    {
+        for (LayoutStore& s : *list)
+        {
+            if (s.hasSizeBytes && !s.hasSize) { s.sizeInSectors = s.sizeInBytes / m.sectorSize; s.hasSize = true; }
+            if (s.hasSize && !s.hasSizeBytes) { s.sizeInBytes = s.sizeInSectors * m.sectorSize; s.hasSizeBytes = true; }
+            for (LayoutPartition& p : s.partitions)
+            {
+                if (p.hasTotalBytes && !p.hasTotal) { p.totalSectors = p.totalBytes / m.sectorSize; p.hasTotal = true; }
+                if (p.hasTotal && !p.hasTotalBytes) { p.totalBytes = p.totalSectors * m.sectorSize; p.hasTotalBytes = true; }
+            }
+        }
+    }
+}
+
+bool MergeLayouts(const LayoutModel& ms, const LayoutModel& oem, LayoutModel& out, std::string& error,
+                  bool dropOpp = true)
+{
+    out.oemDevicePaths.clear();
+    out = ms;
+    out.rootName = "DeviceLayout";
+    out.msSplit = false;
+    out.v2 = true;
+    if (oem.hasSectorSize) { out.sectorSize = oem.sectorSize; out.hasSectorSize = true; }
+    if (!out.hasSectorSize)
+    {
+        error = "布局缺少 SectorSize：MS 半份没给，OEM 半份必须提供";
+        return false;
+    }
+    if (!ms.mergeVersionTag.empty() && !oem.mergeVersionTag.empty() &&
+        !EqualsNoCase(ms.mergeVersionTag, oem.mergeVersionTag))
+    {
+        error = "MergeVersionTag 不一致：MS=" + ms.mergeVersionTag + "，OEM=" + oem.mergeVersionTag;
+        return false;
+    }
+    if (out.mergeVersionTag.empty()) out.mergeVersionTag = oem.mergeVersionTag;
+    if (oem.updateByOSTag) out.updateByOSTag = true;
+
+    std::vector<std::string> oemPaths;
+    // 物理盘：OEM 侧按 Id 覆盖尺寸；MS 侧没有的盘整条追加。
+    for (const LayoutStore& oemStore : oem.stores)
+    {
+        if (oemStore.storeType.empty()) continue;   // OEM 文件里只有 <Stores><Store>
+        LayoutStore* hit = nullptr;
+        for (LayoutStore& s : out.stores)
+        {
+            if (!s.id.empty() && EqualsNoCase(s.id, oemStore.id)) { hit = &s; break; }
+        }
+        if (hit == nullptr)
+        {
+            out.stores.push_back(oemStore);
+            continue;
+        }
+        // OEM 半份的 DevicePath 只用于 UFP 刷机（见 19602 OEM 布局里的注释：
+        // "ignored by DISM, but must match the EFI path for the main disk for UFP"），
+        // 不写进合并后的布局——20274 参照产物里 Default 的 DevicePath 仍是模板的 VenHw(...)。
+        if (!oemStore.devicePath.empty()) out.oemDevicePaths.push_back(oemStore.storeType + " -> " + oemStore.devicePath);
+        if (hit->devicePath.empty() && !oemStore.devicePath.empty()) hit->devicePath = oemStore.devicePath;
+        if (oemStore.hasSizeBytes) { hit->hasSizeBytes = true; hit->sizeInBytes = oemStore.sizeInBytes; }
+        if (oemStore.hasSize) { hit->hasSize = true; hit->sizeInSectors = oemStore.sizeInSectors; }
+    }
+    // imageapp 的参照产物里物理盘的 OPP 分区不见了（20274 Surface / 20279 QEMU 两份都对得上
+    // 其它所有 store/分区/尺寸/标志），所以合并时按同样规则去掉；留 --keep-opp 可保留。
+    if (dropOpp)
+    {
+        for (LayoutStore& s : out.stores)
+        {
+            s.partitions.erase(std::remove_if(s.partitions.begin(), s.partitions.end(),
+                [](const LayoutPartition& p) { return EqualsNoCase(p.name, "OPP"); }), s.partitions.end());
+        }
+    }
+    FillUnits(out);
+    return true;
+}
+
+std::string XmlIndent(int level) { return std::string(static_cast<std::size_t>(level) * 4, ' '); }
+
+void AppendPartitionXml(std::string& xml, const LayoutPartition& p, int level, bool byteUnits)
+{
+    xml += XmlIndent(level) + "<Partition>\r\n";
+    const std::string i1 = XmlIndent(level + 1);
+    xml += i1 + "<Name>" + Esc(p.name) + "</Name>\r\n";
+    if (!p.id.empty()) xml += i1 + "<Id>" + Esc(p.id) + "</Id>\r\n";
+    if (!p.type.empty()) xml += i1 + "<Type>" + Esc(p.type) + "</Type>\r\n";
+    if (byteUnits && p.hasTotalBytes) xml += i1 + "<TotalBytes>" + NumText(p.totalBytes) + "</TotalBytes>\r\n";
+    else if (p.hasTotal) xml += i1 + "<TotalSectors>" + NumText(p.totalSectors) + "</TotalSectors>\r\n";
+    if (!p.fileSystem.empty()) xml += i1 + "<FileSystem>" + Esc(p.fileSystem) + "</FileSystem>\r\n";
+    if (!p.byteAlignment.empty()) xml += i1 + "<ByteAlignment>" + Esc(p.byteAlignment) + "</ByteAlignment>\r\n";
+    if (!p.clusterSize.empty()) xml += i1 + "<ClusterSize>" + Esc(p.clusterSize) + "</ClusterSize>\r\n";
+    if (p.useAllSpace) xml += i1 + "<UseAllSpace>true</UseAllSpace>\r\n";
+    if (p.prepareFveMetadata) xml += i1 + "<PrepareFveMetadata>true</PrepareFveMetadata>\r\n";
+    if (p.bootable) xml += i1 + "<Bootable>true</Bootable>\r\n";
+    if (p.requiredToFlash) xml += i1 + "<RequiredToFlash>true</RequiredToFlash>\r\n";
+    if (p.attachDriveLetter) xml += i1 + "<AttachDriveLetter>true</AttachDriveLetter>\r\n";
+    if (p.singleSectorAlignment) xml += i1 + "<SingleSectorAlignment>true</SingleSectorAlignment>\r\n";
+    xml += XmlIndent(level) + "</Partition>\r\n";
+}
+
+void AppendStoreXml(std::string& xml, const LayoutStore& s, int level, bool byteUnits)
+{
+    xml += XmlIndent(level) + "<Store>\r\n";
+    const std::string i1 = XmlIndent(level + 1);
+    if (!s.id.empty()) xml += i1 + "<Id>" + Esc(s.id) + "</Id>\r\n";
+    if (!s.storeType.empty()) xml += i1 + "<StoreType>" + Esc(s.storeType) + "</StoreType>\r\n";
+    if (!s.devicePath.empty()) xml += i1 + "<DevicePath>" + Esc(s.devicePath) + "</DevicePath>\r\n";
+    if (byteUnits && s.hasSizeBytes) xml += i1 + "<SizeInBytes>" + NumText(s.sizeInBytes) + "</SizeInBytes>\r\n";
+    else if (s.hasSize) xml += i1 + "<SizeInSectors>" + NumText(s.sizeInSectors) + "</SizeInSectors>\r\n";
+    if (!s.partitions.empty())
+    {
+        xml += i1 + "<Partitions>\r\n";
+        for (const LayoutPartition& p : s.partitions) AppendPartitionXml(xml, p, level + 2, byteUnits);
+        xml += i1 + "</Partitions>\r\n";
+    }
+    xml += XmlIndent(level) + "</Store>\r\n";
+}
+
+bool WriteLayoutXml(const LayoutModel& m, const std::wstring& path, std::string& error)
+{
+    // 输出统一用扇区表达：v2 的 DeviceLayoutv2.xsd 只认 SizeInSectors/TotalSectors，
+    // 而 19602 起的 DeviceLayoutMS.xml 用 SizeInBytes/TotalBytes（那是构建期工具的中间表达）。
+    // 读的时候两种都收，写的时候一律换成扇区（SectorSize 由 MergeLayouts 保证非 0）。
+    const bool byteUnits = false;
+    (void)m.byteUnits;
+    std::string xml;
+    xml += "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n";
+    xml += "<DeviceLayout xmlns=\"http://schemas.microsoft.com/embedded/2004/10/ImageUpdate/v2\">\r\n";
+    if (!m.pools.empty())
+    {
+        xml += "    <StoragePools>\r\n";
+        xml += "        <StoragePool>\r\n            <Name>OSPool</Name>\r\n            <Stores>\r\n";
+        for (const LayoutStore& s : m.pools) AppendStoreXml(xml, s, 4, byteUnits);
+        xml += "            </Stores>\r\n        </StoragePool>\r\n    </StoragePools>\r\n";
+    }
+    if (!m.stores.empty())
+    {
+        xml += "    <Stores>\r\n";
+        for (const LayoutStore& s : m.stores) AppendStoreXml(xml, s, 2, byteUnits);
+        xml += "    </Stores>\r\n";
+    }
+    if (m.hasSectorSize) xml += "    <SectorSize>" + NumText(m.sectorSize) + "</SectorSize>\r\n";
+    if (m.chunkSize > 0) xml += "    <ChunkSize>" + NumText(m.chunkSize) + "</ChunkSize>\r\n";
+    if (m.hasAlignment) xml += "    <DefaultPartitionByteAlignment>" +
+        (m.alignmentText.empty() ? NumText(m.defaultAlignment) : m.alignmentText) + "</DefaultPartitionByteAlignment>\r\n";
+    xml += "    <StateSeparationLevel>" + NumText(m.stateSeparation) + "</StateSeparationLevel>\r\n";
+    if (m.emitMergeTag && !m.mergeVersionTag.empty()) xml += "    <MergeVersionTag>" + Esc(m.mergeVersionTag) + "</MergeVersionTag>\r\n";
+    if (m.updateByOSTag) xml += "    <UpdateByOSTag>true</UpdateByOSTag>\r\n";
+    xml += "</DeviceLayout>\r\n";
+    return WriteFileText(path, xml, error);
+}
+
+int CmdLayoutMerge(const std::vector<std::string>& args)
+{
+    std::string msPath, oemPath, outPath;
+    bool quiet = false;
+    bool keepMergeTag = false;
+    bool dropOpp = true;
+    for (std::size_t i = 3; i < args.size(); ++i)
+    {
+        const std::string& a = args[i];
+        if (a == "--help" || a == "-h") { PrintUsage(); return 0; }
+        else if (a == "--oem" && i + 1 < args.size()) oemPath = args[++i];
+        else if (a == "--out" && i + 1 < args.size()) outPath = args[++i];
+        else if (a == "--quiet") quiet = true;
+        else if (a == "--merge-tag") keepMergeTag = true;
+        else if (a == "--keep-opp") dropOpp = false;
+        else if (a.size() > 1 && a[0] == '-') { Err("layout merge: 未知选项 " + a); return 2; }
+        else if (msPath.empty()) msPath = a;
+        else { Err("layout merge: 只能给一个 MS 侧布局文件（多余的参数：" + a + "）"); return 2; }
+    }
+    if (msPath.empty()) { Err("用法：ocid_imagegen layout merge <MS 侧布局> [--oem <OEM 侧布局>] [--out <文件>]"); return 2; }
+    std::string error;
+    LayoutModel ms;
+    if (!LoadLayout(msPath, ms, error)) { Err("读取 " + msPath + " 失败：" + error); return 1; }
+    LayoutModel oem;
+    const bool hasOem = !oemPath.empty();
+    if (hasOem && !LoadLayout(oemPath, oem, error)) { Err("读取 " + oemPath + " 失败：" + error); return 1; }
+
+    LayoutModel merged;
+    if (!MergeLayouts(ms, oem, merged, error, dropOpp)) { Err("合并失败：" + error); return 1; }
+    merged.emitMergeTag = keepMergeTag;
+    if (!hasOem) LogWrite(LogLevel::Warn, "只有 MS 半份：物理盘 DevicePath/SizeInBytes 与 SectorSize 都没补（造盘会缺信息）");
+
+    if (!quiet)
+    {
+        OutLn("MS 半份：" + msPath + "（" + std::string(ms.msSplit ? "拆分半份 MSDeviceLayout" : "完整布局") + "）");
+        if (hasOem) OutLn("OEM 半份：" + oemPath);
+        for (const std::string& p : merged.oemDevicePaths) OutLn("OEM 设备路径（仅刷机用，不写入布局）：" + p);
+        if (dropOpp) OutLn("合并规则：已去掉物理盘 OPP 分区（imageapp 参照行为；--keep-opp 可保留）");
+        OutLn("合并结果：扇区大小 " + NumText(merged.sectorSize) + "，存储池 store " + NumText(merged.pools.size()) +
+              " 个，物理盘 " + NumText(merged.stores.size()) + " 块，MergeVersionTag=" +
+              (merged.mergeVersionTag.empty() ? std::string("(无)") : merged.mergeVersionTag));
+        for (const LayoutStore& s : merged.stores) PrintStore(s, merged.sectorSize, "物理盘");
+        for (const LayoutStore& s : merged.pools) PrintStore(s, merged.sectorSize, "池 store");
+    }
+    if (!outPath.empty())
+    {
+        const std::wstring wide = Utf8ToWide(outPath);
+        if (!WriteLayoutXml(merged, wide, error)) { Err("写 " + outPath + " 失败：" + error); return 1; }
+        if (!quiet) OutLn("已写出：" + outPath);
+    }
+    return 0;
+}
+
+// ── 布局计划：把布局翻译成"要建什么"的表 ──────────────────────────────────
+int CmdLayoutPlan(const std::vector<std::string>& args)
+{
+    std::string path;
+    for (std::size_t i = 3; i < args.size(); ++i)
+    {
+        const std::string& a = args[i];
+        if (a == "--help" || a == "-h") { PrintUsage(); return 0; }
+        else if (a.size() > 1 && a[0] == '-') { Err("layout plan: 未知选项 " + a); return 2; }
+        else if (path.empty()) path = a;
+        else { Err("layout plan: 只能给一个布局文件"); return 2; }
+    }
+    if (path.empty()) { Err("用法：ocid_imagegen layout plan <布局文件>"); return 2; }
+    std::string error;
+    LayoutModel m;
+    if (!LoadLayout(path, m, error)) { Err("读取 " + path + " 失败：" + error); return 1; }
+    OutLn("源文件：" + path);
+    OutLn("根元素：" + m.rootName + (m.msSplit ? "（拆分半份，缺物理盘/SectorSize）" : ""));
+    OutLn("扇区大小：" + (m.hasSectorSize ? NumText(m.sectorSize) : std::string("(未给，需 OEM 半份补)")));
+    OutLn("ChunkSize：" + NumText(m.chunkSize) + "  默认字节对齐：" + (m.hasAlignment ? NumText(m.defaultAlignment) : std::string("(未给)")));
+    OutLn("");
+    OutLn("物理盘（" + NumText(m.stores.size()) + " 块）：");
+    for (const LayoutStore& s : m.stores) PrintStore(s, m.sectorSize, "磁盘");
+    OutLn("");
+    OutLn("存储池 store（" + NumText(m.pools.size()) + " 个）：");
+    unsigned long long sum = 0;
+    for (const LayoutStore& s : m.pools)
+    {
+        PrintStore(s, m.sectorSize, "store");
+        const unsigned long long bytes = s.hasSizeBytes ? s.sizeInBytes : s.sizeInSectors * m.sectorSize;
+        if (s.storeType.rfind("VIRT_", 0) != 0) sum += bytes;
+    }
+    OutLn("");
+    OutLn("数据盘合计（不含 VIRT_）：" + FormatBytes(sum));
+    return 0;
+}
 int CmdLayout(const std::vector<std::string>& args)
 {
     std::string mode = args.size() > 2 ? args[2] : std::string();
@@ -995,6 +1297,8 @@ int CmdLayout(const std::vector<std::string>& args)
         PrintUsage();
         return mode.empty() ? 2 : 0;
     }
+    if (mode == "merge") return CmdLayoutMerge(args);
+    if (mode == "plan") return CmdLayoutPlan(args);
     std::string path, schemaDir;
     unsigned long long diskSectors = 0, wantMinSectors = 0;
     bool hasDiskSectors = false, hasWantMin = false;
