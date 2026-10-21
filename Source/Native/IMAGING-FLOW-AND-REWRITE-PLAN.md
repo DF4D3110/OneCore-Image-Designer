@@ -352,3 +352,66 @@ Finalized disks → DismountVirtualHardDisk → Image processing complete
 3. **L0 是否可接受**（仍依赖 ADK 的 `UpdateDLL.dll`）作为过渡形态？
 4. **入口形态**：并入 `ocid_wssm`（新组，如 `image build`）还是独立 `ocid_imagegen.exe`？
 5. 是否需要保留"从 OEMInput 直接产出 FFU"的老路径（`Img2Ffu`）作为并行输出？
+
+---
+
+## 10. DeviceDB（`<Output>.DeviceDB.xml`）生成规则 —— 已解（2026-10-21）
+
+> 依据：`D:\ADK2022Wrokspace\_decomp\compdbcommon\Microsoft.WindowsPhone.CompDB\{DeviceCompDB,PrepCBSFeature}.cs`
+> 反编译 + 20279 QEMU 参照（`Falsh.DeviceDB.xml` 134,603 B / 52 Feature / 199 Package / 194 Enumerated）
+> + 包内 `update.mum` 实测。
+
+### 10.1 两处特性来源
+
+**① FIP 包（Feature Identifier Package）携带特性信息。**
+选中包里 `update.mum` **恰好含一个 `<declareCapability>`** 的包就是 FIP；该片段即特性定义：
+
+```xml
+<declareCapability>
+  <capability group="Microsoft" fmid="MODERNPC_CORE_OPTIONAL">
+    <capabilityIdentity name="Language.Basic.en-us" />
+    <featurePackage>
+      <package satelliteType="Base" targetPartition="mainos" binaryPartition="false">
+        <assemblyIdentity name="Microsoft-WindowsCore-LanguageFeatures-Basic-en-us-Package"
+                          processorArchitecture="arm64" publicKeyToken="31bf3856ad364e35"
+                          version="10.0.20279.1002" />
+      </package>
+      <package satelliteType="Base" targetPartition="MainOS" ...>
+        <assemblyIdentity name="Microsoft.ModernPC.Language.Basic.en-us.MODERNPC_CORE_OPTIONAL.FIP" ... />
+      </package>
+    </featurePackage>
+  </capability>
+</declareCapability>
+```
+
+⇒ `Group=capability/@group`、`FMID=capability/@fmid`、`FeatureID=capabilityIdentity/@name`、
+`Packages=featurePackage/package/assemblyIdentity/@name`（文档序，**FIP 自身也在其中且排在最后**）；
+`satelliteType="Language"` ⇒ 该特性追加 `<DeclareSatellite type="LANGUAGE" value="<lang>"/>` 且末条 Intent 用 `USER`；
+依赖来自 FIP 里的 `<dependency><capabilityIdentity .../></dependency>`（渲染成 `<Dependencies><Feature FeatureID FMID Group/></Dependencies>`）。
+普通（非 FIP）包的 `update.mum` 里 **没有** `declareCapability`（实测 BcdCoreCore / Sbcp 均为 0）。
+
+**② 每个 FM 一条 `BASE` 特性。**
+`FeatureID="BASE"`、`FMID=<FM 的 ID 属性>`（如 `MobileDeviceSpaceFM.xml` 的 `ID="FOSMOBSFM"`）、
+`Group=<FM owner>`，`Packages` = 该 FM 的 `<BasePackages>` 里**被选中**的包（保持 FM 文档序）
+**+ 该 FM 自己的包 cab 追加在最后**（`Microsoft.ModernPC.MobileDeviceSpaceFM~6284777~arm64~~`）。
+
+### 10.2 顺序与固定字段
+
+- 特性排序 = **`(FMID 升序，FMID 为空者排最后)`，同 FMID 内 `FeatureID` 升序**（`BASE` 因大写 B 自然最前）。
+  实测 20279：`FOSMOBSFM, LANGUAGEPACKFM, MODERNPCEMULATOR, MODERNPCNPFM, MODERNPCPSFM, MODERNPC_CORE_OPTIONAL, WCINTFM, WCNPFM, WCOSCDGFM, WCPFM` → 再 `FMID=""` 的 `BASE, MS_KDNETUSB_ON, MS_STATESEPARATION_ON, RELEASE_TEST` → 最后 `BASE-DRIVERSET`（`Group="OEM"`）。
+- 每条 `<Feature Type="MobileFeature" ...>` 固定带 `<Token value="INSTALLED"/>` + `<Intent value="PREINSTALL"/>` + `<Intent value="SYSTEM|USER"/>`。
+- 根元素：`<CompDB xmlns="http://schemas.microsoft.com/embedded/2004/10/ImageUpdate" CreatedDate=… Revision="1" SchemaVersion="1.0" BuildInfo=… OSVersion=… Type="Device">`（`DeviceCompDB.WriteToFile` 会清空每包的 Payload；反射写序列化前把每个 Package 的 `Payload` 清掉）。
+- 顶层 `<Packages>`：每条 `<Package ID="<pak>" KeyForm="<pak><Version>" Partition="<mainos|EFIESP|updateos|BSP>"/>`；
+  `Partition` 取自该包 `update.mum` 的 `<package targetPartition="…">`（**大小写原样保留**：`mainos` 与 `EFIESP` 混用）；
+  `Version` 取自 `<assemblyIdentity version="…">`。
+- `<EnumeratedPackages>`：选中包全集（每条 `<Package ID=…><Token value="INSTALLED"/></Package>`；语言包额外 `<Token value="PROVISIONAL"/>`)。
+- `<Languages>` = 卫星语言集合；`<Architectures/>`、`<FailedDiffs/>`、`<DeferredUpdates/>` 空。
+- `<ValuePair>` 18 条：`Arch=x86`、`BuildBranch`、`BuildLayer.*`、`BuildLayer.TopLevel`、`CompactOS=1`、`FreeDataStorage=0`、`FreeSystemStorage=0`、`MobileStoreVersion=4`、`OSVersion`、`ProcessorArchitecture=ARM64`、`TotalRam=0`、`TotalStorage=0`、`WinREVersion`（空）—— 由 OEMInput/BuildInfo 推导，待逐条对拍。
+
+### 10.3 待对拍 / 未定项
+
+1. `BuildID`/`BSPBuildID`：源码从包内 `\Windows\ImageFM` 下的 FM 读；参照里 `BuildID` 未出现（`SchemaVersion="1.0"` 时可能省略）。
+2. `CreatedDate` 的取法（是否 `DateTime.Now`）。
+3. `ValuePair` 逐条来源（尤其 `BuildLayer.*`、`WinREVersion`）。
+4. 顶层 `<Packages>` 199 与 `<EnumeratedPackages>` 194 的 5 条差集（需逐条列出：疑似 BSP 驱动 + InboxCompDB 包）。
+5. 20274（amd64）参照需同步验证（55 Feature / 181 包）。
