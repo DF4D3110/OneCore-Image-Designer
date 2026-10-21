@@ -1079,6 +1079,7 @@ int CmdDeviceDb(const std::vector<std::string>& args)
 
     for (const std::string& fmid : fmOrder)
     {
+        std::vector<std::string> fmFiles;
         Feature f;
         f.featureId = "BASE";
         f.fmid = fmid;
@@ -1093,14 +1094,31 @@ int CmdDeviceDb(const std::vector<std::string>& args)
             f.partitions.push_back(p.mum.partition);
         }
         for (const Pkg& p : packages)
-        {
-            if (!p.haveMum || p.ref.fmId != fmid) continue;
-            if (p.mum.hasCapability) continue;
-            if (!EqualsNoCase(p.mum.pkt, "628844477771337a")) continue;
-            f.ids.push_back(p.mum.identity);
-            f.keyForms.push_back(p.mum.identity + p.mum.version);
-            f.partitions.push_back(p.mum.partition);
-        }
+{
+    if (!p.haveMum || p.ref.fmId != fmid) continue;
+    bool seenFile = false;
+    for (const std::string& f : fmFiles) if (EqualsNoCase(f, p.ref.fmFile)) { seenFile = true; break; }
+    if (!seenFile) fmFiles.push_back(p.ref.fmFile);
+}
+// FM 自身包：identity = "Microsoft.ModernPC." + FM 文件名主干（固定前缀，按 FM 文件而非 FMID）
+for (const std::string& fmFile : fmFiles)
+{
+    std::string stem = fmFile;
+    const std::size_t dot = stem.find_last_of('.');
+    if (dot != std::string::npos) stem = stem.substr(0, dot);
+    const std::string want = "Microsoft.ModernPC." + stem;
+    for (const Pkg& p : packages)
+    {
+        if (!p.haveMum || !EqualsNoCase(p.ref.fmFile, fmFile)) continue;
+        if (!EqualsNoCase(p.mum.name, want)) continue;
+        if (!EqualsNoCase(p.mum.pkt, "628844477771337a")) continue;
+        if (!p.mum.language.empty()) continue;
+        f.ids.push_back(p.mum.identity);
+        f.keyForms.push_back(p.mum.identity + p.mum.version);
+        f.partitions.push_back(p.mum.partition);
+        break;
+    }
+}
         features.push_back(f);
     }
 
@@ -1130,12 +1148,15 @@ int CmdDeviceDb(const std::vector<std::string>& args)
         features.push_back(f);
     }
 
-    // 排序：按 FM 声明序（= plan 里的出现序，即 OEMInput.AdditionalFMs 顺序），
-    // 空 FMID 排最后；同组内 BASE 在前、其余保持 plan 顺序（与参照一致）。
+    // 排序：FMID 不区分大小写升序（空 FMID 最后），同组内 BASE 在前、其余保持 plan 顺序。
+    // 实测参照就是这个次序：FOSMOBSFM → LANGUAGEPACKFM → MODERNPCEMULATOR → … → WCPFM → 空 FMID。
     std::stable_sort(features.begin(), features.end(), [](const Feature& a, const Feature& b) {
         const bool ae = a.fmid.empty();
         const bool be = b.fmid.empty();
         if (ae != be) return be;
+        const std::string la = LowerText(a.fmid);
+        const std::string lb = LowerText(b.fmid);
+        if (la != lb) return la < lb;
         const bool ab = (a.featureId == "BASE");
         const bool bb = (b.featureId == "BASE");
         if (ab != bb) return ab;
