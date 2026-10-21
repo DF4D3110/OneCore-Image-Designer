@@ -100,17 +100,23 @@ $planObjs += Build-Object 'plan' 'src\Plan.cpp' @('/DOCID_PLAN_BUILD')
 $commonLib = Join-Path $out 'ocid_common.wcos.lib'
 Build-Dll 'plan' 'ocid_plan' $planObjs @("`"$commonLib`"")
 
-# ---- 3) exe ----
+# ---- 3) cab（.cab 读取：CFHEADER/CFFOLDER/CFFILE/CFDATA + NONE/MSZIP）----
+$cabObjs = @()
+$cabObjs += Build-Object 'cab' 'src\Cab.cpp' @('/DOCID_CAB_BUILD')
+$cabLib = Join-Path $out 'ocid_cab.wcos.lib'
+Build-Dll 'cab' 'ocid_cab' $cabObjs @("`"$commonLib`"")
+
+# ---- 4) exe ----
 $exeObjs = @()
 $exeObjs += Build-Object 'imagegen' 'tools\imagegen.cpp'
 $exe = Join-Path $out 'ocid_imagegen.exe'
 $planLib = Join-Path $out 'ocid_plan.wcos.lib'
 $exeObjArgs = ($exeObjs | ForEach-Object { '"' + $_ + '"' }) -join ' '
-$linkLines = @("link /nologo /OUT:`"$exe`" $exeObjArgs `"$planLib`" `"$commonLib`"")
+$linkLines = @("link /nologo /OUT:`"$exe`" $exeObjArgs `"$planLib`" `"$cabLib`" `"$commonLib`"")
 $null = Invoke-Batch 'imagegen' $linkLines
 Write-Host "[build] OK ocid_imagegen.exe"
 
-# ---- 4) Schemas（复用现成 XSD，不重写校验规则）----
+# ---- 5) Schemas（复用现成 XSD，不重写校验规则）----
 $schemaSrc = Join-Path (Split-Path -Parent $root) 'Schemas'
 $schemaDst = Join-Path $out 'schemas'
 if (Test-Path $schemaSrc) {

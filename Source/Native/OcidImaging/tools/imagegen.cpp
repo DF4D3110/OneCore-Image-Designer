@@ -3,11 +3,13 @@
 // 【职责】把 imageapp 那条流水线拆成可以单独跑、单独对拍的几步：
 //   plan      选包（OEMInput + FM → 有序包清单 + 统计）
 //   schema    用仓库里的 XSD 校验输入 XML（OEMInput / FeatureManifest）
+//   cab       读 .cab（列目录 / 抽单个条目 / 全解）
 //   version   版本
 // 后续会加：stage（装包/建盘编排）、finalize（收尾）。当前先把"决策"这一层做扎实，
 // 因为它决定后面所有阶段对不对。
 //
 // 【约定】数据走 stdout（UTF-8），诊断走 stderr；退出码 0 成功、1 失败、2 用法错误。
+#include "ocid/imaging/Cab.h"
 #include "ocid/imaging/Common.h"
 #include "ocid/imaging/Plan.h"
 
@@ -21,16 +23,19 @@ using namespace ocid::imaging;
 namespace
 {
 
-const char* const kVersion = "0.1.0";
+const char* const kVersion = "0.2.0";
 
 void PrintUsage()
 {
-    OutLn("ocid_imagegen " + std::string(kVersion) + " —— 镜像构建（选包 / 校验）");
+    OutLn("ocid_imagegen " + std::string(kVersion) + " —— 镜像构建（选包 / 校验 / 读包）");
     OutLn("");
     OutLn("用法：");
     OutLn("  ocid_imagegen plan --oem-input <OEMInput.xml> [选项]");
     OutLn("  ocid_imagegen schema validate <XML> --schema <XSD> [--schema <XSD>...]");
     OutLn("  ocid_imagegen schema pick --build <构建号> [--family V1|V2] [--schema-dir <目录>]");
+    OutLn("  ocid_imagegen cab list <文件.cab>");
+    OutLn("  ocid_imagegen cab entry <文件.cab> <条目名> --out <文件>");
+    OutLn("  ocid_imagegen cab extract <文件.cab> --out <目录>");
     OutLn("  ocid_imagegen version");
     OutLn("");
     OutLn("plan 选项：");
@@ -42,6 +47,12 @@ void PrintUsage()
     OutLn("  --list <文件>            写 cab 名清单（每行一个，便于和参照产物 diff）");
     OutLn("  --keep-duplicates        保留同一 cab 的多次出现（对齐 imageapp 的 UpdateInput）");
     OutLn("  --log <文件>             写流水日志（{时间}  消息）");
+    OutLn("");
+    OutLn("cab 说明：");
+    OutLn("  list     打印压缩法、块数、包内条目（名字 / 大小 / folder / 时间）");
+    OutLn("  entry    抽出一个条目；--out 给文件则写文件，不给则把内容写到 stdout");
+    OutLn("  extract  全解到 --out 目录，保留 CAB 内相对路径");
+    OutLn("  目前只解 NONE / MSZIP；LZX / Quantum 会明确报错（不静默出错数据）");
     OutLn("");
     OutLn("通用选项：");
     OutLn("  --schema-dir <目录>      放 XSD 的目录（默认找 <exe>\\schemas 再找仓库 Schemas\\）");
@@ -294,6 +305,114 @@ int CmdSchema(const std::vector<std::string>& args)
     return 2;
 }
 
+// ── cab：读 .cab（列目录 / 抽条目 / 全解）─────────────────────────────────
+int CmdCab(const std::vector<std::string>& args)
+{
+    if (args.size() < 3)
+    {
+        Err("用法：ocid_imagegen cab list|entry|extract <文件.cab> …");
+        return 2;
+    }
+    const std::string& mode = args[2];
+    if (mode == "list")
+    {
+        if (args.size() < 4)
+        {
+            Err("用法：ocid_imagegen cab list <文件.cab>");
+            return 2;
+        }
+        CabInfo info;
+        std::string error;
+        if (!CabList(Utf8ToWide(args[3]), info, error))
+        {
+            Err(error);
+            return 1;
+        }
+        OutLn("文件：" + args[3]);
+        OutLn("结构：CAB 声明 " + std::to_string(info.bytes) + " 字节，folder " +
+              std::to_string(info.folderCount) + " 个，块 " + std::to_string(info.blockCount) +
+              " 个，条目 " + std::to_string(info.files.size()) + " 个");
+        OutLn(std::string("压缩：") + CabCompressionName(info.compression) + "，解开后 " +
+              std::to_string(info.totalSize) + " 字节");
+        for (const CabEntry& entry : info.files)
+        {
+            OutLn("  " + entry.name + "  " + std::to_string(entry.size) + " 字节  folder " +
+                  std::to_string(entry.folder) + " 偏移 " + std::to_string(entry.offset));
+        }
+        return 0;
+    }
+    if (mode == "entry")
+    {
+        if (args.size() < 5)
+        {
+            Err("用法：ocid_imagegen cab entry <文件.cab> <条目名> [--out <文件>]");
+            return 2;
+        }
+        const std::string cabPath = args[3];
+        const std::string entryName = args[4];
+        std::string outPath;
+        for (std::size_t i = 5; i < args.size(); ++i)
+        {
+            if (args[i] == "--out" && i + 1 < args.size()) outPath = args[++i];
+            else { Err("未知参数：" + args[i]); return 2; }
+        }
+        std::string error;
+        std::vector<std::uint8_t> bytes;
+        if (!CabExtractEntry(Utf8ToWide(cabPath), entryName, bytes, error))
+        {
+            Err(error);
+            return 1;
+        }
+        if (outPath.empty())
+        {
+            // 不给 --out 就写 stdout（适合抽 .manifest 直接看）。
+            std::fwrite(bytes.data(), 1, bytes.size(), stdout);
+            std::fflush(stdout);
+        }
+        else
+        {
+            if (!WriteFileBytes(Utf8ToWide(outPath), bytes.data(), bytes.size(), error))
+            {
+                Err(error);
+                return 1;
+            }
+            Err("已写出 " + std::to_string(bytes.size()) + " 字节 → " + outPath);
+        }
+        return 0;
+    }
+    if (mode == "extract")
+    {
+        if (args.size() < 4)
+        {
+            Err("用法：ocid_imagegen cab extract <文件.cab> --out <目录>");
+            return 2;
+        }
+        const std::string cabPath = args[3];
+        std::string outDir;
+        for (std::size_t i = 4; i < args.size(); ++i)
+        {
+            if (args[i] == "--out" && i + 1 < args.size()) outDir = args[++i];
+            else { Err("未知参数：" + args[i]); return 2; }
+        }
+        if (outDir.empty())
+        {
+            Err("需要 --out <目录>");
+            return 2;
+        }
+        std::string error;
+        std::vector<std::string> written;
+        if (!CabExtractAll(Utf8ToWide(cabPath), Utf8ToWide(outDir), written, error))
+        {
+            Err(error);
+            return 1;
+        }
+        OutLn("解开 " + std::to_string(written.size()) + " 个条目 → " + outDir);
+        return 0;
+    }
+    Err("未知 cab 子命令：" + mode);
+    return 2;
+}
+
 } // namespace
 
 // 用 wmain 取宽字符命令行：
@@ -330,6 +449,10 @@ int wmain(int argc, wchar_t** wargv)
     if (command == "schema")
     {
         return CmdSchema(args);
+    }
+    if (command == "cab")
+    {
+        return CmdCab(args);
     }
     Err("未知命令：" + command);
     PrintUsage();
