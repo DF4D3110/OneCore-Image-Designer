@@ -1,0 +1,40 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<xs:schema targetNamespace="http://schemas.microsoft.com/embedded/2004/10/ImageUpdate" elementFormDefault="qualified" xmlns="http://schemas.microsoft.com/embedded/2004/10/ImageUpdate" xmlns:mstns="http://schemas.microsoft.com/embedded/2004/10/ImageUpdate" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+
+  <xs:complexType name="AppXPackageType">
+    <xs:attribute name="Path" type="xs:string" />
+    <xs:attribute name="Name" type="xs:string" />
+    <xs:attribute name="ID" type="xs:string" use="optional" />
+    <xs:attribute name="Version" type="xs:string" use="optional" />
+    <xs:attribute name="Optional" type="xs:boolean" use="optional" />
+    <xs:attribute name="LicenseFile" type="xs:string" use="optional" />
+    <xs:attribute name="PreferStub" type="xs:boolean" use="optional" />
+    <xs:attribute name="Region" type="xs:string" use="optional" />
+    <xs:attribute name="CPUType" use="optional" >
+      <xs:simpleType>
+        <xs:restriction base="xs:string">
+          <xs:pattern value="(x86|X86|arm|ARM|amd64|AMD64|arm64|ARM64)(;(x86|X86|arm|ARM|amd64|AMD64|arm64|ARM64))*"/>
+        </xs:restriction>
+      </xs:simpleType>
+    </xs:attribute>
+  </xs:complexType>
+  
+  <xs:complexType name="AppXType">
+    <xs:all>
+      <xs:element name="AppXPackages" minOccurs="0" maxOccurs="1">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="PackageFile" type="AppXPackageType" minOccurs="0" maxOccurs="unbounded"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="ConditionalAppXPackages" minOccurs="0" maxOccurs="1">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="ConditionalAppXPackage" type="ConditionalFeatureType" minOccurs="0" maxOccurs="unbounded"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+    </xs:all>
+  </xs:complexType>
+</xs:schema>

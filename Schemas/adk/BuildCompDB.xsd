@@ -1,0 +1,360 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema targetNamespace="http://schemas.microsoft.com/embedded/2004/10/ImageUpdate" elementFormDefault="qualified" xmlns="http://schemas.microsoft.com/embedded/2004/10/ImageUpdate" xmlns:mstns="http://schemas.microsoft.com/embedded/2004/10/ImageUpdate" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+    <xs:complexType name="PkgType">
+        <xs:sequence>
+            <xs:element name="SatelliteInfo" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="ApplyToInfo" minOccurs="0" maxOccurs="1">
+                            <xs:complexType>
+                                <xs:sequence>
+                                    <xs:element name="ApplyTo" type="SatelliteInfoElementType" minOccurs="1" maxOccurs="unbounded"/>
+                                </xs:sequence>
+                            </xs:complexType>
+                        </xs:element>
+                        <xs:element name="DeclareInfo" minOccurs="0" maxOccurs="1">
+                            <xs:complexType>
+                                <xs:sequence>
+                                    <xs:element name="Declare" type="SatelliteInfoElementType" minOccurs="1" maxOccurs="unbounded"/>
+                                </xs:sequence>
+                            </xs:complexType>
+                        </xs:element>
+                        <xs:element name="RequireInfo" minOccurs="0" maxOccurs="1">
+                            <xs:complexType>
+                                <xs:sequence>
+                                    <xs:element name="Require" type="SatelliteInfoElementType" minOccurs="1" maxOccurs="unbounded"/>
+                                </xs:sequence>
+                            </xs:complexType>
+                        </xs:element>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+            <xs:element name="Payload" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="PayloadItem" type="PayloadItemType" minOccurs="0" maxOccurs="unbounded"/>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+        </xs:sequence>
+        <xs:attribute name="ID" type="xs:string" />
+        <xs:attribute name="Partition" use="optional" />
+        <xs:attribute name="Version" type="xs:string" />
+        <xs:attribute name="KeyForm" type="xs:string" use="optional" />
+        <xs:attribute name="ReleaseType" type="xs:string" use="optional"  />
+        <xs:attribute name="OwnerType" type="xs:string" use="optional"  />
+        <xs:attribute name="SatelliteType" type="xs:string" use="optional" />
+        <xs:attribute name="SatelliteValue" type="xs:string" use="optional" />
+        <xs:attribute name="Encrypted" type="xs:boolean" use="optional" />
+        <xs:attribute name="PublicKeyToken" type="xs:string" use="optional" />
+        <xs:attribute name="BinaryPartition" type="xs:boolean" use="optional" />
+        <xs:attribute name="SkipForPublishing" type="xs:boolean" use="optional" />
+        <xs:attribute name="SkipForPRSSigning" type="xs:boolean" use="optional" />
+        <xs:attribute name="UserInstallable" type="xs:boolean" use="optional" />
+        <xs:attribute name="SourceFMFile" type="xs:string" use="optional" />
+        <xs:attribute name="BuildArchOverride" type="xs:string" use="optional" />
+        <xs:attribute name="InstalledSize" type="xs:unsignedLong" use="optional" />
+        <xs:attribute name="StagedSize" type="xs:unsignedLong" use="optional" />        
+        <xs:attribute name="CompressedSize" type="xs:unsignedLong" use="optional" />
+        <xs:attribute name="Type" use="optional" >
+            <xs:simpleType>
+                <xs:restriction base="xs:string">
+                    <xs:pattern value="(Default|DriverPackage)"/>
+                </xs:restriction>
+            </xs:simpleType>
+        </xs:attribute>
+    </xs:complexType>
+
+    <xs:complexType name="SatelliteInfoElementType">
+        <xs:attribute name="Type">
+            <xs:simpleType>
+                <xs:restriction base="xs:string">
+                    <xs:pattern value="(language|arch)"/>
+                </xs:restriction>
+            </xs:simpleType>
+        </xs:attribute>
+        <xs:attribute name="Value">
+            <xs:simpleType>
+                <xs:restriction base="xs:string"/>
+            </xs:simpleType>
+        </xs:attribute>
+    </xs:complexType>
+  
+    <xs:complexType name="PayloadItemType">
+        <xs:attribute name="PayloadHash" type="xs:string" use="optional" />
+        <xs:attribute name="PayloadSize" type="xs:long" use="optional" />
+        <xs:attribute name="Path" type="xs:string" />
+        <xs:attribute name="PreviousPath" type="xs:string" />
+        <xs:attribute name="PayloadType">
+            <xs:simpleType>
+                <xs:restriction base="xs:string">
+                    <xs:pattern value="(Canonical|Diff|ExpressPSF|ExpressCab|ExpressWim|ReverseDiff)" />
+                </xs:restriction>
+            </xs:simpleType>
+        </xs:attribute>
+    </xs:complexType>
+
+    <xs:complexType name="CustomInfoType">
+        <xs:attribute name="Key" type="xs:string" />
+        <xs:attribute name="Value" type="xs:string" />
+    </xs:complexType>
+
+    <xs:complexType name="FeaturePkgType">
+        <xs:attribute name="ID" type="xs:string" />
+        <xs:attribute name="FIP" type="xs:boolean" use="optional"/>
+        <xs:attribute name="UpdateType" type="xs:string" use="optional"/>
+        <xs:attribute name="PackageType">
+            <xs:simpleType>
+                <xs:restriction base="xs:string">
+                    <xs:pattern value="(FeaturePackage|DriverPackage|MediaFileList|MetadataESD|FoDMetadata|SatellitePackage)"/>
+                </xs:restriction>
+            </xs:simpleType>
+        </xs:attribute>
+    </xs:complexType>
+
+    <xs:complexType name="ConditionSetType">
+        <xs:all>
+            <xs:element name="Conditions" minOccurs="0" maxOccurs="1" >
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="Condition" type="ConditionType" minOccurs="0" maxOccurs="unbounded"/>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+            <xs:element name="ConditionSets" minOccurs="0" maxOccurs="1" >
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="ConditionSet" type="ConditionSetType" minOccurs="0" maxOccurs="unbounded"/>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+        </xs:all>
+
+        <xs:attribute name="Operator" use="optional">
+            <xs:simpleType>
+                <xs:restriction base="xs:string">
+                    <xs:pattern value="(AND|OR)"/>
+                </xs:restriction>
+            </xs:simpleType>
+        </xs:attribute>
+    </xs:complexType>
+    
+    <xs:complexType name="ConditionType">
+        <xs:attribute name="Type">
+            <xs:simpleType>
+                <xs:restriction base="xs:string">
+                    <xs:pattern value="(NameValuePair|Registry|Feature|AppX|PackageAnyVersion|PackageWithVersion|NameValueSetPair)"/>
+                </xs:restriction>
+            </xs:simpleType>
+        </xs:attribute>
+
+        <xs:attribute name="Operator" use="optional">
+            <xs:simpleType>
+                <xs:restriction base="xs:string">
+                    <xs:pattern value="(GT|GTE|LT|LTE|EQ|NEQ|EXISTS|NOTEXISTS)"/>
+                </xs:restriction>
+            </xs:simpleType>
+        </xs:attribute>
+
+        <xs:attribute name="Name" type="xs:string" use="optional"/>
+        <xs:attribute name="Value" type="xs:string" use="optional"/>
+
+        <xs:attribute name="RegistryKey" type="xs:string" use="optional"/>
+        <xs:attribute name="RegistryKeyType" type="xs:string" use="optional"/>
+        <xs:attribute name="FMID" type="xs:string" use="optional"/>
+        <xs:attribute name="FeatureStatus" use="optional">
+            <xs:simpleType>
+                <xs:restriction base="xs:string">
+                    <xs:pattern value="(Installed|NotInstalled)"/>
+                </xs:restriction>
+            </xs:simpleType>
+        </xs:attribute>
+        <xs:attribute name="Status" use="optional">
+            <xs:simpleType>
+                <xs:restriction base="xs:string">
+                    <xs:pattern value="(Installed|NotInstalled)"/>
+                </xs:restriction>
+            </xs:simpleType>
+        </xs:attribute>
+    </xs:complexType>
+
+    <xs:complexType name="ConditionalFeatureType">
+        <xs:sequence>
+            <xs:element name="ConditionSet" type="ConditionSetType" minOccurs="0" maxOccurs="1"/>
+            <xs:element name="Condition" type="ConditionType" minOccurs="0" maxOccurs="1"/>
+        </xs:sequence>
+        <xs:attribute name="FeatureID" type="xs:string" />
+        <xs:attribute name="FMID" type="xs:string" use="optional"/>
+        <xs:attribute name="FamilyName" type="xs:string" use="optional"/> <!-- For AppX conditions only -->
+        <xs:attribute name="OwnerType" type="xs:string" use="optional"/>
+
+        <xs:attribute name="UpdateAction" use="optional">
+          <xs:simpleType>
+            <xs:restriction base="xs:string">
+              <xs:pattern value="(Add|Install|Remove|NoUpdate|Repair|None)"/>
+            </xs:restriction>
+          </xs:simpleType>
+        </xs:attribute>
+        <xs:attribute name="InstallAction" use="optional">
+          <xs:simpleType>
+            <xs:restriction base="xs:string">
+              <xs:pattern value="(Block|Allow|None)"/>
+            </xs:restriction>
+          </xs:simpleType>
+        </xs:attribute>
+    </xs:complexType>
+  
+    <xs:complexType name="TagItemType">
+      <xs:attribute name="Name" type="xs:string" />
+      <xs:attribute name="Value" type="xs:string" />
+    </xs:complexType>
+
+    <xs:complexType name="LocalizedStringType">
+      <xs:attribute name="Language" type="xs:string" />
+      <xs:attribute name="DisplayName" type="xs:string" />
+      <xs:attribute name="Description" type="xs:string" />
+    </xs:complexType>
+
+  <xs:element name="CompDB">
+    <xs:complexType>
+        <xs:all>
+          <xs:element name="Tags" minOccurs="0" maxOccurs="1">
+            <xs:complexType>
+              <xs:sequence>
+                <xs:element name="Tag" type="TagItemType" minOccurs="0" maxOccurs="unbounded"/>
+              </xs:sequence>
+              <xs:attribute name="Type">
+                <xs:simpleType>
+                  <xs:restriction base="xs:string">
+                    <xs:enumeration value="Edition"/>
+                    <xs:enumeration value="Neutral"/>
+                    <xs:enumeration value="Language"/>
+                    <xs:enumeration value="Tools"/>
+                    <xs:enumeration value="DeploymentCab"/>
+                    <xs:enumeration value="Internal"/>
+                    <xs:enumeration value="Retail"/>
+                    <xs:enumeration value="CumulativeUpdate"/>
+                  </xs:restriction>
+                </xs:simpleType>
+              </xs:attribute>
+            </xs:complexType>
+          </xs:element>
+
+          <xs:element name="Features" minOccurs="1" maxOccurs="1" >
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="Feature" minOccurs="0" maxOccurs="unbounded">
+                            <xs:complexType>
+                                <xs:sequence>
+                                    <xs:element name="Dependencies" minOccurs="0" maxOccurs="1">
+                                        <xs:complexType>
+                                            <xs:sequence>
+                                                <xs:element name="Feature" minOccurs="1" maxOccurs="unbounded">
+                                                    <xs:complexType>
+                                                        <xs:attribute name="FeatureID" type="xs:string" />
+                                                        <xs:attribute name="FMID" type="xs:string" use="optional"/>
+                                                        <xs:attribute name="Group" type="xs:string" use="optional"/>
+                                                    </xs:complexType>
+                                                </xs:element>
+                                            </xs:sequence>
+                                        </xs:complexType>
+                                    </xs:element>
+                                    <xs:element name="LocalizedStrings" minOccurs="0" maxOccurs="1">
+                                        <xs:complexType>
+                                            <xs:sequence>
+                                                <xs:element name="LocalizedString" type="LocalizedStringType" minOccurs="1" maxOccurs="unbounded"/>
+                                            </xs:sequence>
+                                        </xs:complexType>
+                                    </xs:element>
+                                    <xs:element name="CustomInformation" minOccurs="0" maxOccurs="1">
+                                        <xs:complexType>
+                                            <xs:sequence>
+                                                <xs:element name="CustomInfo" type="CustomInfoType" minOccurs="1" maxOccurs="unbounded"/>
+                                            </xs:sequence>
+                                        </xs:complexType>
+                                    </xs:element>
+                                    <xs:element name="Packages" minOccurs="0" maxOccurs="1">
+                                        <xs:complexType>
+                                            <xs:sequence>
+                                                <xs:element name="Package" type="FeaturePkgType" minOccurs="0" maxOccurs="unbounded"/>
+                                            </xs:sequence>
+                                        </xs:complexType>
+                                    </xs:element>
+                                </xs:sequence>
+                                <xs:attribute name="FeatureID" type="xs:string" />
+                                <xs:attribute name="FMID" type="xs:string" use="optional"/>
+                                <xs:attribute name="Type" use="optional">
+                                    <xs:simpleType>
+                                        <xs:restriction base="xs:string">
+                                            <xs:pattern value="(None|MobileFeature|DesktopMedia|DesktopMediaFull|DriverSet|OptionalFeature|OnDemandFeature|LanguagePack|GDR|CritGDR|ServicingStackUpdate|CumulativeUpdate|Tool|FoDMetadata|LIP|LXP|SafeOSUpdate|SetupDynamicUpdate)"/>
+                                        </xs:restriction>
+                                    </xs:simpleType>
+                                </xs:attribute>
+                                <xs:attribute name="Group" type="xs:string" use="optional"/>
+                                <xs:attribute name="Family" use="optional">
+                                    <xs:simpleType>
+                                        <xs:restriction base="xs:string">
+                                            <xs:pattern value="(None|Client|Server|Azure)"/>
+                                        </xs:restriction>
+                                    </xs:simpleType>
+                                </xs:attribute>
+                            </xs:complexType>
+                        </xs:element>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+            <xs:element name="Packages" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="Package" type="PkgType" minOccurs="0" maxOccurs="unbounded"/>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+            <xs:element name="MSConditionalFeatures" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="ConditionalFeature" type="ConditionalFeatureType" minOccurs="0" maxOccurs="unbounded"/>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+          <!--AppX namespace-->
+          <xs:element name="AppX" type="AppXType" minOccurs="0" maxOccurs="1"/>
+          <xs:element name="ValuePair" minOccurs="0" maxOccurs="1">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="Pair" minOccurs="0" maxOccurs="unbounded">
+                            <xs:complexType>
+                                <xs:attribute name="Name" type="xs:string"/>
+                                <xs:attribute name="Value" type="xs:string"/>
+                            </xs:complexType>
+                        </xs:element>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+        </xs:all>
+      <xs:attribute name="CreatedDate" type="xs:string" />
+      <xs:attribute name="Revision" type="xs:string" />
+      <xs:attribute name="SchemaVersion" type="xs:string" />
+      <xs:attribute name="Type">
+          <xs:simpleType>
+              <xs:restriction base="xs:string">
+                  <xs:pattern value="(Build|Update|BSP|Device|BuildUpdate|Baseless|Supplemental|Standalone|SystemManifest)"/>
+              </xs:restriction>
+          </xs:simpleType>
+      </xs:attribute>
+      <xs:attribute name="Product" type="xs:string"  use="optional" />
+      <xs:attribute name="ReleaseType" use="optional" >
+          <xs:simpleType>
+              <xs:restriction base="xs:string">
+                  <xs:pattern value="(Production|Test)"/>
+              </xs:restriction>
+          </xs:simpleType>
+      </xs:attribute>
+      <xs:attribute name="BuildID" type="xs:string" />
+      <xs:attribute name="BuildInfo" type="xs:string" />
+      <xs:attribute name="OSVersion" type="xs:string" />
+      <xs:attribute name="BuildArch" type="xs:string" />
+      <xs:attribute name="Name" type="xs:string" use="optional" />
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

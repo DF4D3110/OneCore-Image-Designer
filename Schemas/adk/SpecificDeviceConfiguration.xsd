@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema targetNamespace="http://schemas.microsoft.com/embedded/2020/06/ImageUpdate" elementFormDefault="qualified"   xmlns="http://schemas.microsoft.com/embedded/2020/06/ImageUpdate" xmlns:mstns="http://schemas.microsoft.com/embedded/2020/06/ImageUpdate" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+    <xs:include schemaLocation="DeviceConfiguration.xsd" />
+    <xs:include schemaLocation="JobDescription.xsd" />
+        <xs:element name="SpecificDeviceConfiguration">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:choice>
+                    <xs:element ref="BaseLineImagePath" minOccurs="1" maxOccurs="1" />
+                    <xs:sequence>
+                        <xs:element ref="Product"  minOccurs="1" maxOccurs="1" />
+                        <xs:element ref="DeviceTargeting"  minOccurs="1" maxOccurs="1" />
+                    </xs:sequence>
+                </xs:choice>
+                <xs:element ref="InstallList" minOccurs="1" maxOccurs="1" /> 
+                <xs:element ref="TestContentPath" minOccurs="0" maxOccurs="1" />
+                <xs:element ref="RecoveryPackagePath" minOccurs="0" maxOccurs="1"/>
+                <xs:element ref="ReleaseType" minOccurs="1" maxOccurs="1" />
+                <xs:element ref="CpuArch" minOccurs="1" maxOccurs="1" />
+                <xs:element ref="LanguageSet" minOccurs="1" maxOccurs="1" />
+                <xs:element ref="ImageFormat" minOccurs="1" maxOccurs="1" />
+                <xs:element name="MSPackageRootPath" type="StringType" minOccurs="1" maxOccurs="1" />
+                <xs:element name="OutputFilePath" type="StringType" minOccurs="1" maxOccurs="1" />
+            </xs:sequence>
+        </xs:complexType>
+    </xs:element>
+</xs:schema>

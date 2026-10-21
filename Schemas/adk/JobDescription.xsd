@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema targetNamespace="http://schemas.microsoft.com/embedded/2020/06/ImageUpdate" elementFormDefault="qualified" xmlns="http://schemas.microsoft.com/embedded/2020/06/ImageUpdate" xmlns:mstns="http://schemas.microsoft.com/embedded/2020/06/ImageUpdate" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+    <xs:simpleType name="ReleaseTypeRestriction">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="Test" />
+            <xs:enumeration value="Production" />
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:simpleType name="JobBooleanRestriction">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="true" />
+            <xs:enumeration value="false" />
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:simpleType name="CpuRestriction">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="AMD64" />
+            <xs:enumeration value="ARM" />
+            <xs:enumeration value="ARM64" />
+            <xs:enumeration value="X86" />
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:simpleType name="ImageFormatRestriction">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="FFU" />
+            <xs:enumeration value="VHD" />
+            <xs:enumeration value="VHDX" />
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:element name="ReleaseType">
+        <xs:complexType>
+            <xs:simpleContent>
+                <xs:extension base="ReleaseTypeRestriction" />
+            </xs:simpleContent>
+        </xs:complexType>
+    </xs:element>
+    <xs:element name="CpuArch">
+        <xs:complexType>
+            <xs:simpleContent>
+                <xs:extension base="CpuRestriction" />
+            </xs:simpleContent>
+        </xs:complexType>
+    </xs:element>
+    <xs:element name="ImageFormat">
+        <xs:complexType>
+            <xs:simpleContent>
+                <xs:extension base="ImageFormatRestriction" />
+            </xs:simpleContent>
+        </xs:complexType>
+    </xs:element>
+    <xs:element name="LanguageSet">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element name="Language" minOccurs="1" maxOccurs="unbounded">
+                    <xs:complexType>
+                        <xs:simpleContent>
+                            <xs:extension base="xs:string">
+                                <xs:attribute name="Default" type="JobBooleanRestriction" default="false" />
+                            </xs:extension>
+                        </xs:simpleContent>
+                    </xs:complexType>
+                </xs:element>
+            </xs:sequence>
+        </xs:complexType>
+    </xs:element>
+    <xs:element name="JobDescription">
+        <xs:complexType>
+            <xs:all>
+                <xs:element name="LanguageSets" minOccurs="1" maxOccurs="1">
+                    <xs:complexType>
+                        <xs:sequence>
+                            <xs:element ref="LanguageSet" minOccurs="1" maxOccurs="unbounded" />
+                        </xs:sequence>
+                    </xs:complexType>
+                </xs:element>
+                <xs:element name="ReleaseTypes" minOccurs="1" maxOccurs="1">
+                    <xs:complexType>
+                        <xs:sequence>
+                            <xs:element ref="ReleaseType" minOccurs="1" maxOccurs="unbounded" />
+                        </xs:sequence>
+                    </xs:complexType>
+                </xs:element>
+                <xs:element name="CpuArchs" minOccurs="1" maxOccurs="1">
+                    <xs:complexType>
+                        <xs:sequence>
+                            <xs:element ref="CpuArch" minOccurs="1" maxOccurs="unbounded" />
+                        </xs:sequence>
+                    </xs:complexType>
+                </xs:element>
+                <xs:element name="ImageFormats" minOccurs="1" maxOccurs="1">
+                    <xs:complexType>
+                        <xs:sequence>
+                            <xs:element ref="ImageFormat" minOccurs="1" maxOccurs="unbounded" />
+                        </xs:sequence>
+                    </xs:complexType>
+                </xs:element>
+            </xs:all>
+        </xs:complexType>
+    </xs:element>
+</xs:schema>

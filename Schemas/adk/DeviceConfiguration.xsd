@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema targetNamespace="http://schemas.microsoft.com/embedded/2020/06/ImageUpdate" elementFormDefault="qualified" xmlns="http://schemas.microsoft.com/embedded/2020/06/ImageUpdate" xmlns:mstns="http://schemas.microsoft.com/embedded/2020/06/ImageUpdate" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+    <xs:simpleType name="BooleanRestriction">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="true" />
+            <xs:enumeration value="false" />
+        </xs:restriction>
+    </xs:simpleType>
+    <xs:complexType name="StringType">
+        <xs:simpleContent>
+            <xs:extension base="xs:string" />
+        </xs:simpleContent>
+    </xs:complexType>
+    <xs:complexType name="FeatureType">
+        <xs:sequence>
+            <xs:element minOccurs="0" maxOccurs="unbounded" name="Feature">
+                <xs:complexType>
+                    <xs:simpleContent>
+                        <xs:extension base="xs:string">
+                            <xs:attribute name="FMId" type="xs:string" use="optional" />
+                        </xs:extension>
+                    </xs:simpleContent>
+                </xs:complexType>
+            </xs:element>
+        </xs:sequence>
+    </xs:complexType>
+    <xs:complexType name="ServicingType">
+        <xs:simpleContent>
+            <xs:extension base="xs:string">
+                <xs:attribute name="Servicing" type="BooleanRestriction" default="false"/>
+            </xs:extension>
+        </xs:simpleContent>
+    </xs:complexType>
+    <xs:element name="BaseLineImagePath" type="StringType" />
+    <xs:element name="Product" type="StringType" />
+    <xs:element name="DeviceTargeting">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element name="DeviceTargetInfo" minOccurs="1" maxOccurs="unbounded">
+                    <xs:complexType>
+                        <xs:sequence>
+                            <xs:element name="Manufacturer" type="ServicingType" />
+                            <xs:element name="Family" type="ServicingType" minOccurs="0" maxOccurs="1" />
+                            <xs:element name="ProductName" type="ServicingType" minOccurs="0" maxOccurs="1" />
+                            <xs:element name="ProductVersion" type="StringType" minOccurs="0" maxOccurs="1" />
+                            <xs:element name="SKUNumber" type="ServicingType" minOccurs="0" maxOccurs="1" />
+                            <xs:element name="BaseboardManufacturer" type="ServicingType" minOccurs="0" maxOccurs="1" />
+                            <xs:element name="BaseboardProduct" type="ServicingType" minOccurs="0" maxOccurs="1" />
+                        </xs:sequence>
+                    </xs:complexType>
+                </xs:element>
+            </xs:sequence>
+        </xs:complexType>
+    </xs:element>
+    <xs:element name="InstallList">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element name="MicrosoftCollateralRepository" minOccurs="0" maxOccurs="1">
+                    <xs:complexType>
+                        <xs:sequence>
+                            <xs:element name="OSFeatures" type="FeatureType" minOccurs="0" maxOccurs="1" />
+                            <xs:element name="UserInstallableFeatures" type="FeatureType" minOccurs="0" maxOccurs="1" />
+                            <xs:element name="AppXPackages" minOccurs="0" maxOccurs="1">
+                                <xs:complexType>
+                                    <xs:sequence>
+                                        <xs:element name="AppXID" type="StringType" minOccurs="0" maxOccurs="unbounded" />
+                                    </xs:sequence>
+                                </xs:complexType>
+                            </xs:element>
+                        </xs:sequence>
+                    </xs:complexType>
+                </xs:element>
+                <xs:element name="OEMCollateralRepository" minOccurs="0" maxOccurs="1">
+                    <xs:complexType>
+                        <xs:sequence>
+                            <xs:element name="DriverFeatures" type="FeatureType" minOccurs="0" maxOccurs="1" />
+                            <xs:element name="CustomizationFeatures" type="FeatureType" minOccurs="0" maxOccurs="1" />
+                        </xs:sequence>
+                    </xs:complexType>
+                </xs:element>
+            </xs:sequence>
+        </xs:complexType>
+    </xs:element>
+    <xs:element name="TestContentPath" type="StringType" />
+    <xs:element name="RecoveryPackagePath" type="StringType" />
+    <xs:element name="DeviceConfiguration">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:choice>
+                    <xs:element ref="BaseLineImagePath" minOccurs="1" maxOccurs="1" />
+                    <xs:sequence>
+                        <xs:element ref="Product" minOccurs="1" maxOccurs="1" />
+                        <xs:element ref="DeviceTargeting" minOccurs="1" maxOccurs="1" />
+                    </xs:sequence>
+                </xs:choice>
+                <xs:element ref="InstallList" minOccurs="1" maxOccurs="1" />
+                <xs:element ref="TestContentPath" minOccurs="0" maxOccurs="1" />
+                <xs:element ref="RecoveryPackagePath" minOccurs="0" maxOccurs="1" />
+            </xs:sequence>
+        </xs:complexType>
+    </xs:element>
+</xs:schema>

@@ -1,0 +1,193 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<xs:schema targetNamespace="http://schemas.microsoft.com/embedded/2004/10/ImageUpdate" elementFormDefault="qualified" xmlns="http://schemas.microsoft.com/embedded/2004/10/ImageUpdate" xmlns:mstns="http://schemas.microsoft.com/embedded/2004/10/ImageUpdate" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:complexType name="PublishingPkgType">
+    <xs:sequence>
+      <xs:element name="Tag" type="TagItemType" minOccurs="0" maxOccurs="1"/>
+    </xs:sequence>
+    <xs:attribute name="Path" type="xs:string" />
+    <xs:attribute name="PackageHash" type="xs:string"/>
+     <!-- Deprecated --> <xs:attribute name="PackageSha1Hash" type="xs:string"/>
+    <xs:attribute name="ChunkName" type="xs:string" use="optional" />
+    <xs:attribute name="ChunkRelativePath" use="optional" />
+  </xs:complexType>
+
+  <xs:complexType name="ContentItemType">
+    <xs:attribute name="ContentFile" type="xs:string" />
+    <xs:attribute name="ContentType">
+      <xs:simpleType>
+        <xs:restriction base="xs:string">
+          <xs:enumeration value="Metadata"/>
+          <xs:enumeration value="ServicingStack"/>
+          <xs:enumeration value="BinaryPackage"/>
+          <xs:enumeration value="ChunkProcessing"/>
+        </xs:restriction>
+      </xs:simpleType>
+    </xs:attribute>
+  </xs:complexType>
+
+  <xs:complexType name="TagItemType">
+    <xs:attribute name="Name" type="xs:string" />
+    <xs:attribute name="Value" type="xs:string" />
+  </xs:complexType>
+
+  <xs:complexType name="ChunkDependencyType">
+    <xs:simpleContent>
+      <xs:extension base="xs:string">
+        <xs:attribute name="Except">
+          <xs:simpleType>
+            <xs:restriction base="xs:string">
+              <xs:enumeration value="amd64"/>
+              <xs:enumeration value="arm64"/>
+              <xs:enumeration value="arm"/>
+              <xs:enumeration value="x86"/>
+            </xs:restriction>
+          </xs:simpleType>
+        </xs:attribute>
+      </xs:extension>
+    </xs:simpleContent>
+  </xs:complexType>
+
+  <xs:complexType name="ChunkMappingType">
+    <xs:all>
+      <xs:element name="Content" minOccurs="0" maxOccurs="1">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="ContentItem" type="ContentItemType" minOccurs="0" maxOccurs="unbounded"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+
+      <xs:element name="Tags" minOccurs="0" maxOccurs="1">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="Tag" type="TagItemType" minOccurs="0" maxOccurs="unbounded"/>
+          </xs:sequence>
+          <xs:attribute name="Type">
+            <xs:simpleType>
+              <xs:restriction base="xs:string">
+                <xs:enumeration value="Edition"/>
+                <xs:enumeration value="Neutral"/>
+                <xs:enumeration value="Language"/>
+                <xs:enumeration value="Tools"/>
+                <xs:enumeration value="DeploymentCab"/>
+                <xs:enumeration value="Internal"/>
+                <xs:enumeration value="Retail"/>
+                <xs:enumeration value="CumulativeUpdate"/>
+                <xs:enumeration value="Baseless"/>
+              </xs:restriction>
+            </xs:simpleType>
+          </xs:attribute>
+        </xs:complexType>
+      </xs:element>
+
+      <xs:element name="ChunkDependencies" minOccurs="0" maxOccurs="1">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="ChunkDependency" type="ChunkDependencyType" minOccurs="1" maxOccurs="unbounded"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+    
+    </xs:all>
+    <xs:attribute name="ChunkName" type="xs:string"/>
+    <xs:attribute name="Path" type="xs:string" use="optional" />
+    <xs:attribute name="BuildPath" type="xs:string" use="optional" />
+    <xs:attribute name="Product" type="xs:string" />
+    <xs:attribute name="Type" use="optional" >
+      <xs:simpleType>
+        <xs:restriction base="xs:string">
+          <xs:enumeration value="EDITION"/>
+          <xs:enumeration value="LANGPACK"/>
+          <xs:enumeration value="FOD"/>
+          <xs:enumeration value="APP"/>
+          <xs:enumeration value="NGEN"/>
+          <xs:enumeration value="ESD"/>
+          <xs:enumeration value="UPDATEBOX"/>
+          <xs:enumeration value="ONECOREPKG"/>
+          <xs:enumeration value="FOD_METADATA"/>
+          <xs:enumeration value="DIFF"/>
+          <xs:enumeration value="BUNDLE"/>
+        </xs:restriction>
+      </xs:simpleType>
+    </xs:attribute>
+    <xs:attribute name="Consumer">
+      <xs:simpleType>
+        <xs:restriction base="xs:string">
+          <xs:enumeration value="CompositionPackageChunk"/>
+          <xs:enumeration value="ControlTower"/>
+          <xs:enumeration value="UpdateGenDiff"/>
+        </xs:restriction>
+      </xs:simpleType>
+    </xs:attribute>
+  </xs:complexType>
+
+  <xs:element name="CompDBPublishingInfo">
+    <xs:complexType>
+      <xs:all>
+        
+      <xs:element name="Tags" minOccurs="0" maxOccurs="1">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="Tag" type="TagItemType" minOccurs="0" maxOccurs="unbounded"/>
+          </xs:sequence>
+          <xs:attribute name="Type">
+            <xs:simpleType>
+              <xs:restriction base="xs:string">
+                <xs:enumeration value="Edition"/>
+                <xs:enumeration value="Neutral"/>
+                <xs:enumeration value="Language"/>
+                <xs:enumeration value="Tools"/>
+                <xs:enumeration value="DeploymentCab"/>
+                <xs:enumeration value="Internal"/>
+                <xs:enumeration value="Retail"/>
+                <xs:enumeration value="CumulativeUpdate"/>
+                <xs:enumeration value="Baseless"/>
+              </xs:restriction>
+            </xs:simpleType>
+          </xs:attribute>
+        </xs:complexType>
+      </xs:element>
+
+      <xs:element name="ChunkDependencies" minOccurs="0" maxOccurs="1">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="ChunkDependency" type="ChunkDependencyType" minOccurs="1" maxOccurs="unbounded"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+
+      <xs:element name="ChunkMappings" minOccurs="0" maxOccurs="1">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="Mapping" type="ChunkMappingType" minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="Packages" minOccurs="0" maxOccurs="1">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="Package" type="PublishingPkgType" minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+      </xs:all>
+      <xs:attribute name="Version" type="xs:string" />
+      <xs:attribute name="Product" type="xs:string"  use="optional" />
+      <xs:attribute name="ReleaseType" use="optional" >
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:pattern value="(Production|Test)"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:attribute>
+      <xs:attribute name="BuildID" type="xs:string" use="optional" />
+      <xs:attribute name="BuildInfo" type="xs:string" use="optional" />
+      <xs:attribute name="OSVersion" type="xs:string" use="optional" />
+      <xs:attribute name="TargetBuildInfo" type="xs:string" use="optional" />
+      <xs:attribute name="TargetOSVersion" type="xs:string" use="optional" />
+      <xs:attribute name="BuildArch" type="xs:string" use="optional" />
+      <xs:attribute name="BSPVersion" type="xs:string" use="optional" />
+      <xs:attribute name="BSPProductName" type="xs:string" use="optional" />
+    </xs:complexType>
+  </xs:element>
+</xs:schema>
