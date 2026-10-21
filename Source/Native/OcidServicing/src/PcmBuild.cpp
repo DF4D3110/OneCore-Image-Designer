@@ -809,6 +809,7 @@ std::string BuildFileRecord(Interner& inter, const Elem& e, int sddBlob, std::ui
                             int hashAttrBlob, int gacBlob, const std::string& sddName,
                             std::uint32_t writeType, std::uint32_t attrFlags,
                             const std::vector<std::string>& classNames,
+                            const std::vector<std::string>& comStrings,
                             std::vector<Row>& wcRows, int sigBlob = -1) {
     const auto a = AttrsOf(e);
     // AddFile 的 interning 顺序：sdd 名、name、loadFrom、""、""、destinationPath、
@@ -822,6 +823,11 @@ std::string BuildFileRecord(Interner& inter, const Elem& e, int sddBlob, std::ui
     const int idSrcName = inter.String(Attr(a, "sourceName"));
     const int idSrcPath = inter.String(Attr(a, "sourcePath"));
     const int idImpPath = inter.String(Attr(a, "importPath"));
+    // <comClass> progid strings are interned right after the file name/importPath
+    // (01247 real pids: 0 name, 1 importPath, 2 progid, 3 <progid> text, 4 "").
+    for (const std::string& cs : comStrings) {
+        if (!cs.empty()) inter.String(cs);
+    }
     (void)nSdd;
 
     // <windowClass> class names: reference order = Hash64(name)&kM32 SitOrder (7 buckets),
@@ -1318,14 +1324,18 @@ const char* const kCacheGuidLodctrDat = "9bcb3d9a96a7df41b45577eba6a1ec1a";
 // 安装态 104aa381-…，卸载态（install="false"）5dfd45c1-…。
 const char* const kCacheGuidGenInstall = "104aa38156426a4389d6794b97ca407c";
 const char* const kCacheGuidGenUninstall = "5dfd45c19b1b3847996164034a3da28f";
+// <WinsockAppPermittedLspCategories> cache GUID (real 9600 blocks 00028/01888/01915/02232).
+const char* const kCacheGuidWinsock = "ba62b17069b146459c517c495c652129";
 
 bool IsCacheRecordElement(const std::string& local) {
-    return local == "lodctr" || local == "bfsvc" || local == "fveUpdateAI" ||
+    return local == "lodctr" || local == "lodctrDat" ||
+           local == "bfsvc" || local == "fveUpdateAI" ||
            local == "registryKeys" || local == "rescache" ||
            local == "migration" || local == "sppInstaller" || local == "ngen" ||
            local == "rootDevices" || local == "timezoneresourceAI" ||
            local == "taskScheduler" || local == "serviceData" ||
-           local == "securityDescriptor";
+           local == "securityDescriptor" ||
+           local == "WinsockAppPermittedLspCategories";
 }
 
 // 静态 "installer element kinds" 表的条目序号（wcp_x86.dll .data VA 0x101F35C8，
@@ -1335,6 +1345,7 @@ int CacheRank(const std::string& local) {
     if (local == "migration") return -1;
     if (local == "serviceData") return 0;
     if (local == "securityDescriptor") return 1;
+    if (local == "WinsockAppPermittedLspCategories") return 2;
     if (local == "firewallRule") return 2;
     if (local == "ngen") return 3;
     if (local == "sppInstaller") return 6;
@@ -1344,6 +1355,7 @@ int CacheRank(const std::string& local) {
     if (local == "events") return 17;
     if (local == "mof") return 19;
     if (local == "lodctr") return 20;
+    if (local == "lodctrDat") return 21;
     if (local == "rescache") return 23;
     if (local == "timezoneresourceAI") return 34;
     if (local == "bfsvc") return 44;
@@ -1368,6 +1380,7 @@ std::string CacheGuid(const std::string& local) {
     if (local == "timezoneresourceAI") return kCacheGuidTimezone;
     if (local == "serviceData") return kCacheGuidServiceData;
     if (local == "securityDescriptor") return kCacheGuidSecurityDescriptor;
+    if (local == "WinsockAppPermittedLspCategories") return kCacheGuidWinsock;
     if (local == "taskScheduler") return kCacheGuidTaskScheduler;
     if (local == "firewallRule") return kCacheGuidFirewallRule;
     if (local == "genericCommandInstall") return kCacheGuidGenInstall;
@@ -1417,6 +1430,7 @@ bool GuidFromText(const std::string& text, std::string& out) {
 // （firewallRule/ngen 与其他 kind 的组合）按已知约束的线性扩展放在末尾。
 const char* const kCacheGuidOrder[] = {
     "fveUpdateAI", "bfsvc", "instrumentation", "counters", "lodctr", "lodctrDat", "securityDescriptor",
+    "WinsockAppPermittedLspCategories",
     "serviceData", "rootDevices", "sppInstaller", "mof", "rescache",
     "taskScheduler", "timezoneresourceAI", "registryKeys", "firewallRule", "ngen",
     "genericCommandUninstall", "genericCommandInstall",
@@ -1476,6 +1490,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
 
     // ---- 1. 文档扫描（元素顺序 = 文档序）----------------------------------
     std::vector<std::uint32_t> deps, files, cats, sdddefs, membElems, confEls, mofs;
+    std::vector<std::uint32_t> lodDats;  // <lodctrDat> elements (key 666 family)
     std::vector<std::uint32_t> irElems;  // <installerRegistration>（9600 installReg 族）
     // 每条 <installerRegistration> 的 28B 记录槽 + 它的 cache GUID（= factoryClsid），
     // 用于头部 GUID 表与注册键 3 的 t8 表（见第 8 节 key == 3 分支）。
@@ -1545,6 +1560,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
         }
         if (e.local == "trustInfo") hasTrust = true;
         if (e.local == "mof") mofs.push_back(idx);
+    if (e.local == "lodctrDat") lodDats.push_back(idx);
     }
 
     // ---- 2. 身份表（创建序 = id 序）--------------------------------------
@@ -1605,6 +1621,13 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
 
     std::vector<Row> fileRows;                  // key 1
     std::vector<Row> wcRows;                    // key 7: windowClass class-name table
+    struct ComRec {
+        std::uint32_t slot28 = 0;
+        std::uint32_t slot4 = 0;
+        std::string tlGuid;
+        std::string clsGuid;
+    };
+    std::vector<ComRec> comRecs;                // <comClass> family (keys 3 and 4)
     // 每个 <categoryMembership> 各有一条 8B 记录 {categoryInstance uidx, -1}，
     // 不是整个 <memberships> 共用一条（02531：槽 7/8/9 = -1/84/128）。
     std::unordered_map<std::uint32_t, std::size_t> membSlotByElem;
@@ -1754,6 +1777,41 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                 }
             }
             if (!cls.empty()) AppendSlot(slots, 1, PackU32({0u, clsVersioned ? 1u : 0u}));
+            // <comClass>: reference emits a 28B record {0,-1,-1,tlbidIdx,threading,-1,0}
+            // followed by a 4B record {clsidIdx} (01247 real slots 2 and 3). Both GUID
+            // indices are patched later, once the header GUID table order is known.
+            std::vector<std::string> comStrs;
+            for (std::uint32_t k : e.kids) {
+                if (elems[k].local != "comClass") continue;
+                const auto& ca = AttrsOf(elems[k]);
+                // Only a <comClass> with a progid attribute emits records: the seven
+
+                // installerRegistration manifests carry a bare <comClass clsid=... />
+
+                // and the reference PCM has no 28B/4B record at all (01493 etc.).
+
+                const std::string pg = Attr(ca, "progid");
+
+                if (pg.empty()) continue;
+
+                comStrs.push_back(pg);
+
+                for (std::uint32_t kk : elems[k].kids) {
+                    if (elems[kk].local == "progid") comStrs.push_back(Strip(elems[kk].text));
+                }
+                ComRec cr;
+                GuidFromText(Attr(ca, "tlbid"), cr.tlGuid);
+                GuidFromText(Attr(ca, "clsid"), cr.clsGuid);
+                std::uint32_t th = 0;
+                const std::string tm = Attr(ca, "threadingModel");
+                if (tm == "apartment") th = 1; else if (tm == "free") th = 2;
+                else if (tm == "both") th = 3; else if (tm == "neutral") th = 4;
+                cr.slot28 = static_cast<std::uint32_t>(slots.size());
+                AppendSlot(slots, 1, PackU32({0u, kNoId, kNoId, 0u, th, kNoId, 0u}));
+                cr.slot4 = static_cast<std::uint32_t>(slots.size());
+                AppendSlot(slots, 1, PackU32({0u}));
+                comRecs.push_back(cr);
+            }
             std::string sddName;
             std::string digest;
             bool haveDigest = false;
@@ -1931,7 +1989,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                 AttrFlagsFromText(Attr(AttrsOf(e), "attributes"), 0x0A0u);
             AppendSlot(slots, 1,
                        BuildFileRecord(inter, e, sddBlob, targets, hashAttrBlob, gblob, sddName,
-                                       writeType, attrFlags, cls, wcRows, sigBlob));
+                                       writeType, attrFlags, cls, comStrs, wcRows, sigBlob));
             ++fileOrd;
         } else if (e.local == "securityDescriptorDefinition") {
             const auto at = AttrsOf(e);
@@ -2063,6 +2121,26 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     // ---- 5. 文档常量 / micro-DOM / 文档记录 ------------------------------
     // <deployment> 发 20B 常量 blob，每个 <configuration> 发 [0, uidx]；两者
     // 都是 handler 期发射，按文档位置排序（没有同时出现的样本）。
+    // <WinsockAppPermittedLspCategories>: one 12B record {Path, PermittedLspCategories, Extra|-1}
+    // Emitted before the document constants / MdHd (samples 00028 01888 01915 02232).
+    for (std::size_t i = 0; i < elems.size(); ++i) {
+        if (elems[i].local != "WinsockAppPermittedLspCategories") continue;
+        const auto wa = AttrsOf(elems[i]);
+        const std::string waPath = Attr(wa, "Path");
+        const std::string waExtra = Attr(wa, "Extra");
+        const std::string waCats = Attr(wa, "PermittedLspCategories");
+        const std::uint32_t waPid = waPath.empty()
+                                        ? kNoId
+                                        : static_cast<std::uint32_t>(inter.String(waPath));
+        const std::uint32_t waEid = waExtra.empty()
+                                        ? kNoId
+                                        : static_cast<std::uint32_t>(inter.String(waExtra));
+        std::uint32_t waVal = 0;
+        if (!waCats.empty()) {
+            waVal = static_cast<std::uint32_t>(std::strtoul(waCats.c_str(), nullptr, 0));
+        }
+        AppendSlot(slots, 1, PackU32({waPid, waVal, waEid}));
+    }
     std::vector<std::pair<std::uint32_t, int>> region;
     if (hasDeployment) region.emplace_back(depUidx, 0);
     for (std::uint32_t c : confEls) region.emplace_back(elems[c].uidx, 1);
@@ -2179,6 +2257,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     bool mofSeen = false;
     bool fwSeen = false;
     bool sdSeen = false;
+    bool ldSeen = false;
     // <genericCommands><genericCommand …/>：真机按 **install 属性分组**，每组发一条
     // 记录 = 该组子命令的 uidx 数组（安装态一组、卸载态一组，组内按文档序）：
     // 01413（1+1 条）得到 4B `{33}` + 4B `{37}`；01879（5+5 条）得到两条 20B
@@ -2293,6 +2372,14 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             cacheSlots.push_back(static_cast<std::uint32_t>(slots.size()));
             AppendSlot(slots, 1, record);
             recGuids.push_back(GuidBytes(kCacheGuidServiceData));
+        } else if (ln == "lodctrDat") {
+            if (ldSeen) continue;
+            ldSeen = true;
+            std::string record;
+            for (std::uint32_t k : lodDats) record += PackU32({elems[k].uidx});
+            cacheSlots.push_back(static_cast<std::uint32_t>(slots.size()));
+            AppendSlot(slots, 1, record);
+            recGuids.push_back(GuidBytes(kCacheGuidLodctrDat));
         } else {
             const std::size_t slot = slots.size();
             cacheSlots.push_back(static_cast<std::uint32_t>(slot));
@@ -2324,6 +2411,16 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             }
             if (!seen) cacheGuids.push_back(g);
         }
+        for (const ComRec& cr : comRecs) {
+            if (!cr.tlGuid.empty() &&
+                std::find(cacheGuids.begin(), cacheGuids.end(), cr.tlGuid) == cacheGuids.end()) {
+                cacheGuids.push_back(cr.tlGuid);
+            }
+            if (!cr.clsGuid.empty() &&
+                std::find(cacheGuids.begin(), cacheGuids.end(), cr.clsGuid) == cacheGuids.end()) {
+                cacheGuids.push_back(cr.clsGuid);
+            }
+        }
         std::stable_sort(cacheGuids.begin(), cacheGuids.end(),
                          [](const std::string& a, const std::string& b) {
                              return CacheGuidRank(a) < CacheGuidRank(b);
@@ -2340,6 +2437,24 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
         }
     }
     // t8 行: {guid 表下标, 记录槽}；migration 不参与。
+    // Patch the two <comClass> GUID indices into their early records.
+    for (const ComRec& cr : comRecs) {
+        std::uint32_t tIdx = 0, cIdx = 0;
+        for (std::size_t g = 0; g < cacheGuids.size(); ++g) {
+            if (cacheGuids[g] == cr.tlGuid) tIdx = static_cast<std::uint32_t>(g);
+            if (cacheGuids[g] == cr.clsGuid) cIdx = static_cast<std::uint32_t>(g);
+        }
+        if (slots[cr.slot28].payload.size() >= 16) {
+            for (int b = 0; b < 4; ++b) {
+                slots[cr.slot28].payload[12 + b] = static_cast<char>((tIdx >> (8 * b)) & 0xFFu);
+            }
+        }
+        if (slots[cr.slot4].payload.size() >= 4) {
+            for (int b = 0; b < 4; ++b) {
+                slots[cr.slot4].payload[b] = static_cast<char>((cIdx >> (8 * b)) & 0xFFu);
+            }
+        }
+    }
     struct CacheRow {
         std::uint32_t guidIdx = 0;
         std::uint32_t slot = 0;
@@ -2443,6 +2558,32 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
             std::string payload;
             if (!MakeRecordTable(8, rows, false, payload, error)) return false;
             tbls.push_back(Slot{8, payload});
+        } else if (key == 3 && !comRecs.empty()) {
+            std::vector<Row> rows;
+            rows.reserve(comRecs.size());
+            for (std::size_t i = 0; i < comRecs.size(); ++i) {
+                std::uint32_t guidIdx = 0;
+                for (std::size_t g = 0; g < cacheGuids.size(); ++g) {
+                    if (cacheGuids[g] == comRecs[i].clsGuid) {
+                        guidIdx = static_cast<std::uint32_t>(g);
+                        break;
+                    }
+                }
+                rows.push_back(Row{static_cast<std::uint32_t>(i), guidIdx, comRecs[i].slot28});
+            }
+            std::string payload;
+            if (!MakeRecordTable(8, rows, false, payload, error)) return false;
+            tbls.push_back(Slot{8, payload});
+        } else if (key == 4 && !comRecs.empty()) {
+            std::vector<Row> rows;
+            rows.reserve(comRecs.size() * 2);
+            for (const ComRec& cr : comRecs) {
+                rows.push_back(Row{0u, cr.slot4, 3u});
+                rows.push_back(Row{0u, cr.slot28, 3u});
+            }
+            std::string payload;
+            if (!MakeRecordTable(6, rows, true, payload, error)) return false;
+            tbls.push_back(Slot{6, payload});
         } else if (key == 210 && !sddRows.empty()) {
             std::vector<std::uint32_t> keys;
             keys.reserve(sddRows.size());
