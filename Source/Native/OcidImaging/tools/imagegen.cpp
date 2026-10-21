@@ -2484,6 +2484,135 @@ int CmdLayout(const std::vector<std::string>& args)
         return 2;
     }
 
+    int CmdPoolBuild(const std::vector<std::string>& args)
+    {
+        std::string file, layoutPath, diskId, directory;
+        unsigned int version = 24;
+        bool dry = false;
+        for (std::size_t i = 3; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            auto next = [&](std::string& out) -> bool
+            {
+                if (i + 1 >= args.size()) return false;
+                out = args[++i];
+                return true;
+            };
+            if (a == "--vhd") { if (!next(file)) { Err("--vhd 缺少值"); return 2; } }
+            else if (a == "--layout") { if (!next(layoutPath)) { Err("--layout 缺少值"); return 2; } }
+            else if (a == "--disk-id") { if (!next(diskId)) { Err("--disk-id 缺少值"); return 2; } }
+            else if (a == "--dir") { if (!next(directory)) { Err("--dir 缺少值"); return 2; } }
+            else if (a == "--version")
+            {
+                std::string v;
+                if (!next(v)) { Err("--version 缺少值"); return 2; }
+                version = static_cast<unsigned int>(std::strtoul(v.c_str(), nullptr, 0));
+            }
+            else if (a == "--dry") dry = true;
+            else if (!a.empty() && a[0] == '-') { Err("未知参数：" + a); return 2; }
+            else { Err("多余的位置参数：" + a); return 2; }
+        }
+        if (file.empty() || layoutPath.empty())
+        {
+            Err("pool build 需要 --vhd <虚拟磁盘> --layout <布局 XML>");
+            return 2;
+        }
+        LayoutModel model;
+        std::string error;
+        if (!LoadLayout(layoutPath, model, error)) { Err("读布局失败：" + error); return 1; }
+        const std::uint64_t sector = model.sectorSize != 0 ? model.sectorSize : 512;
+        const std::uint64_t defaultAlignment = model.defaultAlignment != 0 ? model.defaultAlignment : (1024ull * 1024);
+        auto align = [](std::uint64_t v, std::uint64_t a) { return a == 0 ? v : (v + a - 1) / a * a; };
+
+        // 物理 GPT 只写非池分区：布局里名为 OSPool 的那条是“池占位”语义标记，
+        // 真正写入时由 ImageStorageService 自己追加（预置会 0xC0380013 / 0x800700B7）。
+        std::vector<VhdPartition> parts;
+        std::uint64_t cursor = align(1024ull * 1024, defaultAlignment);
+        for (const LayoutStore& store : model.stores)
+        {
+            for (const LayoutPartition& p : store.partitions)
+            {
+                if (LowerText(p.name) == "ospool") continue;
+                std::uint64_t size = 0;
+                if (p.hasTotalBytes && p.totalBytes != 0) size = p.totalBytes;
+                else if (p.totalSectors != 0) size = p.totalSectors * sector;
+                if (size == 0) continue;
+                size = align(size, sector);
+                std::uint64_t alignment = defaultAlignment;
+                std::uint64_t custom = 0;
+                if (!p.byteAlignment.empty() && ParseHexOrDec(p.byteAlignment, custom) && custom != 0) alignment = custom;
+                VhdPartition vp;
+                vp.name = p.name;
+                vp.type = p.type;
+                vp.id = p.id;
+                vp.offsetBytes = align(cursor, alignment);
+                vp.sizeBytes = size;
+                parts.push_back(vp);
+                cursor = vp.offsetBytes + size;
+            }
+        }
+        if (parts.empty()) { Err("布局的物理 <Stores> 里没有可写分区"); return 1; }
+
+        std::vector<PoolSpaceSpec> spaces;
+        for (const LayoutStore& store : model.pools)
+        {
+            unsigned long long spaceSize = 0;
+            if (store.hasSizeBytes && store.sizeInBytes != 0) spaceSize = store.sizeInBytes;
+            else if (store.sizeInSectors != 0) spaceSize = store.sizeInSectors * sector;
+            if (spaceSize == 0 || store.storeType.empty()) continue;
+            PoolSpaceSpec spec;
+            spec.name = Utf8ToWide(store.storeType);
+            spec.sizeBytes = spaceSize;
+            spaces.push_back(spec);
+        }
+
+        OutLn("物理分区（写入 GPT）：" + NumText(parts.size()) + " 个");
+        for (const VhdPartition& vp : parts)
+        {
+            OutLn("  " + vp.name + "  type=" + vp.type + "  offset=" + FormatBytes(vp.offsetBytes) +
+                  "  size=" + FormatBytes(vp.sizeBytes));
+        }
+        OutLn("存储池 space（thin，名字取 StoreType）：" + NumText(spaces.size()) + " 个");
+        for (const PoolSpaceSpec& spec : spaces)
+        {
+            OutLn("  " + std::string(spec.name.begin(), spec.name.end()) + "  " + FormatBytes(spec.sizeBytes));
+        }
+        if (dry)
+        {
+            OutLn("（演练）未碰磁盘；确认后去掉 --dry。");
+            return 0;
+        }
+
+        const std::wstring wideFile = Utf8ToWide(file);
+        std::string device;
+        if (!VhdAttach(wideFile, false, device, error)) { Err("挂载失败：" + error); return 1; }
+        if (!VhdEnsureVirtualDisk(device, error))
+        {
+            std::string detachError;
+            VhdDetach(wideFile, detachError);
+            Err("拒绝操作：" + error);
+            return 1;
+        }
+        if (!VhdWriteGpt(device, diskId, parts, static_cast<std::uint32_t>(sector), error))
+        {
+            std::string detachError;
+            VhdDetach(wideFile, detachError);
+            Err("写 GPT 失败：" + error);
+            return 1;
+        }
+        OutLn("已写物理 GPT：" + device);
+        const std::wstring wideDevice(device.begin(), device.end());
+        std::vector<std::string> created;
+        const bool built = PoolBuild(wideDevice, L"OSPool", version, Utf8ToWide(directory), spaces, created, error);
+        std::string detachError;
+        const bool detached = VhdDetach(wideFile, detachError);
+        for (const std::string& name : created) OutLn("  space 已建：" + name);
+        if (!detached) Err("卸载虚拟磁盘失败：" + detachError);
+        if (!built) { Err("建池失败：" + error); return 1; }
+        OutLn("建池完成：" + file + "（space " + NumText(created.size()) + " 个）");
+        return 0;
+    }
+
     int CmdPool(const std::vector<std::string>& args)
     {
         const std::string sub = args.size() > 2 ? args[2] : std::string();
@@ -2494,9 +2623,11 @@ int CmdLayout(const std::vector<std::string>& args)
             OutLn("  pool plan --layout <xml>      打印存储池 / space 计划（只读 XML）");
             OutLn("  pool create --vhd <vhdx> [--disk <设备>] [--name OSPool] [--version 24|26] [--dir <临时目录>] [--space <名> --size 1G]");
             OutLn("                                在虚拟磁盘上真建池（服务句柄 → 池 → 可选 space），仅限虚拟盘");
-            OutLn("说明：真建池需 CreateStorageService + STORE_ID + TI 权限，暂未接通。");
+            OutLn("  pool build --vhd <vhdx> --layout <xml> [--version 24|26] [--disk-id <guid>] [--dir <临时目录>] [--dry]");
+            OutLn("                                写物理 GPT（只含 BS_EFIESP）→ 建池 → 按布局 <StoragePool>/<Stores> 逐 store 建 space");
             return sub.empty() ? 2 : 0;
         }
+        if (sub == "build") return CmdPoolBuild(args);
         if (sub == "probe")
         {
             std::string dll, error;

@@ -48,4 +48,24 @@ OCID_POOL_API bool PoolCreateSandbox(const PoolCreateOptions& options,
                                     std::string& detail,
                                     std::string& error);
 
+
+// 布局驱动的建池：调用方先写好物理 GPT（只含非池分区），这里负责
+// CreateStoragePool（服务会自己追加 OSPool 分区并写 SPACEDB）再逐 store 建 space。
+// space 名取布局里的 <StoreType>（真机 SDBC 里的 space 名就是 MainOSDisk 这类）。
+struct PoolSpaceSpec
+{
+    std::wstring name;
+    unsigned long long sizeBytes = 0;
+    bool thin = true;
+    unsigned int usage = 2;   // 2 = Data
+};
+
+OCID_POOL_API bool PoolBuild(const std::wstring& devicePath,
+                             const std::wstring& poolName,
+                             unsigned int version,
+                             const std::wstring& directory,
+                             const std::vector<PoolSpaceSpec>& spaces,
+                             std::vector<std::string>& created,
+                             std::string& error);
+
 } // namespace ocid::imaging
