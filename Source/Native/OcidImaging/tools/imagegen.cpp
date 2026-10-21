@@ -40,6 +40,7 @@ void PrintUsage()
     OutLn("  ocid_imagegen schema validate <XML> --schema <XSD> [--schema <XSD>...]");
     OutLn("  ocid_imagegen schema pick --build <构建号> [--family V1|V2] [--schema-dir <目录>]");
     OutLn("  ocid_imagegen packagelist --oem-input <OEMInput.xml> --cabs <cab 目录> --out <PackageList.xml>");
+    OutLn("  ocid_imagegen devicedb    --oem-input <OEMInput.xml> --cabs <cab 目录> --out <DeviceDB.xml>");
     OutLn("  ocid_imagegen cab list <文件.cab>");
     OutLn("  ocid_imagegen cab entry <文件.cab> <条目名> --out <文件>");
     OutLn("  ocid_imagegen cab extract <文件.cab> --out <目录>");
