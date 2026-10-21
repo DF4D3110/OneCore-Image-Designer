@@ -49,6 +49,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <string>
@@ -59,7 +61,7 @@
 
 using namespace ocid;
 
-#define OCID_WSSM_VERSION "1.0.0"
+#define OCID_WSSM_VERSION "1.1.0"
 
 namespace {
 
@@ -73,11 +75,15 @@ namespace {
     // 这些开关由底层命令自己解析；本程序只在转发时保证它们出现在命令行里。
     std::vector<std::string> g_globals;
 
+    // 装包桥（跨模块）解析：实现在文件后部的"装包"一节，这里先声明给 doctor 用。
+    std::filesystem::path ResolveCbsxCli();
+
     // ── 命令文档树 ──────────────────────────────────────────────────────────
     //
     // path    ：两段命令路径（空格分隔），也是 `help <组> <命令>` 的键。
     // group   ：总览里的分组。
     // legacy  ：转发到 ocid_manifest 的哪个命令；nullptr = 本程序自己实现。
+    // alias   ：同意写法（中文词序），供 `ocid_wssm 装包 列表` 这类喊法用。
     struct Doc
     {
         const char* path;
@@ -87,20 +93,22 @@ namespace {
         const char* options;
         const char* example;
         const char* legacy;
+        const char* alias = nullptr;
     };
 
     const char* const kGroupOrder[] = {
-        "环境", "工作流", "清单", "落位", "驱动", "台账", "生成", "缓存", "DCM", "工具",
+        "环境", "工作流", "清单", "落位", "驱动", "台账", "生成", "装包", "缓存", "DCM", "工具",
     };
 
     const char* const kGroupSummary[] = {
         "自检、版本、帮助。",
-        "多步串联：一次生成全套计划、校验计划、批量构建 PCM。",
+        "多步串联：一次生成全套计划、校验计划、批量构建 PCM、离线装包。",
         "组件清单的解析、统计、导出与宏展开。",
         "文件落位计划与执行（载荷 → WinSxS 正本 → 落点）。",
         "驱动包导入计划、DriverDatabase 台账、驱动落位。",
         "CBS 台账（COMPONENTS）的读取、校验、比对与写入。",
         "CBS 台账各部分记录的计划生成（组件 / 部署 / 版本索引 / 根 / 驱动）。",
+        "离线装包：枚举 / 暂存 / 安装 / 卸载 / 批处理 / 收尾 / 后置（调度 CbsxCli，跨模块）。",
         "ManifestCache（PCM/CDF）的解析、构建与回归统计。",
         "DCM 紧凑清单的解压与字典导出。",
         "零散工具与旧命令透传。",
@@ -179,6 +187,20 @@ namespace {
          "全局 --os-build 决定 16299+ 的记录形状（例如 104 B 文件记录），别忘了给。",
          "ocid_wssm workflow pcm --manifests E:\\ocid_dism\\16299\\mf --out E:\\built16299 --os-build 16299 --dcm-dictionary E:\\ocid_dism\\dcm\\dict.bin",
          nullptr},
+        {"workflow install", "工作流",
+         "装包全流程：安装（或只暂存）→ 收尾，一步到位。",
+         "ocid_wssm workflow install <mum> [<mum> ...] --windows <WinDir> [--stage-only] [--skip-finish] [--dry] [--log <目录>] [--no-ti] [--postinstall]",
+         "<mum>：一个或多个 .mum 清单路径。\n"
+         "--windows：离线镜像的 Windows 目录。\n"
+         "--stage-only：只暂存（Staged），不安装、不收尾。\n"
+         "--skip-finish：安装完不收尾（想自己挑时机收尾时用）。\n"
+         "--dry：演练；CbsxCli 只打印计划，不写镜像。\n"
+         "--log：日志目录；两步各写一份日志（文件名为 cbsx-install.log / cbsx-finish.log）。\n"
+         "--postinstall：收尾后再跑一次后置阶段（语言/SKU 等参数见 pkg postinstall）。\n"
+         "--no-ti：不尝试提权到 TrustedInstaller（排障用）。\n"
+         "每一步失败即停，退出码 = 失败那一步的退出码；跨模块调度的原因会原样打出。",
+         "ocid_wssm workflow install D:\\pkgs\\a.mum --windows W:\\Windows --log D:\\logs",
+         nullptr, "工作流 装包"},
 
         // ── 清单 ────────────────────────────────────────────────────────────
         {"manifest info", "清单",
@@ -378,6 +400,90 @@ namespace {
          "ocid_wssm plan drivers E:\\v\\mnt16299\\Windows\\servicing\\Packages E:\\v\\mnt16299\\Windows\\WinSxS plan-drv.txt --installed installed.csv",
          "cbs-plan-drivers"},
 
+        // ── 装包（调度 CbsxCli，跨模块）───────────────────────────────────────
+        //
+        // 这一组的实现不在本程序里：CBS 的离线装包/收尾/后置只有 C# 侧有（走 CBS COM），
+        // 本程序只负责把中文语法翻译成 CbsxCli.exe 的开关、把子进程的退出码带回来。
+        // 原来的 cbsxcli.exe 控制台保持可用，两条路都留着。
+        {"pkg list", "装包",
+         "列出离线镜像里已装的包（只读：枚举 COMPONENTS 的包状态）。",
+         "ocid_wssm pkg list --windows <WinDir> [--log <文件>]",
+         "--windows：离线镜像的 Windows 目录（已挂载的 VHD/VHDX）。\n"
+         "--log：把 CbsxCli 的完整日志写进文件（排障用）。\n"
+         "只读命令：不写镜像，也不会提权到 TrustedInstaller。\n"
+         "实现：调度 CbsxCli 的 /ep（跨模块；CBS 逻辑只有一份，在 C# 侧）。",
+         "ocid_wssm pkg list --windows W:\\Windows",
+         nullptr, "装包 列表"},
+        {"pkg stage", "装包",
+         "暂存包（Staged）：载荷落进 WinSxS，但暂不激活。",
+         "ocid_wssm pkg stage <mum> [<mum> ...] --windows <WinDir> [--dry] [--log <文件>] [--no-ti]",
+         "<mum>：一个或多个 .mum 清单路径（.cab/.msu 要先展开成 .mum）。\n"
+         "--windows：离线镜像的 Windows 目录。\n"
+         "--dry：只演练计划，不写镜像。\n"
+         "--log：CbsxCli 详细日志文件。\n"
+         "--no-ti：不尝试提权到 TrustedInstaller（当前身份跑，排障用）。\n"
+         "多份包会合成一份批处理、一次会话提交；有路径含空格时自动退回逐个调用。\n"
+         "实现：调度 CbsxCli 的 /sp。",
+         "ocid_wssm pkg stage D:\\pkgs\\a.mum D:\\pkgs\\b.mum --windows W:\\Windows",
+         nullptr, "装包 暂存"},
+        {"pkg install", "装包",
+         "安装包（Installed）：激活已落盘的载荷，等价 DISM 的安装阶段。",
+         "ocid_wssm pkg install <mum> [<mum> ...] --windows <WinDir> [--dry] [--log <文件>] [--no-ti]",
+         "<mum>：一个或多个 .mum 清单路径。\n"
+         "--windows：离线镜像的 Windows 目录。\n"
+         "--dry：只演练计划，不写镜像。\n"
+         "--log：CbsxCli 详细日志文件。\n"
+         "--no-ti：不提权（排障用）。\n"
+         "装完通常还要收尾：见 pkg finish（或用 workflow install 一步做完）。\n"
+         "实现：调度 CbsxCli 的 /ip。",
+         "ocid_wssm pkg install D:\\pkgs\\a.mum --windows W:\\Windows",
+         nullptr, "装包 安装"},
+        {"pkg remove", "装包",
+         "移除包（Absent）：从离线镜像里卸掉。",
+         "ocid_wssm pkg remove <mum> [<mum> ...] --windows <WinDir> [--dry] [--log <文件>] [--no-ti]",
+         "<mum>：一个或多个 .mum 清单路径。\n"
+         "移除后镜像里可能留残包目录，是否清理与收尾见 pkg finish / pkg postinstall。\n"
+         "实现：调度 CbsxCli 的 /up。",
+         "ocid_wssm pkg remove D:\\pkgs\\a.mum --windows W:\\Windows",
+         nullptr, "装包 卸载"},
+        {"pkg batch", "装包",
+         "按批处理文件一次执行多步装包（自己编排顺序 / 混做多步）。",
+         "ocid_wssm pkg batch <批处理文件> --windows <WinDir> [--dry] [--log <文件>] [--no-ti]",
+         "批处理格式（与 CbsxCli 相同，一行一步，空格分词）：\n"
+         "  ip /m:D:\\pkgs\\a.mum     安装\n"
+         "  sp /m:D:\\pkgs\\b.mum     暂存\n"
+         "  up /m:D:\\pkgs\\c.mum     移除\n"
+         "空行与 # / :: / ; 开头的行被忽略。\n"
+         "注意：批处理按空格分词，**路径里不能有空格**；含空格的包请用 pkg install / stage / remove。\n"
+         "实现：调度 CbsxCli 的 /b:。",
+         "ocid_wssm pkg batch D:\\pkgs\\plan.txt --windows W:\\Windows",
+         nullptr, "装包 批处理"},
+        {"pkg finish", "装包",
+         "镜像收尾：generalize / reseal 到 OOBE，并写 ImageState。",
+         "ocid_wssm pkg finish --windows <WinDir> [--log <文件>] [--waitfor <pid>]",
+         "--windows：离线镜像的 Windows 目录。\n"
+         "--waitfor：先等这个 PID 退出再动手（前一步的 CBS 还占着 hive 时用；最多等 30 分钟）。\n"
+         "--log：额外日志文件。\n"
+         "做的事：释放残留 hive → 写 Windows\\Setup\\State\\State.ini\n"
+         "  （ImageState=IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE）→ 给 SOFTWARE hive 的\n"
+         "  ImageServicingData / State 两处写 IMAGE_STATE_COMPLETE。\n"
+         "必须是独立进程（同一进程刚跑完 CBS 会拿不到 hive）——本命令天然是新进程。\n"
+         "实现：调度 CbsxCli 的 /finish。",
+         "ocid_wssm pkg finish --windows W:\\Windows",
+         nullptr, "装包 收尾"},
+        {"pkg postinstall", "装包",
+         "后置阶段：应用 unattend、清理、按 edition 做最终配置。",
+         "ocid_wssm pkg postinstall --windows <WinDir> [--lang <语言>] [--scratch <目录>] [--sku <skuassembly>] [--result <结果文件>] [--waitfor <pid>]",
+         "--windows：离线镜像的 Windows 目录。\n"
+         "--lang：语言标记（如 zh-CN），影响 apply-unattend 的选取。\n"
+         "--scratch：划给后置阶段的临时目录。\n"
+         "--sku：skuassembly 文件；用它正则推出 edition（microsoft-windows-editions-<id>-package）。\n"
+         "--result：把结构化结果写成文件（供编排方读取）。\n"
+         "--waitfor：先等这个 PID 退出再动手。\n"
+         "实现：调度 CbsxCli 的 /postinstall。",
+         "ocid_wssm pkg postinstall --windows W:\\Windows --lang zh-CN --result D:\\post.txt",
+         nullptr, "装包 后置"},
+
         // ── 缓存 ────────────────────────────────────────────────────────────
         {"pcm tables", "缓存",
          "逐个 .pcm 解码表再重编码，按类型统计总数与逐字节一致数（表编码器自检）。",
@@ -466,17 +572,21 @@ namespace {
     }
 
     // 文档路径的两段词，用来做最长前缀匹配（"store verify" 比 "store" 更长）。
+    // 同意写法（Doc::alias）也参与匹配，这样中文词序（"装包 列表"）与英文路径等价。
     const Doc* FindDoc(const std::vector<std::string>& words, size_t* matchedWords = nullptr)
     {
         const Doc* best = nullptr;
         size_t bestLen = 0;
         for (const Doc& doc : kDocs) {
-            const std::vector<std::string> path = SplitWords(doc.path);
-            if (path.size() > words.size()) continue;
-            bool ok = true;
-            for (size_t i = 0; i < path.size(); ++i)
-                if (path[i] != words[i]) { ok = false; break; }
-            if (ok && path.size() > bestLen) { best = &doc; bestLen = path.size(); }
+            for (const char* text : {doc.path, doc.alias}) {
+                if (text == nullptr) continue;
+                const std::vector<std::string> path = SplitWords(text);
+                if (path.size() > words.size() || path.size() <= bestLen) continue;
+                bool ok = true;
+                for (size_t i = 0; i < path.size(); ++i)
+                    if (path[i] != words[i]) { ok = false; break; }
+                if (ok) { best = &doc; bestLen = path.size(); }
+            }
         }
         if (matchedWords) *matchedWords = bestLen;
         return best;
@@ -509,6 +619,7 @@ namespace {
             {"driver", "驱动"}, {"驱动", "驱动"},
             {"store", "台账"}, {"台账", "台账"},
             {"plan", "生成"}, {"生成", "生成"},
+            {"pkg", "装包"}, {"装包", "装包"}, {"cbsx", "装包"}, {"cbsxcli", "装包"}, {"install", "装包"},
             {"pcm", "缓存"}, {"缓存", "缓存"},
             {"dcm", "DCM"}, {"DCM", "DCM"}, {"dcm-format", "DCM"},
             {"tool", "工具"}, {"工具", "工具"},
@@ -563,6 +674,8 @@ namespace {
         OutLn("  --dcm-dictionary <wcp.dll|.bin>   DCM 清单（16299+）解压字典");
         OutLn("  --file-flags <csv>                现代镜像的 f! 状态位（<组件键>|<f! 值名>|<值>）");
         OutLn("  --os-build <构建号>               台账/记录形状的版本分档兜底（如 9600 / 16299）");
+        OutLn("  --cbsx <CbsxCli.exe>              装包命令的跨模块桥（C# 侧 CBS 客户端）");
+        OutLn("                                    缺省按发布布局 / 源码树自动找，也可设 OCID_CBSXCLI");
         OutLn("  --lang zh-CN                      帮助语言（默认 zh-CN，当前唯一内置语言）");
         OutLn("");
         for (const char* group : kGroupOrder) {
@@ -627,6 +740,7 @@ namespace {
     {
         if (withHeader) {
             OutLn(std::string("命令：") + doc.path + "（" + doc.group + "）");
+            if (doc.alias != nullptr) OutLn(std::string("同义写法：") + doc.alias);
             OutLn("");
         }
         OutLn("用途：");
@@ -998,6 +1112,32 @@ namespace {
             else ReportPass(c, "ADK 构建工具：" + found.string() + "（" + HumanBytes(size) + "）");
         }
 
+        // 7. 装包桥（跨模块）：CbsxCli.exe + NSudoAPI.dll
+        {
+            const std::filesystem::path bridge = ResolveCbsxCli();
+            std::uint64_t bridgeSize = 0;
+            if (bridge.empty() || !FileExistsSize(bridge, &bridgeSize)) {
+                ReportWarn(c, "没找到 CbsxCli.exe：装包组（pkg / workflow install）不可用；"
+                              "用 --cbsx 指定，或设环境变量 OCID_CBSXCLI");
+            } else {
+                ReportPass(c, "装包桥 CbsxCli：" + bridge.string() + "（" + HumanBytes(bridgeSize) + "）");
+                const std::filesystem::path nsudo[] = {
+                    bridge.parent_path() / "Win32" / "NSudoAPI.dll",
+                    bridge.parent_path() / "NSudoAPI.dll",
+                    bridge.parent_path() / "x64" / "NSudoAPI.dll",
+                };
+                std::filesystem::path found;
+                std::uint64_t nsudoSize = 0;
+                for (const auto& candidate : nsudo)
+                    if (FileExistsSize(candidate, &nsudoSize)) { found = candidate; break; }
+                if (found.empty())
+                    ReportWarn(c, "同目录下没找到 NSudoAPI.dll：无法提权到 TrustedInstaller，"
+                                  "装包会按当前身份跑（多半失败）");
+                else
+                    ReportPass(c, "提权组件 NSudoAPI.dll：" + found.string());
+            }
+        }
+
         OutLn("");
         OutLn("结论：" + std::to_string(c.passed) + " 项通过，" +
               std::to_string(c.warned) + " 项提示，" + std::to_string(c.failed) + " 项失败。");
@@ -1320,6 +1460,616 @@ namespace {
         return failed == 0 ? 0 : 1;
     }
 
+    // ── 装包：跨模块调度 CbsxCli（.NET 8 控制台）──────────────────────────────
+    //
+    // 为什么是"调度"而不是"重写"：CBS 的离线装包（StagePackage / InstallPackage /
+    // UninstallPackage）、镜像收尾（generalize/reseal）、后置阶段（apply-unattend）
+    // 在 C# 侧已经有完整实现（MobilePackageGen\CbsxCli 直接编译主程序的
+    // Services\*.cs，走 CBS COM）。在这里再写一遍等于维护两套行为，所以本程序只做：
+    //   · 桥的定位：--cbsx / OCID_CBSXCLI / 发布布局 / 源码树
+    //   · 语法翻译：中文命令 → CbsxCli 的 /ep /sp /ip /up /b: /finish /postinstall
+    //   · 进程调度：子进程继承本进程控制台（UTF-8 原样透传），本程序等它结束
+    //   · 退出码：CbsxCli 需要提权时用 NSudo 把自己以 TrustedInstaller 重启，那条路径
+    //     的父进程恒返回 0；所以让它把真实退出码写进 /exitcode: 文件，这里读文件
+    // cbsxcli.exe 与 ocid_manifest.exe 两个原控制台都保留，本层不取代它们。
+
+    std::string g_cbsxPath;      // --cbsx 显式指定的桥
+    unsigned g_cbsxSerial = 0;   // 临时文件名去重
+
+    std::filesystem::path TempDir()
+    {
+        std::error_code ec;
+        std::filesystem::path dir = std::filesystem::temp_directory_path(ec);
+        if (ec || dir.empty()) {
+            ec.clear();
+            dir = std::filesystem::current_path(ec);
+        }
+        return dir;
+    }
+
+    std::filesystem::path ExeDirectory()
+    {
+#ifdef _WIN32
+        std::wstring buffer(32768, L'\0');
+        const DWORD n = GetModuleFileNameW(nullptr, &buffer[0], static_cast<DWORD>(buffer.size()));
+        if (n == 0 || n >= buffer.size()) return std::filesystem::current_path();
+        buffer.resize(n);
+        return std::filesystem::path(buffer).parent_path();
+#else
+        return std::filesystem::current_path();
+#endif
+    }
+
+    // UTF-8 → UTF-16（Windows API 用；本程序的参数一律是 UTF-8）。
+    std::wstring ToWideUtf8(const std::string& text)
+    {
+#ifdef _WIN32
+        if (text.empty()) return std::wstring();
+        const int need = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+        if (need <= 1) return std::wstring();
+        std::wstring out(static_cast<size_t>(need - 1), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, &out[0], need);
+        return out;
+#else
+        return std::wstring(text.begin(), text.end());
+#endif
+    }
+
+    // 找 CbsxCli.exe。返回空 = 没找到（调用方给出可操作的提示）。
+    std::filesystem::path ResolveCbsxCli()
+    {
+        if (!g_cbsxPath.empty()) {
+            const std::filesystem::path given(FromUtf8OrAnsi(g_cbsxPath.c_str()));
+            // 显式给了就只用它：宁可报错，也不要偷偷换一个别的版本去写镜像。
+            return FileExistsSize(given) ? given : std::filesystem::path();
+        }
+        if (const char* env = std::getenv("OCID_CBSXCLI")) {
+            const std::filesystem::path given(FromUtf8OrAnsi(env));
+            if (FileExistsSize(given)) return given;
+        }
+        const std::filesystem::path exeDir = ExeDirectory();
+        const std::filesystem::path layout[] = {
+            exeDir / "CbsxCli.exe",
+            exeDir / "CBS" / "CbsxCli.exe",
+            exeDir / "x86" / "CbsxCli.exe",
+            exeDir / "tools" / "CbsxCli.exe",
+            exeDir.parent_path() / "CBS" / "CbsxCli.exe",
+            exeDir.parent_path() / "x86" / "CbsxCli.exe",
+        };
+        for (const std::filesystem::path& p : layout)
+            if (FileExistsSize(p)) return p;
+        // 开发期直接跑 Source\Native\Output\x86\ocid_wssm.exe 时，往上找工程里的发布产物。
+        std::filesystem::path dir = exeDir;
+        for (int depth = 0; depth < 8 && !dir.empty(); ++depth) {
+            const std::filesystem::path rel[] = {
+                dir / "MobilePackageGen" / "CbsxCli" / "bin" / "Release" / "net8.0" / "win-x86" / "CbsxCli.exe",
+                dir / "MobilePackageGen" / "CbsxCli" / "bin" / "Debug" / "net8.0" / "win-x86" / "CbsxCli.exe",
+                dir / "bin" / "Release" / "net8.0-windows" / "CBS" / "CbsxCli.exe",
+                dir / "bin" / "Debug" / "net8.0-windows" / "CBS" / "CbsxCli.exe",
+            };
+            for (const std::filesystem::path& p : rel)
+                if (FileExistsSize(p)) return p;
+            dir = dir.parent_path();
+        }
+        return std::filesystem::path();
+    }
+
+    // 按 Windows 命令行规则把一个参数包成"一个 argv 元素"。
+    // CbsxCli 用 /m:<路径> 这种整段参数，含空格的路径必须整体加引号才能原样送达。
+    std::string QuoteArg(const std::string& arg)
+    {
+        bool needQuote = arg.empty();
+        for (char ch : arg)
+            if (ch == ' ' || ch == '\t' || ch == '"') { needQuote = true; break; }
+        if (!needQuote) return arg;
+        std::string out = "\"";
+        size_t backslashes = 0;
+        for (char ch : arg) {
+            if (ch == '\\') { ++backslashes; continue; }
+            if (ch == '"') {
+                out.append(backslashes * 2 + 1, '\\');
+                out.push_back('"');
+                backslashes = 0;
+                continue;
+            }
+            out.append(backslashes, '\\');
+            backslashes = 0;
+            out.push_back(ch);
+        }
+        out.append(backslashes * 2, '\\');
+        out.push_back('"');
+        return out;
+    }
+
+    // 调度 CbsxCli 并等它结束。返回子进程的真实退出码；-1 = 调度失败（原因已打印）。
+    int RunCbsx(const std::vector<std::string>& argv, bool quiet)
+    {
+#ifndef _WIN32
+        (void)argv;
+        (void)quiet;
+        Err("装包命令只在 Windows 上可用（要调度 C# 的 CbsxCli）。");
+        return -1;
+#else
+        const std::filesystem::path exe = ResolveCbsxCli();
+        if (exe.empty()) {
+            Err("没找到 CbsxCli.exe —— 装包要调度 C# 侧的 CBS 客户端（MobilePackageGen\\CbsxCli）。");
+            Err("四种给法，任选其一：");
+            Err("  1) 命令行显式给：ocid_wssm pkg list --windows <WinDir> --cbsx <CbsxCli.exe 完整路径>");
+            Err("  2) 环境变量：set OCID_CBSXCLI=<CbsxCli.exe 完整路径>");
+            Err("  3) 放到本程序旁边，或 <本程序目录>\\CBS\\ 下");
+            Err("  4) 源码树里先发布：dotnet publish MobilePackageGen\\CbsxCli\\CbsxCli.csproj -c Release -r win-x86 --self-contained true");
+            return -1;
+        }
+
+        ++g_cbsxSerial;
+        const std::filesystem::path codeFile =
+            TempDir() / ("ocid_wssm_cbsx_" + std::to_string(GetCurrentProcessId()) + "_" +
+                         std::to_string(g_cbsxSerial) + ".code");
+        std::error_code ec;
+        std::filesystem::remove(codeFile, ec);
+
+        std::string commandLine = QuoteArg(exe.string());
+        for (const std::string& a : argv) {
+            commandLine += ' ';
+            commandLine += QuoteArg(a);
+        }
+        commandLine += " /exitcode:";
+        commandLine += QuoteArg(codeFile.string());
+
+        if (!quiet) {
+            OutLn("→ 调度 CbsxCli：" + exe.string());
+            std::string shown;
+            for (const std::string& a : argv) {
+                if (!shown.empty()) shown += ' ';
+                shown += QuoteArg(a);
+            }
+            OutLn("  参数：" + shown);
+        }
+        // 子进程直接继承本进程的 stdout；不论是否打印调度提示，都必须先把缓冲刷出去，
+        // 否则输出被重定向/管道时，本进程的提示会跑到子进程输出之后。
+        std::fflush(stdout);
+
+        STARTUPINFOW si;
+        ZeroMemory(&si, sizeof(si));
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi;
+        ZeroMemory(&pi, sizeof(pi));
+        std::wstring mutableLine = ToWideUtf8(commandLine);
+        const std::wstring exeWide = exe.wstring();
+        const std::wstring workDir = exe.parent_path().wstring();
+        if (!CreateProcessW(exeWide.c_str(), &mutableLine[0], nullptr, nullptr, TRUE, 0, nullptr,
+                            workDir.empty() ? nullptr : workDir.c_str(), &si, &pi)) {
+            Err("启动 CbsxCli 失败（GetLastError=" + std::to_string(GetLastError()) + "）：" + exe.string());
+            return -1;
+        }
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        DWORD childCode = 0;
+        GetExitCodeProcess(pi.hProcess, &childCode);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+
+        // 文件里有记录就以文件为准（提权重启路径下父进程的退出码没有意义）。
+        int result = static_cast<int>(childCode);
+        std::uint64_t codeSize = 0;
+        if (FileExistsSize(codeFile, &codeSize) && codeSize > 0 && codeSize < 64) {
+            std::ifstream in(codeFile, std::ios::binary);
+            std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            while (!text.empty() && (text.back() == '\r' || text.back() == '\n' ||
+                                     text.back() == ' ' || text.back() == '\t'))
+                text.pop_back();
+            if (!text.empty()) {
+                try { result = std::stoi(text); } catch (...) { }
+            }
+        }
+        std::filesystem::remove(codeFile, ec);
+        return result;
+#endif
+    }
+
+    // --windows 允许给镜像根（自动补 Windows），也给 Windows 目录本身。
+    std::filesystem::path NormalizeWindowsDir(const std::filesystem::path& given)
+    {
+        if (given.empty()) return given;
+        if (FileExistsSize(given / "System32" / "ntoskrnl.exe")) return given;
+        if (FileExistsSize(given / "Windows" / "System32" / "ntoskrnl.exe")) return given / "Windows";
+        return given;   // 原样交给 CbsxCli，它的报错比我们猜更有用
+    }
+
+    std::string AbsolutePathText(const std::string& text)
+    {
+        std::error_code ec;
+        const std::filesystem::path p(FromUtf8OrAnsi(text.c_str()));
+        const std::filesystem::path absolute = std::filesystem::absolute(p, ec);
+        if (ec) return text;
+        return absolute.lexically_normal().string();
+    }
+
+    bool WantsHelp(const std::vector<std::string>& args)
+    {
+        for (const std::string& a : args)
+            if (a == "--help" || a == "-h" || a == "/?") return true;
+        return false;
+    }
+
+    void ShowDoc(const char* path)
+    {
+        if (const Doc* doc = FindDoc(SplitWords(path))) PrintDoc(*doc);
+        else OutLn(std::string("（内部错误：文档树里没有 ") + path + "）");
+    }
+
+    struct PkgOptions
+    {
+        std::filesystem::path windows;
+        std::string logPath;
+        std::string waitFor;
+        std::string lang;
+        std::string scratch;
+        std::string sku;
+        std::string result;
+        std::string batchFile;
+        bool dry = false;
+        bool noTi = false;
+        bool skipFinish = false;
+        bool stageOnly = false;
+        bool postInstall = false;
+        std::vector<std::string> mums;
+    };
+
+    // 装包命令的公共选项解析。
+    //   allowPositional：允许位置参数（.mum 列表 / 批处理文件）
+    //   allowDry       ：允许 --dry
+    //   allowFlowFlags ：允许 --stage-only / --skip-finish / --postinstall（workflow 用）
+    //   allowBatch     ：允许 --batch（pkg batch 用）
+    bool ParsePkgOptions(const std::vector<std::string>& args, const char* usage, bool allowPositional,
+                         bool allowDry, bool allowFlowFlags, bool allowBatch, PkgOptions& o)
+    {
+        for (size_t i = 0; i < args.size(); ++i) {
+            const std::string& a = args[i];
+            auto takeString = [&](std::string& target) {
+                if (i + 1 < args.size()) {
+                    target = args[++i];
+                    return true;
+                }
+                Err("参数缺少取值：" + a);
+                Err(std::string("用法：") + usage);
+                return false;
+            };
+            if (a == "--windows") {
+                std::string value;
+                if (!takeString(value)) return false;
+                o.windows = NormalizeWindowsDir(std::filesystem::path(FromUtf8OrAnsi(value.c_str())));
+            } else if (a == "--log") {
+                if (!takeString(o.logPath)) return false;
+            } else if (a == "--waitfor") {
+                if (!takeString(o.waitFor)) return false;
+            } else if (a == "--lang") {
+                if (!takeString(o.lang)) return false;
+            } else if (a == "--scratch") {
+                if (!takeString(o.scratch)) return false;
+            } else if (a == "--sku") {
+                if (!takeString(o.sku)) return false;
+            } else if (a == "--result") {
+                if (!takeString(o.result)) return false;
+            } else if (a == "--batch") {
+                if (!allowBatch) {
+                    Err(std::string("本命令不接受 --batch（用法：") + usage + "）");
+                    return false;
+                }
+                if (!takeString(o.batchFile)) return false;
+            } else if (a == "--dry" && allowDry) {
+                o.dry = true;
+            } else if (a == "--no-ti") {
+                o.noTi = true;
+            } else if (a == "--skip-finish" && allowFlowFlags) {
+                o.skipFinish = true;
+            } else if (a == "--stage-only" && allowFlowFlags) {
+                o.stageOnly = true;
+            } else if (a == "--postinstall" && allowFlowFlags) {
+                o.postInstall = true;
+            } else if (!a.empty() && a[0] == '-') {
+                Err("本命令不认识这个参数：" + a);
+                Err(std::string("用法：") + usage);
+                return false;
+            } else if (allowPositional) {
+                o.mums.push_back(a);
+            } else {
+                Err("多余的参数：" + a);
+                Err(std::string("用法：") + usage);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // 把一批 .mum 交给 CbsxCli：能用批处理就用（一次会话、一次提权），
+    // 有路径含空格时退回逐个调用（批处理按空格分词，含空格的路径写不进去）。
+    int ApplyMums(const char* intent, const std::vector<std::string>& mums,
+                  const std::filesystem::path& windows, bool dry, const std::string& logPath, bool noTi)
+    {
+        std::vector<std::string> common;
+        common.push_back("/o:" + windows.string());
+        if (noTi) common.push_back("/no-ti");
+        if (dry) common.push_back("/dry");
+        if (!logPath.empty()) common.push_back("/log:" + logPath);
+
+        bool anySpace = false;
+        for (const std::string& m : mums)
+            if (m.find(' ') != std::string::npos || m.find('\t') != std::string::npos) anySpace = true;
+
+        if (mums.size() > 1 && !anySpace) {
+            ++g_cbsxSerial;
+            const std::filesystem::path batchFile =
+                TempDir() / ("ocid_wssm_pkg_" + std::to_string(GetCurrentProcessId()) + "_" +
+                             std::to_string(g_cbsxSerial) + ".txt");
+            std::ofstream out(batchFile, std::ios::binary | std::ios::trunc);
+            if (!out) {
+                Err("写不出临时批处理文件：" + batchFile.string());
+                return 2;
+            }
+            out << "# ocid_wssm 生成的批处理（一行一步）\r\n";
+            for (const std::string& m : mums) out << intent << " /m:" << AbsolutePathText(m) << "\r\n";
+            out.close();
+
+            std::vector<std::string> argv;
+            argv.push_back("/b:" + batchFile.string());
+            argv.insert(argv.end(), common.begin(), common.end());
+            const int result = RunCbsx(argv, false);
+            std::error_code ec;
+            std::filesystem::remove(batchFile, ec);
+            return result;
+        }
+
+        if (mums.size() > 1)
+            OutLn("提示：有 .mum 路径含空格，批处理模式表达不了，改为逐个调用（每份一次会话）。");
+        int lastCode = 0;
+        for (const std::string& m : mums) {
+            OutLn(std::string("→ ") + intent + "：" + AbsolutePathText(m));
+            std::vector<std::string> argv;
+            argv.push_back(std::string("/") + intent);
+            argv.push_back("/m:" + AbsolutePathText(m));
+            argv.insert(argv.end(), common.begin(), common.end());
+            lastCode = RunCbsx(argv, true);
+            if (lastCode != 0) break;
+        }
+        return lastCode;
+    }
+
+    int RunPkgIntent(const std::vector<std::string>& args, const char* intent, const char* docPath,
+                     const char* usage)
+    {
+        if (WantsHelp(args)) { ShowDoc(docPath); return 0; }
+        PkgOptions o;
+        if (!ParsePkgOptions(args, usage, true, true, false, false, o)) return 2;
+        if (o.windows.empty()) {
+            Err("缺 --windows（离线镜像的 Windows 目录）。");
+            Err(std::string("用法：") + usage);
+            return 2;
+        }
+        if (o.mums.empty()) {
+            Err("没给要处理的 .mum 清单路径。");
+            Err(std::string("用法：") + usage);
+            return 2;
+        }
+        return ApplyMums(intent, o.mums, o.windows, o.dry, o.logPath, o.noTi);
+    }
+
+    int CmdPkgList(const std::vector<std::string>& args)
+    {
+        const char* usage = "ocid_wssm pkg list --windows <WinDir> [--log <文件>]";
+        if (WantsHelp(args)) { ShowDoc("pkg list"); return 0; }
+        PkgOptions o;
+        if (!ParsePkgOptions(args, usage, false, false, false, false, o)) return 2;
+        if (o.windows.empty()) {
+            Err("缺 --windows（离线镜像的 Windows 目录）。");
+            Err(std::string("用法：") + usage);
+            return 2;
+        }
+        std::vector<std::string> argv;
+        argv.push_back("/ep");
+        argv.push_back("/o:" + o.windows.string());
+        if (!o.logPath.empty()) argv.push_back("/log:" + o.logPath);
+        return RunCbsx(argv, false);
+    }
+
+    int CmdPkgBatch(const std::vector<std::string>& args)
+    {
+        const char* usage = "ocid_wssm pkg batch <批处理文件> --windows <WinDir> [--dry] [--log <文件>] [--no-ti]";
+        if (WantsHelp(args)) { ShowDoc("pkg batch"); return 0; }
+        PkgOptions o;
+        if (!ParsePkgOptions(args, usage, true, true, false, true, o)) return 2;
+        if (o.windows.empty()) {
+            Err("缺 --windows（离线镜像的 Windows 目录）。");
+            Err(std::string("用法：") + usage);
+            return 2;
+        }
+        if (o.mums.empty() && o.batchFile.empty()) {
+            Err("要给批处理文件（位置参数，或 --batch <文件>）。");
+            Err(std::string("用法：") + usage);
+            return 2;
+        }
+        if (o.mums.size() > 1) {
+            Err("pkg batch 只接受一个批处理文件。");
+            Err(std::string("用法：") + usage);
+            return 2;
+        }
+        const std::string file = !o.batchFile.empty() ? o.batchFile : o.mums.front();
+        std::vector<std::string> argv;
+        argv.push_back("/b:" + AbsolutePathText(file));
+        argv.push_back("/o:" + o.windows.string());
+        if (o.noTi) argv.push_back("/no-ti");
+        if (o.dry) argv.push_back("/dry");
+        if (!o.logPath.empty()) argv.push_back("/log:" + o.logPath);
+        return RunCbsx(argv, false);
+    }
+
+    int CmdPkgFinish(const std::vector<std::string>& args)
+    {
+        const char* usage = "ocid_wssm pkg finish --windows <WinDir> [--log <文件>] [--waitfor <pid>]";
+        if (WantsHelp(args)) { ShowDoc("pkg finish"); return 0; }
+        PkgOptions o;
+        if (!ParsePkgOptions(args, usage, false, false, false, false, o)) return 2;
+        if (o.windows.empty()) {
+            Err("缺 --windows（离线镜像的 Windows 目录）。");
+            Err(std::string("用法：") + usage);
+            return 2;
+        }
+        std::vector<std::string> argv;
+        argv.push_back("/finish");
+        argv.push_back("/o:" + o.windows.string());
+        if (!o.waitFor.empty()) argv.push_back("/waitfor:" + o.waitFor);
+        if (!o.logPath.empty()) argv.push_back("/log:" + o.logPath);
+        return RunCbsx(argv, false);
+    }
+
+    int CmdPkgPostInstall(const std::vector<std::string>& args)
+    {
+        const char* usage = "ocid_wssm pkg postinstall --windows <WinDir> [--lang <语言>] [--scratch <目录>] "
+                            "[--sku <skuassembly>] [--result <结果文件>] [--waitfor <pid>]";
+        if (WantsHelp(args)) { ShowDoc("pkg postinstall"); return 0; }
+        PkgOptions o;
+        if (!ParsePkgOptions(args, usage, false, false, false, false, o)) return 2;
+        if (o.windows.empty()) {
+            Err("缺 --windows（离线镜像的 Windows 目录）。");
+            Err(std::string("用法：") + usage);
+            return 2;
+        }
+        std::vector<std::string> argv;
+        argv.push_back("/postinstall");
+        argv.push_back("/o:" + o.windows.string());
+        if (!o.lang.empty()) argv.push_back("/lang:" + o.lang);
+        if (!o.scratch.empty()) argv.push_back("/scratch:" + o.scratch);
+        if (!o.sku.empty()) argv.push_back("/sku:" + o.sku);
+        if (!o.result.empty()) argv.push_back("/result:" + o.result);
+        if (!o.waitFor.empty()) argv.push_back("/waitfor:" + o.waitFor);
+        return RunCbsx(argv, false);
+    }
+
+    // ── workflow install ────────────────────────────────────────────────────
+    //
+    // 装包的步骤选择：默认「安装 → 收尾」；--stage-only 只暂存；--skip-finish 只安装；
+    // --postinstall 在收尾后再跑一次后置。每一步各自一次 CbsxCli 会话（收尾必须独立进程）。
+    int CmdWorkflowInstall(const std::vector<std::string>& args)
+    {
+        const char* usage = "ocid_wssm workflow install <mum> [<mum> ...] --windows <WinDir> "
+                            "[--stage-only] [--skip-finish] [--dry] [--log <目录>] [--no-ti] [--postinstall]";
+        if (WantsHelp(args)) { ShowDoc("workflow install"); return 0; }
+        PkgOptions o;
+        if (!ParsePkgOptions(args, usage, true, true, true, false, o)) return 2;
+        if (o.windows.empty()) {
+            Err("缺 --windows（离线镜像的 Windows 目录）。");
+            Err(std::string("用法：") + usage);
+            return 2;
+        }
+        if (o.mums.empty()) {
+            Err("没给要安装的 .mum 清单路径。");
+            Err(std::string("用法：") + usage);
+            return 2;
+        }
+
+        std::size_t steps = 0;
+        if (o.stageOnly) steps = 1;
+        else steps = 1 + (o.skipFinish ? 0 : 1) + (o.postInstall ? 1 : 0);
+
+        OutLn("OCID WSSM 工作流：装包");
+        OutLn("  目标镜像：" + o.windows.string());
+        OutLn("  包数    ：" + std::to_string(o.mums.size()));
+        OutLn("  步骤数  ：" + std::to_string(steps));
+        if (o.dry) OutLn("  模式    ：演练（--dry，不写镜像）");
+        OutLn("");
+
+        auto logFor = [&](const char* name) -> std::string {
+            if (o.logPath.empty()) return std::string();
+            const std::filesystem::path dir(FromUtf8OrAnsi(o.logPath.c_str()));
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            return (dir / name).string();
+        };
+        auto elapsed = [](const std::chrono::steady_clock::time_point& started) {
+            char buf[64];
+            const double seconds =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+            std::snprintf(buf, sizeof(buf), "   完成（%.1f 秒）", seconds);
+            return std::string(buf);
+        };
+
+        std::size_t step = 0;
+
+        if (o.stageOnly) {
+            ++step;
+            OutLn("── [" + std::to_string(step) + "/" + std::to_string(steps) + "] 暂存（CbsxCli /sp）");
+            const auto started = std::chrono::steady_clock::now();
+            const int rc = ApplyMums("sp", o.mums, o.windows, o.dry, logFor("cbsx-stage.log"), o.noTi);
+            if (rc != 0) {
+                Err("步骤失败：暂存（CbsxCli /sp，退出码 " + std::to_string(rc) + "）。已停止。");
+                Err("排查：先单独跑 ocid_wssm pkg stage <mum> --windows " + o.windows.string());
+                return rc;
+            }
+            OutLn(elapsed(started));
+            OutLn("");
+        } else {
+            ++step;
+            OutLn("── [" + std::to_string(step) + "/" + std::to_string(steps) + "] 安装（CbsxCli /ip）");
+            const auto started = std::chrono::steady_clock::now();
+            const int rc = ApplyMums("ip", o.mums, o.windows, o.dry, logFor("cbsx-install.log"), o.noTi);
+            if (rc != 0) {
+                Err("步骤失败：安装（CbsxCli /ip，退出码 " + std::to_string(rc) + "）。已停止。");
+                Err("排查：先单独跑 ocid_wssm pkg install <mum> --windows " + o.windows.string() +
+                    " --log <文件>");
+                return rc;
+            }
+            OutLn(elapsed(started));
+            OutLn("");
+
+            if (!o.skipFinish) {
+                ++step;
+                OutLn("── [" + std::to_string(step) + "/" + std::to_string(steps) +
+                      "] 收尾（CbsxCli /finish，独立进程）");
+                std::vector<std::string> argv;
+                argv.push_back("/finish");
+                argv.push_back("/o:" + o.windows.string());
+                const std::string finishLog = logFor("cbsx-finish.log");
+                if (!finishLog.empty()) argv.push_back("/log:" + finishLog);
+                const auto started2 = std::chrono::steady_clock::now();
+                const int rc2 = RunCbsx(argv, false);
+                if (rc2 != 0) {
+                    Err("步骤失败：收尾（CbsxCli /finish，退出码 " + std::to_string(rc2) + "）。已停止。");
+                    Err("排查：先单独跑 ocid_wssm pkg finish --windows " + o.windows.string() +
+                        " --log <文件>");
+                    return rc2;
+                }
+                OutLn(elapsed(started2));
+                OutLn("");
+            }
+        }
+
+        if (o.postInstall) {
+            ++step;
+            OutLn("── [" + std::to_string(step) + "/" + std::to_string(steps) + "] 后置（CbsxCli /postinstall）");
+            std::vector<std::string> argv;
+            argv.push_back("/postinstall");
+            argv.push_back("/o:" + o.windows.string());
+            if (!o.lang.empty()) argv.push_back("/lang:" + o.lang);
+            if (!o.scratch.empty()) argv.push_back("/scratch:" + o.scratch);
+            if (!o.sku.empty()) argv.push_back("/sku:" + o.sku);
+            if (!o.result.empty()) argv.push_back("/result:" + o.result);
+            const auto started3 = std::chrono::steady_clock::now();
+            const int rc3 = RunCbsx(argv, false);
+            if (rc3 != 0) {
+                Err("步骤失败：后置（CbsxCli /postinstall，退出码 " + std::to_string(rc3) + "）。");
+                return rc3;
+            }
+            OutLn(elapsed(started3));
+            OutLn("");
+        }
+
+        OutLn("结论：装包流程完成（" + std::to_string(steps) + " 步）。");
+        OutLn("");
+        OutLn("下一步（可选）：");
+        OutLn("  看看镜像里的包状态：ocid_wssm pkg list --windows " + o.windows.string());
+        OutLn("  复查环境          ：ocid_wssm doctor --windows " + o.windows.string());
+        return 0;
+    }
+
     // ── 旧命令名（兼容透传用）──────────────────────────────────────────────
     const char* const kLegacyCommands[] = {
         "info", "ops", "scan", "dump-xsd", "export-ops", "place-ops", "csi-place", "verify-names",
@@ -1368,6 +2118,16 @@ namespace {
                     g_globals.push_back(args[++i]);
                 } else {
                     Err("全局开关缺少取值：" + a);
+                    return false;
+                }
+                continue;
+            }
+            // --cbsx 是本程序自己的开关（装包桥），不能转给 ocid_manifest。
+            if (a == "--cbsx") {
+                if (i + 1 < args.size()) {
+                    g_cbsxPath = args[++i];
+                } else {
+                    Err("全局开关缺少取值：--cbsx");
                     return false;
                 }
                 continue;
@@ -1471,7 +2231,7 @@ int wmain(int argc, wchar_t** argv)
     }
     if (first == "workflow") {
         if (args.size() < 2) {
-            Err("用法：ocid_wssm workflow <plan|verify|pcm> [参数...]");
+            Err("用法：ocid_wssm workflow <plan|verify|pcm|install> [参数...]");
             Err("看帮助：ocid_wssm help workflow");
             return 2;
         }
@@ -1480,7 +2240,34 @@ int wmain(int argc, wchar_t** argv)
         if (second == "plan") return CmdWorkflowPlan(rest);
         if (second == "verify") return CmdWorkflowVerify(rest);
         if (second == "pcm") return CmdWorkflowPcm(rest);
-        Err("workflow 没有这个子命令：" + second + "（可用：plan / verify / pcm）");
+        if (second == "install" || second == "装包") return CmdWorkflowInstall(rest);
+        Err("workflow 没有这个子命令：" + second + "（可用：plan / verify / pcm / install）");
+        return 2;
+    }
+    // 装包（跨模块调度 CbsxCli）。命令路径与中文词序两种喊法等价。
+    if (first == "pkg" || first == "cbsx" || first == "cbsxcli" || first == "装包") {
+        if (args.size() < 2) {
+            PrintGroup("装包");
+            return 0;
+        }
+        const std::string second = args[1];
+        std::vector<std::string> rest(args.begin() + 2, args.end());
+        if (second == "list" || second == "列表") return CmdPkgList(rest);
+        if (second == "stage" || second == "暂存")
+            return RunPkgIntent(rest, "sp", "pkg stage",
+                                "ocid_wssm pkg stage <mum> [<mum> ...] --windows <WinDir> [--dry] [--log <文件>] [--no-ti]");
+        if (second == "install" || second == "安装")
+            return RunPkgIntent(rest, "ip", "pkg install",
+                                "ocid_wssm pkg install <mum> [<mum> ...] --windows <WinDir> [--dry] [--log <文件>] [--no-ti]");
+        if (second == "remove" || second == "卸载")
+            return RunPkgIntent(rest, "up", "pkg remove",
+                                "ocid_wssm pkg remove <mum> [<mum> ...] --windows <WinDir> [--dry] [--log <文件>] [--no-ti]");
+        if (second == "batch" || second == "批处理") return CmdPkgBatch(rest);
+        if (second == "finish" || second == "收尾") return CmdPkgFinish(rest);
+        if (second == "postinstall" || second == "后置") return CmdPkgPostInstall(rest);
+        Err("pkg 没有这个子命令：" + second +
+            "（可用：list / stage / install / remove / batch / finish / postinstall）");
+        Err("看帮助：ocid_wssm help 装包");
         return 2;
     }
 

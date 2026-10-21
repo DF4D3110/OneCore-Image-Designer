@@ -36,8 +36,38 @@ internal static class Program
         public string? LogPath;
     }
 
+    // ── /exitcode:<文件>：把真实退出码写进文件（供跨进程调度方读取）──
+    //
+    // 【为什么需要】装包类操作会用 NSudo 把活交给以 TrustedInstaller 重启的【同名子进程】，
+    // 那条路径下【父进程恒返回 0】（它只是在等子进程）。调度方（ocid_wssm pkg …）只拿到
+    // 父进程的 0 就无法判断成功与否。这里让真正干活的那一侧把退出码写进文件，调度方读文件。
+    // 重启出来的子进程带着同一个 /exitcode: 参数，所以"谁真的干了活谁写"。
     static int Main(string[] args)
     {
+        string? exitCodeFile = null;
+        foreach (var a in args)
+        {
+            if (!a.StartsWith("/exitcode:", StringComparison.OrdinalIgnoreCase)) continue;
+            var value = a.Substring("/exitcode:".Length).Trim().Trim('"');
+            if (value.Length > 0) exitCodeFile = value;
+        }
+
+        int code = RunCore(args, out bool relaunched);
+        if (exitCodeFile != null && !relaunched)
+        {
+            try
+            {
+                System.IO.File.WriteAllText(exitCodeFile,
+                    code.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+            catch { /* 写不了就算了：调度方会退回用进程退出码 */ }
+        }
+        return code;
+    }
+
+    static int RunCore(string[] args, out bool relaunched)
+    {
+        relaunched = false;
         Console.OutputEncoding = System.Text.Encoding.UTF8;
 
         // ── 提权钩子：装包类操作默认在 TrustedInstaller 下跑 ──
@@ -65,7 +95,12 @@ internal static class Program
             || a.StartsWith("/postinstall", StringComparison.OrdinalIgnoreCase)
             || a.StartsWith("/no-ti", StringComparison.OrdinalIgnoreCase));
         if (!readOnlyOrHelper && ElevationHelper.EnsureTrustedInstallerOrRelaunch(Console.WriteLine))
+        {
+            // 活已经交给提权重启出来的子进程，本进程只是个"等待者"，退出码没有意义；
+            // 真正的退出码由子进程写进 /exitcode: 文件（见 Main）。
+            relaunched = true;
             return 0;
+        }
 
         Console.WriteLine("CbsxCli 1.0  ——  CBS COM 客户端（cbsx.exe 的 C# 替代品）");
         Console.WriteLine();

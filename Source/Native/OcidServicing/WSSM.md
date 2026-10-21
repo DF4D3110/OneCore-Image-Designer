@@ -45,6 +45,7 @@ ocid_wssm run cbs-verify-store <hive>  :: 透传任意原语（参数原样）
 | 驱动 | `driver` | 驱动包（DMI）台账与落位 |
 | 台账 | `store` | COMPONENTS hive 读、校验、对拍；写入 |
 | 生成 | `plan` | 生成 CBS 计划文本（components / deployments / versioned / root / drivers） |
+| 装包 | `pkg` / `cbsx` / `install` | 离线装包：枚举 / 暂存 / 安装 / 卸载 / 批处理 / 收尾 / 后置（**跨模块调度 CbsxCli**） |
 | 缓存 | `pcm` | ManifestCache（PCM/CDF）：列表、重编码、生成、对拍、微 DOM |
 | DCM | `dcm` | DCM 清单解压与字典转储 |
 | 工具 | `tool` | 哈希等零碎工具、`run` 透传 |
@@ -59,6 +60,7 @@ ocid_wssm run cbs-verify-store <hive>  :: 透传任意原语（参数原样）
 | `workflow plan` | `cbs-plan-components` → `-deployments` → `-versioned` → `-root`（+`-drivers`） | 一次生成全套 CBS 台账计划 |
 | `workflow verify` | `cbs-verify-files`（+`cbs-verify-store`） | 校验计划与 WinSxS/hive 是否吻合 |
 | `workflow pcm` | `cbs-pcm-build`（+`cbs-pcm-diff`） | 批量生成 PCM，可选与真机逐字节对拍 |
+| `workflow install` | **跨模块** `CbsxCli.exe` | 装包 + 收尾一次做完（见 §5） |
 | `manifest info` | `info` | 清单概览 |
 | `manifest ops` | `ops` | 把清单展开成注册表操作序列 |
 | `manifest scan` | `scan` | 快速扫描（身份 + 摘要） |
@@ -85,6 +87,13 @@ ocid_wssm run cbs-verify-store <hive>  :: 透传任意原语（参数原样）
 | `plan versioned` | `cbs-plan-versioned` | `DerivedData\VersionedIndex` |
 | `plan root` | `cbs-plan-root` | 台账根值 |
 | `plan drivers` | `cbs-plan-drivers` | Drivers 台账 |
+| `pkg list`（装包 列表） | `CbsxCli /ep` | 枚举镜像里已装的包 |
+| `pkg stage`（装包 暂存） | `CbsxCli /sp` | 暂存包（Staged）：载荷落盘但不激活 |
+| `pkg install`（装包 安装） | `CbsxCli /ip` | 安装包（Installed） |
+| `pkg remove`（装包 卸载） | `CbsxCli /up` | 移除包（Absent） |
+| `pkg batch`（装包 批处理） | `CbsxCli /b` | 按批处理文件混做多步 |
+| `pkg finish`（装包 收尾） | `CbsxCli /finish` | generalize / reseal 到 OOBE + ImageState |
+| `pkg postinstall`（装包 后置） | `CbsxCli /postinstall` | 应用 unattend / 清理 / edition 收尾 |
 | `pcm tables` | `cbs-pcm-tables` | 列出 PCM 的表目录与槽 |
 | `pcm reencode` | `cbs-pcm-reencode` | 把真机 PCM 重新编码（验证编码器） |
 | `pcm build` | `cbs-pcm-build` | 清单 → PCM |
@@ -97,7 +106,7 @@ ocid_wssm run cbs-verify-store <hive>  :: 透传任意原语（参数原样）
 
 ---
 
-## 3. 三个工作流
+## 3. 四个工作流
 
 ### 3.1 `workflow plan` —— 一次生成全套 CBS 计划
 
@@ -146,6 +155,20 @@ ocid_wssm workflow pcm --manifests <清单目录> --out <输出目录> [--b0 N] 
 - 默认 `--b0 0`；`b0` 是文档根记录里那几个**真机未初始化栈字节**，不可推导，需要逐样本已知时用；
 - `--diff` 给了就调 `cbs-pcm-diff` 做"真机 vs 我产"的逐槽对拍。
 
+### 3.4 `workflow install` —— 装包 + 收尾
+
+```bat
+ocid_wssm workflow install <mum> [<mum> ...] --windows <WinDir> [--stage-only] [--skip-finish]
+                         [--postinstall] [--dry] [--log <目录>] [--no-ti]
+```
+
+1. `安装`：一次调 `CbsxCli /ip`（多个 `.mum` 且路径不含空格时走批处理，否则逐个调）；
+2. `收尾`：独立进程调 `CbsxCli /finish`（`--skip-finish` 跳过，`--dry` 自动只演练不写）；
+3. `--postinstall` 追加后置阶段（`/postinstall`）；`--stage-only` 只暂存（`/sp`）。
+
+`--log <目录>` 会按步骤落 `cbsx-install.log` / `cbsx-stage.log` / `cbsx-finish.log`。
+任何一步失败立即停，并打印"哪一步、退出码、怎么单独重跑"。
+
 ---
 
 ## 4. 全局开关与约定
@@ -156,6 +179,7 @@ ocid_wssm workflow pcm --manifests <清单目录> --out <输出目录> [--b0 N] 
 | `--file-flags <csv>` | 清单 `f!` 状态位（`<文件名>|<f! 值>|<值>`） |
 | `--os-build <构建号>` | 台账/记录的版本档位（如 `9600`、`16299`），默认从镜像 `ntoskrnl.exe` 探测 |
 | `--lang zh-CN` | 输出语言（当前唯一支持；写别的值会报错） |
+| `--cbsx <CbsxCli.exe>` | 装包桥（跨模块）的可执行文件；也可以用环境变量 `OCID_CBSXCLI` |
 
 - 这些开关写在**哪个位置都行**，`ocid_wssm` 会把它们摘出来、附加到每一次原语调用上。
 - 退出码：`0` 全部成功；`1` 某一步执行失败；`2` 用法/参数/前置条件不满足。
@@ -163,22 +187,52 @@ ocid_wssm workflow pcm --manifests <清单目录> --out <输出目录> [--b0 N] 
 
 ---
 
-## 5. 扩展方式
+## 5. 跨模块：装包（`pkg`）为什么是调度，不是重写
+
+离线装包 / 收尾 / 后置这一整块**不在原生 C++ 栈里**，它在 C# 侧：
+`Services\CbsxService.cs`（CBS COM 客户端）、`Services\FinishImageService.cs`（ImageState 收尾）、
+`Services\PostInstallService.cs`（后置）、`Services\SkuAssemblyService.cs`（批处理解析），
+由 `MobilePackageGen\CbsxCli` 打包成 `CbsxCli.exe`（自包含 win-x86）。
+
+`ocid_wssm` 不重写这一套（重写 = 两份实现、两处 bug、两种行为），而是**进程外调度**：
+
+1. **找桥**：`--cbsx` → 环境变量 `OCID_CBSXCLI` → 程序同级 `CbsxCli.exe` / `CBS\` / `x86\` / `tools\` →
+   源码树上溯 8 层找 `MobilePackageGen\CbsxCli\bin\{Release,Debug}\net8.0\win-x86\CbsxCli.exe`
+   与 `bin\{Release,Debug}\net8.0-windows\CBS\CbsxCli.exe`。找不到就一次把四种给法全列出来。
+2. **参数改写**：`pkg install a.mum` → `CbsxCli /ip /m:a.mum /o:<WinDir>`；多个包走 `/b:<临时批处理>`，
+   含空格的路径**逐个调**（批处理按空格分词，写不进去）。
+3. **退出码**：`CbsxCli` 的写操作会经 NSudo 提权成 TrustedInstaller **子进程**，那条路径下父进程恒返回 0。
+   所以 `ocid_wssm` 每次调用都带 `/exitcode:<临时文件>`，由真正干活的进程把退出码写进文件，我们以文件为准。
+4. **输出**：子进程直接继承本进程的 stdout/stderr，CbsxCli 的中文输出原样透出；
+   调度前会 `fflush(stdout)`，所以"调度提示 → 子进程输出 → 结论"的顺序是稳的。
+
+> 原有两个控制台都保留：`ocid_manifest.exe`（原语）与 `CbsxCli.exe`（装包）。
+> `ocid_wssm` 是第三个入口，改的是"怎么喊"，不是"谁来干"。
+
+**前置条件（CbsxCli 自带的安全门禁）**：`--windows` 指向的镜像必须位于**挂载的 VHD/VHDX**
+（物理磁盘 `BusType` 为 14 Virtual / 15 FileBackedVirtual 才放行）。在普通数据盘上跑 `pkg *` 会被拒绝，
+这是 CbsxCli 原有行为，`ocid_wssm` 没有放宽它。
+
+---
+
+## 6. 扩展方式
 
 **加一条命令（3 步）**
 
-1. `tools/ocid_wssm.cpp` 的 `kDocs[]` 里加一条 `{ "组 命令", "组", "摘要", "用法", "选项…", "示例", "legacy-原语" }`；
+1. `tools/ocid_wssm.cpp` 的 `kDocs[]` 里加一条
+   `{ "组 命令", "组", "摘要", "用法", "选项…", "示例", "legacy-原语", "同义写法" }`
+   （`legacy` 写 `nullptr` 表示本程序自己实现；第 8 项可省略）；
 2. 如果是新原语，先在 `tools/ocid_manifest.cpp` 里实现 `CmdXxx` 并在分派表登记；
 3. 编译：`Source\Native\build-servicing.ps1`。
 
 **加一步工作流**
 
 在 `CmdWorkflowPlan` / `CmdWorkflowVerify` / `CmdWorkflowPcm` 里往 `steps` 追加一个 `Step{标题, 原语名, 参数}` 即可，
-失败处理、耗时统计、中文提示都是现成的。
+失败处理、耗时统计、中文提示都是现成的（`CmdWorkflowInstall` 是手写版，因为它要跨进程调 `CbsxCli`）。
 
 ---
 
-## 6. 与 PowerShell 脚本的分工
+## 7. 与 PowerShell 脚本的分工
 
 | 脚本 | 负责 |
 | --- | --- |
@@ -193,7 +247,11 @@ ocid_wssm workflow pcm --manifests <清单目录> --out <输出目录> [--b0 N] 
 
 ---
 
-## 7. 已知未处理
+## 8. 已知未处理
 
 - 16299 的 PCM 字符串槽序（`t2`）规则未解，见 [UNRESOLVED-16299-pcm.md](UNRESOLVED-16299-pcm.md)。
   这不影响 `ocid_wssm` 的其它命令，`workflow pcm` 在 16299 上只会有 T1 命中。
+- `pkg *` 与 `workflow install` 需要镜像位于挂载的 VHD/VHDX（CbsxCli 的 BusType 门禁），
+  在普通物理盘上会被拒绝；这是 CbsxCli 的既有安全策略，本程序不放宽。
+- 提权到 TrustedInstaller 需要 `NSudoAPI.dll` 在 `CbsxCli.exe` 旁边（或 `Win32\` / `x64\` 子目录）；
+  开发目录里没有，`doctor` 会给 `[提示]`。缺它时装包会按当前身份跑（多半失败）。
