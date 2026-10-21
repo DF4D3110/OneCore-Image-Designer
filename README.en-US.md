@@ -227,7 +227,7 @@ component plan → deployment/catalog plan → versioned-index plan → root val
 | `f!`, `p!/s!/i!`, `S256H`, `CatalogThumbprint`, `Catalogs`, `f256!`, `MCP_*`, `CF` | solved and implemented |
 | Acceptance (per key/value/byte vs. Microsoft's store) | 8061 x86 43,100 keys/120,978 values; 8061 ARM 613/1,408; 8419 ARM 23,328/61,277; 16299 amd64 73,535 keys/215,978 values; 9600 amd64 10,069 keys/33,493 values — `cbs-diff` is 0/0 for all five |
 | Install-history values | Taken as inputs: `Extract-CbsInputs.ps1` exports them, `make-cbs-overrides.ps1` builds the override table |
-| `WinSxS\ManifestCache\*_blobs.bin` (PCM/CDF) | Container layer reproduces byte-exactly (99.6% of whole files), element-record tables still in progress |
+| `WinSxS\ManifestCache\*_blobs.bin` (PCM/CDF) | Container layer reproduces byte-exactly: 6.2.8419 route9 **2,754/2,757 (99.9%)**, 6.3.9600 **2,600/2,784 (93.4%)**. The 9600 remainder is 184 = 171 samples that differ only in document-root record `b0` bits 4..6 (not derivable; real-machine uninitialised stack bytes) + 13 genuine residuals (sort ties, the first column of the winsock-family table, ...), see `Source/Native/OcidServicing/CBS-Writer.md` §10. A 10.0.16299 corpus of 329 real samples is also wired up; its `t2` string-slot order is unsolved (`Source/Native/OcidServicing/UNRESOLVED-16299-pcm.md`) |
 | Bootable image (last mile of P1) | `Build-OcidImage.ps1` in one command: create disk -> `dism /Apply-Image` -> `bcdboot` -> swap the ledger -> `cbs-scan`/`cbs-verify-store` -> `dism /Get-Packages` before/after diff -> detach |
 | Driver package staging (DMI ledger) | `dmi-ops` -> `dmi-place` (payloads into `FileRepository`, INF published as `Windows\INF\oemN.inf`, `DriverDatabase` plan emitted) -> `cbs-write --append` writes it into the image's SYSTEM hive; signer info is an input (`--signer`/`--signer-score`) |
 
@@ -254,6 +254,27 @@ offline hive — instead of hitting the host registry. It is loaded only by the 
 (`OCID_REGHOOK`, `OCID_REGHOOK_LOG`, `OCID_REGHOOK_MAP`, `OCID_REGHOOK_REWRITE`). It is an interim
 research instrument, not part of the self-contained servicing stack.
 
+### Unified entry point: `ocid_wssm`, and the image pipeline: `ocid_imagegen`
+
+Everything below is also reachable from one console, `ocid_wssm` (Windows Servicing Stack Manager), grouped as
+environment / workflow / manifest / placement / driver / store / plan / cache / DCM / package / tool. Every
+command and option carries an explanation, in zh-CN by default (`--lang en-US` is rejected for now). It does
+not duplicate code: most commands forward to `ocid_manifest`, and the package group dispatches the .NET
+`MobilePackageGen\CbsxCli\CbsxCli.exe` out of process (relaunching as TrustedInstaller, reporting the real
+exit code through `/exitcode:` because the elevated parent always returns 0). Both original consoles stay
+usable. See `Source/Native/OcidServicing/WSSM.md`.
+
+`Source/Native/OcidImaging/` rewrites the `imageapp.exe` chain (package selection -> disk -> offline install ->
+finalize) as project-owned code, split into DLLs so a failure points at one layer: `ocid_common.wcos.dll`
+(console, log, files, XML, MSXML6 XSD validation), `ocid_plan.wcos.dll` (selection from OEMInput +
+FeatureManifest), `ocid_cab.wcos.dll` (NONE/MSZIP decoders plus LZX/Quantum through the system `cabinet.dll`
+FDI), and the `ocid_imagegen.exe` console (`plan`, `cab list|entry|extract`, `schema validate|pick`).
+
+Selection matches the reference runs entry-for-entry and in the same order: 10.0.20274 (amd64) 181/181, and
+10.0.20279 (arm64) 194/194. Inputs are validated against XSDs extracted from the ADK assemblies and shipped
+in-tree under `Schemas/adk/` (28 files). Still missing: disk creation, finalize, and the L0 orchestration that
+drives `UpdateDLL.dll` for the offline install; AppX is out of scope for now.
+
 ## Repository layout
 
 ```text
@@ -262,19 +283,21 @@ Models/                   Domain and project models
 Services/                 Workflow services (image, CBS, SxS, drivers, firmware, offline registry, UUP, validation)
 ViewModels/               WPF view models
 Views/                    WPF pages, steps and dialogs
-Schemas/                  Bundled OEMInput V1/V2 schemas
+Schemas/                  Bundled OEMInput V1/V2 schemas; `adk/` holds 28 XSDs extracted from the ADK
 MobilePackageGen/         Package-generation toolchain, CLIs and GUI (own README)
 UupBridge/                Separate .NET 8 adapter over the vendored UUP core
 UupShared/                Offline UUP query parsing and payload contracts shared by app and bridge
 Tests/                    Offline regression harness
 Source/Native/OcidServicing/  Project-owned C++ servicing stack: library, console tool and native tests
 Source/Native/OcidRegHook/    Diagnostic registry interception DLL for the legacy CBS path
+Source/Native/OcidImaging/    Image pipeline (select/disk/install/finalize) and the ocid_imagegen console
 Source/Managed/OcidCabinet/   Project-owned CAB decompressors (MSZIP DEFLATE and LZX) shared by the toolchain and the desktop side
 Source/Managed/OcidCabinet.Tool/  ocid_cab console: inspect, extract, dump and self-verify cabinets, usable standalone
 Tools/wcpex/              Vendored wcpex.exe + wcp.dll, used to decompress DCM-compressed manifests
 ThirdParty/               Vendored UUP source closure used by UupBridge
 addonkit/                 Bundled Microsoft iot-adk-addonkit 17763-v7 (PowerShell toolchain + sample workspace)
 Build-CbsBundle.ps1       Assembles the standalone CBS console bundle
+build-imaging.ps1         (under Source/Native) builds the OcidImaging DLLs and console
 ```
 
 Generated `bin`, `obj`, `build`, `intermediate` and `Source/Native/Output` trees, debug symbols and

@@ -217,7 +217,7 @@ pwsh -NoProfile -File .\ocid-assemble.ps1 -ImageRoot 'Q:\' `
 | 版本差异 | 按构建号分档（`CbsProfile`）：`>=9600` 起 DCM 清单 + `f!` 状态位，`>=16212` 起 `Drivers` 台账，`>=16299` 起载荷名折叠与 identity 归一；`--os-build` 可显式指定 |
 | 现代镜像（16299+） | `DCM` 紧凑清单（`PA30` 自研解码 + 独立字典文件）已解；`f!` 改 DWORD 状态位、`f256!` 取清单声明哈希、`S256H` 取解压后 XML、新增 `Drivers` 台账 —— 全流程同样 0/0 |
 | 安装历史类值 | 作为输入：`Extract-CbsInputs.ps1` 一条命令导出，`make-cbs-overrides.ps1` 生成覆盖表 |
-| `WinSxS\ManifestCache\*_blobs.bin`（PCM/CDF） | 容器层可逐字节重建（整文件一致率 62.1% → 99.6%，2,746/2,757），剩 11 份单样本形态（白名单 `Source/Native/OcidServicing/pcm-known-fails.txt`）；另接入 6.3.9600 第二套语料 2,784 对，T4 2,331（83.7%），差异已归类 |
+| `WinSxS\ManifestCache\*_blobs.bin`（PCM/CDF） | 容器层可逐字节重建：6.2.8419 route9 **2,754/2,757（99.9%）**、6.3.9600 **2,600/2,784（93.4%）**；9600 剩 184 份 = 171 份只差文档根记录 `b0` bit4..6 的不可复现样本 + 13 份真实残差（撞车行序、winsock 族表首列等，见 `Source/Native/OcidServicing/CBS-Writer.md` §10）；10.0.16299 另取到 329 份真机样本，`t2` 串槽序未解（见 `Source/Native/OcidServicing/UNRESOLVED-16299-pcm.md`） |
 | 可开机镜像（P1 串联最后一公里） | `Build-OcidImage.ps1` 一条命令：建盘 → `dism /Apply-Image` → `bcdboot` → 换台账 → `cbs-scan`/`cbs-verify-store` → `dism /Get-Packages` 换前后对比 → 分离 |
 | 驱动包落位（DMI 台账） | `dmi-ops` → `dmi-place`（载荷进 `FileRepository`、INF 发布成 `Windows\INF\oemN.inf`、产出 `DriverDatabase` 计划）→ `cbs-write --append` 写进镜像的 SYSTEM hive；签名者信息作为输入（`--signer`/`--signer-score`） |
 
@@ -235,6 +235,48 @@ pwsh -NoProfile -File .\ocid-assemble.ps1 -ImageRoot 'Q:\' `
 批决策的控制台入口（`info`、`ops`、`scan`、`export-ops`、`verify-names`、`expand`、`macros`、
 `dump-xsd`），用于全语料验证。全部命令的用法、选项与示例见 `ocid_manifest help`（单条命令用 `ocid_manifest help <命令>`），默认中文说明。
 
+同一批能力还收在一个统一入口 `ocid_wssm`（Windows Servicing Stack Manager）里：命令按「环境 / 工作流 / 清单 / 落位 /
+驱动 / 台账 / 生成 / 缓存 / DCM / 装包 / 工具」分组，每条命令与选项都带中文解释（默认 zh-CN）：
+
+```powershell
+Source\Native\build-servicing.ps1            # -> Source\Native\Output\x86\ocid_wssm.exe
+ocid_wssm help                               # 全部命令
+ocid_wssm help 装包                          # 只列一组
+ocid_wssm workflow plan --manifests <Manifests> --staged <WinSxS> --arch amd64 --stack 6.3.9600.16384 --out out
+ocid_wssm pcm build a.manifest out.pcm
+```
+
+`ocid_wssm` 不复制实现：多数命令转发给 `ocid_manifest`；「装包」组则跨模块调度 .NET 的
+`MobilePackageGen\CbsxCli\CbsxCli.exe`（以 TrustedInstaller 提权重启，并用 `/exitcode:` 回传真实退出码，
+因为提权路径的父进程恒返回 0）。原有 `ocid_manifest.exe` 与 `CbsxCli.exe` 两个控制台都保留可用。
+设计与约定见 `Source/Native/OcidServicing/WSSM.md`。
+
+### 镜像链（`ocid_imagegen`，进行中）
+
+`Source/Native/OcidImaging/` 把 `imageapp.exe` 那条链（选包 → 造盘 → 装包 → 收尾）重写为项目自有实现，
+按职责拆成多个 DLL，失败时能直接定位到层：
+
+| 产物 | 职责 |
+| --- | --- |
+| `ocid_common.wcos.dll` | 控制台与日志、文件与 XML、MSXML6 XSD 校验 |
+| `ocid_plan.wcos.dll` | 选包：OEMInput + FeatureManifest → 包计划（8 类 section，含架构/语言展开） |
+| `ocid_cab.wcos.dll` | CAB 读取：NONE/MSZIP 自研解码，LZX/Quantum 走系统 `cabinet.dll` 的 FDI |
+| `ocid_imagegen.exe` | 入口：`plan` / `cab list|entry|extract` / `schema validate|pick` / `version` / `help` |
+
+```powershell
+Source\Native\build-imaging.ps1              # -> Source\Native\Output\Imaging\ocid_imagegen.exe
+ocid_imagegen plan --oem-input OEMInput.xml --fm-dir ProcessedFiles --arch arm64 --out plan.xml --list cabs.txt
+ocid_imagegen cab extract a.cab --out dir
+ocid_imagegen schema validate OEMInput.xml --schema Schemas\adk\OEMInput.V2.OEMInputV2.xsd
+```
+
+选包结果与真机参照**逐条同序**：10.0.20274（amd64）181/181、10.0.20279（arm64）194/194。输入校验用 ADK
+托管程序集里抽出的 XSD（`Schemas/adk/`，28 个，随仓库提供），`plan` 默认校验 OEMInput 与每份 FM；CAB 解码
+结果与 `expand.exe` 逐字节一致。
+
+未完成：造盘（`Vhd`）、收尾（`Finalize`）与 L0 编排（调 `UpdateDLL.dll` 做离线安装）；AppX 相关先不做。
+`Source/Native/OcidServicing/UNRESOLVED-16299-pcm.md` 记录 10.0.16299 语料上 `t2` 串槽序这条未解规则。
+
 `Source/Native/OcidRegHook/` 是一个独立的 x86 DLL，它给 `wcp.dll` 的导入表打补丁，使上游服务栈发出的
 注册表调用可以被观察——并可选地重定向到离线 hive——而不是直接落到宿主注册表。它只被遗留的、由
 `wcp.dll` 驱动的 CBS 路径加载，不属于目标设计，且默认只记日志（`OCID_REGHOOK`、`OCID_REGHOOK_LOG`、
@@ -248,19 +290,21 @@ Models/                   领域与工程模型
 Services/                 流程服务（镜像、CBS、SxS、驱动、固件、离线注册表、UUP、校验）
 ViewModels/               WPF 视图模型
 Views/                    WPF 页面、步骤与对话框
-Schemas/                  内置 OEMInput V1/V2 schema
+Schemas/                  内置 OEMInput V1/V2 schema；`adk/` 为从 ADK 工具集抽出的 28 个 XSD
 MobilePackageGen/         包生成工具链、命令行工具与 GUI（自带 README）
 UupBridge/                独立 .NET 8 适配进程，包在内置 UUP 核心之上
 UupShared/                离线 UUP 查询解析与负载契约，主程序与桥接共用
 Tests/                    离线回归测试
 Source/Native/OcidServicing/  项目自有 C++ 服务栈：库、控制台工具与原生测试
 Source/Native/OcidRegHook/    遗留 CBS 路径用的诊断注册表拦截 DLL
+Source/Native/OcidImaging/    镜像链（选包/造盘/装包/收尾）与 ocid_imagegen 控制台
 Source/Managed/OcidCabinet/   自有的 CAB 解压器（MSZIP 的 DEFLATE 与 LZX），供包工具与桌面侧共用
 Source/Managed/OcidCabinet.Tool/  ocid_cab 控制台：查看/解包/抽取/自校验 CAB，可独立使用
 Tools/wcpex/              内置 wcpex.exe + wcp.dll，用于解压 DCM 压缩的清单
 ThirdParty/               UupBridge 使用的内置 UUP 源码闭包
 addonkit/                 内置的微软 iot-adk-addonkit 17763-v7（PowerShell 工具链 + 示例工作区）
 Build-CbsBundle.ps1       组装独立的 CBS 控制台包
+build-imaging.ps1         （在 Source/Native 下）构建 OcidImaging 的 DLL 与控制台
 ```
 
 生成的 `bin`、`obj`、`build`、`intermediate` 与 `Source/Native/Output` 目录、调试符号、生成的 Appx

@@ -39,3 +39,6 @@ check-product-lines.ps1
 install-hooks.ps1
 .githooks/
 Reference/
+
+# Author-only design notes kept outside the repository (same rule as above).
+Source/Native/IMAGING-FLOW-AND-REWRITE-PLAN.md
