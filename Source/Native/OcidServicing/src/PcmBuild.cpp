@@ -1328,6 +1328,8 @@ const char* const kCacheGuidGenInstall = "104aa38156426a4389d6794b97ca407c";
 const char* const kCacheGuidGenUninstall = "5dfd45c19b1b3847996164034a3da28f";
 // <WinsockAppPermittedLspCategories> cache GUID (real 9600 blocks 00028/01888/01915/02232).
 const char* const kCacheGuidWinsock = "ba62b17069b146459c517c495c652129";
+// <HTTPAI><AddUrl .../>: cache GUID 1ae0fe86-954a-11df-bc0c-cea7dfd72085 (00549).
+const char* const kCacheGuidHttpAI = "1ae0fe864a95df11bc0ccea7dfd72085";
 
 bool IsCacheRecordElement(const std::string& local) {
     return local == "lodctr" || local == "lodctrDat" ||
@@ -1337,7 +1339,7 @@ bool IsCacheRecordElement(const std::string& local) {
            local == "rootDevices" || local == "timezoneresourceAI" ||
            local == "taskScheduler" || local == "serviceData" ||
            local == "securityDescriptor" ||
-           local == "WinsockAppPermittedLspCategories";
+           local == "WinsockAppPermittedLspCategories" || local == "HTTPAI";
 }
 
 // 静态 "installer element kinds" 表的条目序号（wcp_x86.dll .data VA 0x101F35C8，
@@ -1356,6 +1358,7 @@ int CacheRank(const std::string& local) {
     if (local == "instrumentation") return 17;
     if (local == "events") return 17;
     if (local == "mof") return 19;
+    if (local == "HTTPAI") return 20;
     if (local == "lodctr") return 20;
     if (local == "lodctrDat") return 21;
     if (local == "rescache") return 23;
@@ -1384,6 +1387,7 @@ std::string CacheGuid(const std::string& local) {
     if (local == "securityDescriptor") return kCacheGuidSecurityDescriptor;
     if (local == "WinsockAppPermittedLspCategories") return kCacheGuidWinsock;
     if (local == "taskScheduler") return kCacheGuidTaskScheduler;
+    if (local == "HTTPAI") return kCacheGuidHttpAI;
     if (local == "firewallRule") return kCacheGuidFirewallRule;
     if (local == "genericCommandInstall") return kCacheGuidGenInstall;
     if (local == "genericCommandUninstall") return kCacheGuidGenUninstall;
@@ -1433,7 +1437,7 @@ bool GuidFromText(const std::string& text, std::string& out) {
 const char* const kCacheGuidOrder[] = {
     "fveUpdateAI", "bfsvc", "instrumentation", "lodctr", "lodctrDat", "sppInstaller",
     "genericCommandUninstall", "securityDescriptor", "WinsockAppPermittedLspCategories",
-    "serviceData", "counters", "rootDevices", "mof", "rescache",
+    "serviceData", "counters", "rootDevices", "mof", "HTTPAI", "rescache",
     "taskScheduler", "timezoneresourceAI", "registryKeys", "firewallRule", "ngen",
     "genericCommandInstall",
 };
@@ -1493,6 +1497,8 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
     // ---- 1. 文档扫描（元素顺序 = 文档序）----------------------------------
     std::vector<std::uint32_t> deps, files, cats, sdddefs, membElems, confEls, mofs;
     std::vector<std::uint32_t> lodDats;  // <lodctrDat> elements (key 666 family)
+    std::vector<std::uint32_t> httpAIs;  // <HTTPAI> elements (AddUrl family)
+    std::vector<std::size_t> httpSddlSlots;  // 4B {sddl id} slots, AddUrl doc order
     std::vector<std::uint32_t> irElems;  // <installerRegistration>（9600 installReg 族）
     // 每条 <installerRegistration> 的 28B 记录槽 + 它的 cache GUID（= factoryClsid），
     // 用于头部 GUID 表与注册键 3 的 t8 表（见第 8 节 key == 3 分支）。
@@ -1562,6 +1568,7 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
         }
         if (e.local == "trustInfo") hasTrust = true;
         if (e.local == "mof") mofs.push_back(idx);
+        if (e.local == "HTTPAI") httpAIs.push_back(idx);
     if (e.local == "lodctrDat") lodDats.push_back(idx);
     }
 
@@ -2115,6 +2122,18 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
         }
     }
 
+    // <HTTPAI><AddUrl sddl=.../>: intern sddl right after the string-value slots
+    // and emit one 4B {id} record (real 00549 slot 73 = {{65}}).
+    for (std::uint32_t h : httpAIs) {
+        for (std::uint32_t k : elems[h].kids) {
+            if (elems[k].local != "AddUrl") continue;
+            const std::string sddl = Attr(AttrsOf(elems[k]), "sddl");
+            if (sddl.empty()) continue;
+            const std::size_t sddlSlot = slots.size();
+            AppendSlot(slots, 1, PackU32({static_cast<std::uint32_t>(inter.String(sddl))}));
+            httpSddlSlots.push_back(sddlSlot);
+        }
+    }
     // 兜底：<gac> 存在但没有任何 <file> 引用它（语料 41/41 都有引用）。
     if (gacEl >= 0 && gacBlob < 0) {
         if (!emitGacBlob()) return false;
@@ -2901,6 +2920,27 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
                 if (rb.root() >= 0) reg[16] = static_cast<std::size_t>(rb.root());
             }
             continue;
+        } else if (key == 34) {
+            // <HTTPAI><AddUrl url=.../>: key-34 table = {intern(url), 4B sddl blob slot}
+            // (real 00549 slot 133 = t6 len10 flags 0x71, row f1=140 f2=73).
+            std::vector<Row> rows;
+            std::size_t si = 0;
+            for (std::uint32_t h : httpAIs) {
+                for (std::uint32_t k : elems[h].kids) {
+                    if (elems[k].local != "AddUrl") continue;
+                    const std::string url = Attr(AttrsOf(elems[k]), "url");
+                    const bool haveSlot = si < httpSddlSlots.size();
+                    ++si;
+                    if (url.empty() || !haveSlot) continue;
+                    rows.push_back(Row{0u, static_cast<std::uint32_t>(inter.String(url)),
+                                       static_cast<std::uint32_t>(httpSddlSlots[si - 1])});
+                }
+            }
+            if (!rows.empty()) {
+                std::string payload;
+                if (!MakeRecordTable(6, rows, true, payload, error)) return false;
+                tbls.push_back(Slot{6, payload});
+            }
         }
 
         if (tbls.empty()) {
