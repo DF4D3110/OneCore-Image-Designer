@@ -804,10 +804,22 @@ static std::string UpperText(std::string text)
     return text;
 }
 
+// DeviceDB 的 <Partition> 口径与包内 mum 不同：mainos / updateos 用规范小写，
+// EFIESP / BSP 保持大写（由参照 Falsh.DeviceDB.xml 反推）。
+static std::string NormalizePartition(const std::string& text)
+{
+    if (EqualsNoCase(text, "mainos")) return "mainos";
+    if (EqualsNoCase(text, "updateos")) return "updateos";
+    if (EqualsNoCase(text, "efiesp")) return "EFIESP";
+    if (EqualsNoCase(text, "bsp")) return "BSP";
+    return text;
+}
+
 static std::string IdentityText(const std::string& name, const std::string& pkt,
                                 const std::string& arch, const std::string& lang)
 {
-    return name + "~" + LowerText(pkt) + "~" + LowerText(arch) + "~" + LowerText(lang) + "~";
+    // 语言段保留 mum 里的写法（参照里 en-US 与 zh-cn 并存）；架构与 pkt 用小写。
+    return name + "~" + LowerText(pkt) + "~" + LowerText(arch) + "~" + lang + "~";
 }
 
 static std::string MumKey(const std::string& name, const std::string& arch, const std::string& lang)
@@ -988,7 +1000,7 @@ int CmdDeviceDb(const std::vector<std::string>& args)
         m.arch = AttrOr(idNode, "processorArchitecture", ref.arch.c_str());
         m.language = AttrOr(idNode, "language", "neutral");
         m.pkt = AttrOr(idNode, "publicKeyToken", "31bf3856ad364e35");
-        m.partition = AttrOr(pkgNode, "targetPartition", "");
+        m.partition = NormalizePartition(AttrOr(pkgNode, "targetPartition", ""));
         if (EqualsNoCase(m.language, "neutral")) m.language.clear();
         m.identity = IdentityText(m.name, m.pkt, m.arch, m.language);
 
@@ -1118,12 +1130,12 @@ int CmdDeviceDb(const std::vector<std::string>& args)
         features.push_back(f);
     }
 
-    // 排序：FMID 不区分大小写升序（空 FMID 最后），同组内 BASE 在前、其余保持 plan 顺序
+    // 排序：按 FM 声明序（= plan 里的出现序，即 OEMInput.AdditionalFMs 顺序），
+    // 空 FMID 排最后；同组内 BASE 在前、其余保持 plan 顺序（与参照一致）。
     std::stable_sort(features.begin(), features.end(), [](const Feature& a, const Feature& b) {
-        if (a.fmid.empty() != b.fmid.empty()) return b.fmid.empty();
-        const std::string la = LowerText(a.fmid);
-        const std::string lb = LowerText(b.fmid);
-        if (la != lb) return la < lb;
+        const bool ae = a.fmid.empty();
+        const bool be = b.fmid.empty();
+        if (ae != be) return be;
         const bool ab = (a.featureId == "BASE");
         const bool bb = (b.featureId == "BASE");
         if (ab != bb) return ab;
@@ -1202,7 +1214,8 @@ int CmdDeviceDb(const std::vector<std::string>& args)
         xml += "\"/>\r\n";
     }
     xml += "</Packages>\r\n<EnumeratedPackages>\r\n";
-    std::size_t enumCount = 0;
+    // 参照里 EnumeratedPackages 按 ID 不区分大小写升序。
+    std::vector<const Pkg*> enumerated;
     for (const Pkg& p : packages)
     {
         if (!p.haveMum) continue;
@@ -1211,6 +1224,15 @@ int CmdDeviceDb(const std::vector<std::string>& args)
         {
             continue;
         }
+        enumerated.push_back(&p);
+    }
+    std::stable_sort(enumerated.begin(), enumerated.end(), [](const Pkg* a, const Pkg* b) {
+        return LowerText(a->mum.identity) < LowerText(b->mum.identity);
+    });
+    std::size_t enumCount = 0;
+    for (const Pkg* pp : enumerated)
+    {
+        const Pkg& p = *pp;
         xml += "<Package ID=\"";
         XmlEscapeTo(xml, p.mum.identity);
         xml += "\" KeyForm=\"";
