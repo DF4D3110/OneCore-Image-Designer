@@ -117,12 +117,29 @@ $null = Invoke-Batch 'imagegen' $linkLines
 Write-Host "[build] OK ocid_imagegen.exe"
 
 # ---- 5) Schemas（复用现成 XSD，不重写校验规则）----
-$schemaSrc = Join-Path (Split-Path -Parent $root) 'Schemas'
+# $root 是 <repo>\Source\Native，所以仓库根要往上两级（早先只往上找一级，
+# 于是整个复制段静默跳过，输出目录里一直没有 schemas\ —— 已修）。
+$repoRoot = Split-Path -Parent (Split-Path -Parent $root)
+$schemaSrc = Join-Path $repoRoot 'Schemas'
 $schemaDst = Join-Path $out 'schemas'
-if (Test-Path $schemaSrc) {
-    if (-not (Test-Path $schemaDst)) { New-Item -ItemType Directory -Path $schemaDst | Out-Null }
-    Copy-Item (Join-Path $schemaSrc '*.xsd') $schemaDst -Force
-    Write-Host "[build] OK schemas ($((Get-ChildItem $schemaDst -Filter *.xsd).Count) xsd)"
+if (-not (Test-Path $schemaSrc)) {
+    throw "Schemas not found: $schemaSrc"
+}
+if (-not (Test-Path $schemaDst)) { New-Item -ItemType Directory -Path $schemaDst | Out-Null }
+Copy-Item (Join-Path $schemaSrc '*.xsd') $schemaDst -Force
+$topCount = (Get-ChildItem $schemaDst -Filter *.xsd).Count
+
+# Schemas\adk\ 是从 ADK 工具集 DLL 的嵌入资源抽出来的 28 个 XSD
+# （FeatureManifest / DeviceCompDB / UpdateOSInput / DeviceLayout ...），必须一起发布。
+$schemaAdkSrc = Join-Path $schemaSrc 'adk'
+$schemaAdkDst = Join-Path $schemaDst 'adk'
+if (Test-Path $schemaAdkSrc) {
+    if (-not (Test-Path $schemaAdkDst)) { New-Item -ItemType Directory -Path $schemaAdkDst | Out-Null }
+    Copy-Item (Join-Path $schemaAdkSrc '*.xsd') $schemaAdkDst -Force
+    $adkCount = (Get-ChildItem $schemaAdkDst -Filter *.xsd).Count
+    Write-Host "[build] OK schemas ($topCount xsd + $adkCount adk xsd)"
+} else {
+    Write-Host "[build] OK schemas ($topCount xsd; adk\ missing)"
 }
 
 Write-Host '[build] done'

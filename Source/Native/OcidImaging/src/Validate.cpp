@@ -219,6 +219,52 @@ bool LoadXsdDocument(const std::wstring& path, Dispatch& schema, std::string& er
     return true;
 }
 
+// 从磁盘路径直接 load 一个 XSD（给 xsd:include 用：include 的 schemaLocation 要能
+// 相对这个文档的 URL 解析，所以必须走 load(path) 而不是 loadXML(字符串)）。
+bool LoadXsdFromPath(const std::wstring& path, Dispatch& schema, std::string& error)
+{
+    if (!schema.Create(L"Msxml2.DOMDocument.6.0"))
+    {
+        error = "创建 Msxml2.DOMDocument.6.0 失败（系统缺 MSXML6？）";
+        return false;
+    }
+    const wchar_t* const booleanProps[] = {L"async", L"validateOnParse", L"resolveExternals",
+                                           L"preserveWhiteSpace"};
+    for (int i = 0; i < 4; ++i)
+    {
+        VARIANT args[1];
+        VariantInit(&args[0]);
+        args[0].vt = VT_BOOL;
+        args[0].boolVal = VARIANT_FALSE;
+        VARIANT result;
+        VariantInit(&result);
+        Invoke1(schema.get(), booleanProps[i], DISPATCH_PROPERTYPUT, args, &result);
+        VariantClear(&result);
+        VariantClear(&args[0]);
+    }
+
+    bool loaded = false;
+    VARIANT args[1];
+    VariantInit(&args[0]);
+    args[0].vt = VT_BSTR;
+    args[0].bstrVal = SysAllocString(path.c_str());
+    VARIANT result;
+    VariantInit(&result);
+    const HRESULT hr = Invoke1(schema.get(), L"load", DISPATCH_METHOD, args, &result);
+    if (SUCCEEDED(hr) && result.vt == VT_BOOL)
+    {
+        loaded = result.boolVal != VARIANT_FALSE;
+    }
+    VariantClear(&result);
+    VariantClear(&args[0]);
+    if (!loaded)
+    {
+        error = "XSD 载入失败：" + WideToUtf8(path);
+        return false;
+    }
+    return true;
+}
+
 bool GetErrorText(IDispatch* parseError, const wchar_t* name, std::string& text)
 {
     VARIANT result;
@@ -311,21 +357,111 @@ bool ValidateXmlAgainstSchema(const std::wstring& xmlPath, const std::vector<std
         return false;
     }
 
-    for (const std::wstring& schemaPath : schemaPaths)
+    // 一个 schema 集可能被拆成多个同命名空间的 XSD（ADK 的 FeatureManifest.xsd 就引用了
+    // 本来在 Appx.FMAddOnAppX.xsd 里的 AppXType）。MSXML 的 schemaCache.add 以命名空间
+    // 为键、同一命名空间只能 add 一次，所以多文件时生成一份 xsd:include 包装文档
+    // （放在第一个 XSD 同目录，include 的相对路径才能解析），只 add 这一份。
+    std::vector<std::wstring> loadPaths = schemaPaths;
+    std::wstring wrapperPath;
+    std::wstring wrapperNamespace;
+    if (schemaPaths.size() > 1)
+    {
+        std::wstring firstText;
+        std::string ignored;
+        if (!ReadTextWide(schemaPaths[0], firstText, ignored))
+        {
+            error = "读取 XSD 失败：" + WideToUtf8(schemaPaths[0]);
+            return false;
+        }
+        wrapperNamespace = FindTargetNamespace(firstText);
+        if (wrapperNamespace.empty())
+        {
+            error = "XSD 里没有 targetNamespace：" + WideToUtf8(schemaPaths[0]);
+            return false;
+        }
+        // MSXML 的 schemaCache 不处理 xsd:include（实测把 include 包装 add 进去后，
+        // 校验仍报"元素未在架构中声明"），所以这里按 include 的语义做**文本级拼接**：
+        // 把每个 XSD 根标签的内部内容接到一个根标签下面。三个文件根标签属性完全一致
+        // （targetNamespace/elementFormDefault/xmlns 前缀 xs 都相同），拼接后仍然合法。
+        std::wstring wrapper;
+        std::wstring closeName = L"</xs:schema>";
+        bool first = true;
+        for (const std::wstring& p : schemaPaths)
+        {
+            std::wstring text;
+            std::string ignored;
+            if (!ReadTextWide(p, text, ignored))
+            {
+                error = "读取 XSD 失败：" + WideToUtf8(p);
+                return false;
+            }
+            std::size_t start = text.find(L"<xs:schema");
+            closeName = L"</xs:schema>";
+            if (start == std::wstring::npos)
+            {
+                start = text.find(L"<xsd:schema");
+                closeName = L"</xsd:schema>";
+            }
+            if (start == std::wstring::npos)
+            {
+                error = "XSD 根元素不是 xs:schema：" + WideToUtf8(p);
+                return false;
+            }
+            const std::size_t openEnd = text.find(L'>', start);
+            const std::size_t closeStart = text.rfind(closeName);
+            if (openEnd == std::wstring::npos || closeStart == std::wstring::npos || closeStart <= openEnd)
+            {
+                error = "XSD 根标签不完整：" + WideToUtf8(p);
+                return false;
+            }
+            if (first)
+            {
+                wrapper = text.substr(start, openEnd - start + 1);
+                first = false;
+            }
+            wrapper += L"\n";
+            wrapper += text.substr(openEnd + 1, closeStart - openEnd - 1);
+        }
+        wrapper += L"\n";
+        wrapper += closeName;
+        const std::size_t slash = schemaPaths[0].find_last_of(L"\\/");
+        const std::wstring dir =
+            (slash == std::wstring::npos) ? std::wstring() : schemaPaths[0].substr(0, slash + 1);
+        wrapperPath = dir + L"__ocid_schema_wrapper.xsd";
+        if (!WriteFileText(wrapperPath, WideToUtf8(wrapper), error))
+        {
+            error = "写 schema 包装文档失败：" + WideToUtf8(wrapperPath) + "（" + error + "）";
+            return false;
+        }
+        loadPaths.assign(1, wrapperPath);
+    }
+
+    for (const std::wstring& schemaPath : loadPaths)
     {
         Dispatch schemaDoc;
-        if (!LoadXsdDocument(schemaPath, schemaDoc, error))
+        std::wstring nameSpace = wrapperNamespace;
+        if (nameSpace.empty())
         {
+            if (!LoadXsdDocument(schemaPath, schemaDoc, error))
+            {
+                if (!wrapperPath.empty()) ::DeleteFileW(wrapperPath.c_str());
+                return false;
+            }
+            std::wstring text;
+            std::string ignored;
+            if (!ReadTextWide(schemaPath, text, ignored))
+            {
+                error = "读取 XSD 失败：" + WideToUtf8(schemaPath);
+                if (!wrapperPath.empty()) ::DeleteFileW(wrapperPath.c_str());
+                return false;
+            }
+            nameSpace = FindTargetNamespace(text);
+        }
+        else if (!LoadXsdFromPath(schemaPath, schemaDoc, error))
+        {
+            ::DeleteFileW(wrapperPath.c_str());
             return false;
         }
-        std::wstring text;
-        std::string ignored;
-        if (!ReadTextWide(schemaPath, text, ignored))
-        {
-            error = "读取 XSD 失败：" + WideToUtf8(schemaPath);
-            return false;
-        }
-        const std::wstring nameSpace = FindTargetNamespace(text);
 
         // add(namespaceURI, VARIANT)：第二参数放 VT_DISPATCH = "已经解析好的 schema 对象"。
         VARIANT args[2];
@@ -348,8 +484,13 @@ bool ValidateXmlAgainstSchema(const std::wstring& xmlPath, const std::vector<std
             error = FormatHresult(hr, "XMLSchemaCache.add");
             error += "：" + WideToUtf8(schemaPath);
             error += "（ns=[" + WideToUtf8(nameSpace) + "]）";
+            if (!wrapperPath.empty()) ::DeleteFileW(wrapperPath.c_str());
             return false;
         }
+    }
+    if (!wrapperPath.empty())
+    {
+        ::DeleteFileW(wrapperPath.c_str());
     }
 
     Dispatch document;

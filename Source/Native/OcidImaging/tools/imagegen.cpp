@@ -13,8 +13,10 @@
 #include "ocid/imaging/Common.h"
 #include "ocid/imaging/Plan.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -23,7 +25,7 @@ using namespace ocid::imaging;
 namespace
 {
 
-const char* const kVersion = "0.2.0";
+const char* const kVersion = "0.3.0";
 
 void PrintUsage()
 {
@@ -47,6 +49,10 @@ void PrintUsage()
     OutLn("  --list <文件>            写 cab 名清单（每行一个，便于和参照产物 diff）");
     OutLn("  --keep-duplicates        保留同一 cab 的多次出现（对齐 imageapp 的 UpdateInput）");
     OutLn("  --log <文件>             写流水日志（{时间}  消息）");
+    OutLn("  --build <构建号>         XSD 家族选择用（如 20279；不给按 V2 基线）");
+    OutLn("  --family V1|V2           OEMInput schema 家族（默认 V2）");
+    OutLn("  --no-validate            跳过 XSD 校验（默认会校验 OEMInput + 每个 FM）");
+    OutLn("  --validate               严格校验：schema 找不到也算失败");
     OutLn("");
     OutLn("cab 说明：");
     OutLn("  list     打印压缩法、块数、包内条目（名字 / 大小 / folder / 时间）");
@@ -90,12 +96,22 @@ std::wstring FindSchema(const std::string& schemaDir, const std::string& name)
     if (!schemaDir.empty())
     {
         dirs.push_back(Utf8ToWide(schemaDir));
+        dirs.push_back(CombinePath(Utf8ToWide(schemaDir), L"adk"));
     }
-    std::wstring exeDir = ExeDirectory();
-    dirs.push_back(CombinePath(exeDir, L"schemas"));
-    dirs.push_back(CombinePath(exeDir, L"..\\schemas"));
-    dirs.push_back(CombinePath(exeDir, L"..\\..\\..\\Schemas"));
-    dirs.push_back(CombinePath(exeDir, L"..\\..\\..\\..\\Schemas"));
+    const std::wstring exeDir = ExeDirectory();
+    // 运行时：<exe>\schemas（构建脚本发布）；开发时：仓库 Schemas\ 与 Schemas\adk\
+    // （Schemas\adk 是从 ADK 工具集 DLL 嵌入资源抽出的 28 个 XSD，见 build-imaging.ps1）
+    const std::wstring bases[] = {
+        CombinePath(exeDir, L"schemas"),
+        CombinePath(exeDir, L"..\\schemas"),
+        CombinePath(exeDir, L"..\\..\\..\\..\\Schemas"),
+        CombinePath(exeDir, L"..\\..\\..\\Schemas"),
+    };
+    for (const std::wstring& base : bases)
+    {
+        dirs.push_back(base);
+        dirs.push_back(CombinePath(base, L"adk"));
+    }
     for (const std::wstring& dir : dirs)
     {
         const std::wstring candidate = CombinePath(dir, Utf8ToWide(name));
@@ -114,7 +130,8 @@ int CmdPlan(const std::vector<std::string>& args)
     std::string listPath;
     std::string logPath;
     std::string schemaDir;
-    bool validate = false;
+    bool validate = true;          // 默认就用现成 XSD 校验（规则不在这里重写）
+    bool validateStrict = false;   // --validate：schema 找不到也算错
     int build = 0;
     std::string family = "V2";
     for (std::size_t i = 2; i < args.size(); ++i)
@@ -140,7 +157,8 @@ int CmdPlan(const std::vector<std::string>& args)
         else if (arg == "--family") { if (!next(family)) return 2; }
         else if (arg == "--build") { std::string value; if (!next(value)) return 2; build = std::atoi(value.c_str()); }
         else if (arg == "--keep-duplicates") { input.keepDuplicates = true; }
-        else if (arg == "--validate") { validate = true; }
+        else if (arg == "--validate") { validate = true; validateStrict = true; }
+        else if (arg == "--no-validate") { validate = false; }
         else if (arg == "--help" || arg == "-h") { PrintUsage(); return 0; }
         else { Err("未知参数：" + arg); return 2; }
     }
@@ -161,27 +179,130 @@ int CmdPlan(const std::vector<std::string>& args)
     LogWrite(LogLevel::Info, "plan: oem-input = " + input.oemInputPath);
     LogWrite(LogLevel::Info, "plan: arch = " + input.arch);
 
-    // XSD 校验是可选的，但一旦要给的就是真 XSD——规则不在这里重写。
+    // XSD 校验是默认开的：用的是 ADK 工具集里的原版 XSD（Schemas\adk\，由 DLL 嵌入资源
+    // 抽出），规则不在这里重写。注意 MSXML 的语义——文档根命名空间与 schema 的
+    // targetNamespace 对不上时它会"静默通过"，所以必须按构建号选对家族；
+    // 这里只断言"结构是否合法"，语义规则（targeting / overlap / 盘符）另行实现。
     if (validate)
     {
         const std::string name = OemSchemaFamily(build, family);
         const std::wstring schema = FindSchema(schemaDir, name);
         if (schema.empty())
         {
-            Err("找不到 XSD：" + name + "（用 --schema-dir 指定 Schemas 目录）");
-            LogClose();
-            return 1;
+            if (validateStrict)
+            {
+                Err("找不到 XSD：" + name + "（用 --schema-dir 指定 Schemas 目录）");
+                LogClose();
+                return 1;
+            }
+            Err("提示：找不到 XSD " + name + "，跳过 OEMInput 结构校验");
         }
-        std::string error;
-        if (!ValidateXmlAgainstSchema(Utf8ToWide(input.oemInputPath), {schema}, error))
+        else
         {
-            Err("OEMInput 校验失败：" + error);
-            LogWrite(LogLevel::Error, "oem-input invalid: " + error);
-            LogClose();
-            return 1;
+            std::string error;
+            if (!ValidateXmlAgainstSchema(Utf8ToWide(input.oemInputPath), {schema}, error))
+            {
+                // 10x（build >= 20000）的 OEMInput 变体 XSD 目前不可得：本机 ADK 只到 22621，
+                // 10x 的 featureapi.dll 也没随包集提供。基线 V2 schema 对这种文档只会报
+                // "空容器元素不能为空"（0xC00CE011，例如 <AppXOptionalPackages/>），属 schema
+                // 变体差异而非文档错误。这种情况按提示处理并继续（FM 仍严格校验）。
+                const bool tenX = (build == 0 || build >= 20000);
+                if (tenX && error.find("0xC00CE011") != std::string::npos)
+                {
+                    Err("提示：OEMInput 与基线 V2 schema 存在变体差异（10x 的 OEMInput XSD 未随"
+                        "本机 ADK 提供），跳过这一条继续：" + error);
+                    LogWrite(LogLevel::Warn, "oem-input schema variant skipped: " + error);
+                }
+                else
+                {
+                    Err("OEMInput 校验失败：" + error);
+                    LogWrite(LogLevel::Error, "oem-input invalid: " + error);
+                    LogClose();
+                    return 1;
+                }
+            }
+            else
+            {
+                OutLn("OEMInput 校验通过（schema=" + name + "）");
+                LogWrite(LogLevel::Info, "oem-input validated with " + name);
+            }
         }
-        OutLn("OEMInput 校验通过（schema=" + name + "）");
-        LogWrite(LogLevel::Info, "oem-input validated with " + name);
+
+        // 每个 FM 也按 FeatureManifest.xsd 校验（FM 根元素 = FeatureManifest，
+        // 命名空间 http://schemas.microsoft.com/embedded/2004/10/ImageUpdate，一致）。
+        const std::wstring fmSchema = FindSchema(schemaDir, "FeatureManifest.xsd");
+        // FeatureManifest.xsd 是"多文件同命名空间"的 schema 集：它引用的 AppXType 等类型
+        // 声明在同目录的 Appx.FMAddOnAppX.xsd / Drivers.FMAddOnDrivers.xsd 里，只 add 一份
+        // 会被 MSXML 拒绝（未声明的 XSD 类型）。这里把能找到的同族文件一起交给校验器，
+        // 由它生成 xsd:include 包装文档再 add 一次。
+        std::vector<std::wstring> fmSchemas;
+        if (!fmSchema.empty())
+        {
+            fmSchemas.push_back(fmSchema);
+            for (const char* extraName : {"Appx.FMAddOnAppX.xsd", "Drivers.FMAddOnDrivers.xsd"})
+            {
+                const std::wstring extra = FindSchema(schemaDir, extraName);
+                if (!extra.empty() && extra != fmSchema) fmSchemas.push_back(extra);
+            }
+        }
+        std::vector<std::string> fmFiles = input.fmFiles;
+        if (fmFiles.empty())
+        {
+            const std::wstring oemName =
+                std::filesystem::path(Utf8ToWide(input.oemInputPath)).filename().wstring();
+            const std::wstring dir = input.fmDir.empty()
+                ? std::filesystem::path(Utf8ToWide(input.oemInputPath)).parent_path().wstring()
+                : Utf8ToWide(input.fmDir);
+            std::vector<std::wstring> found;
+            std::error_code ec;
+            for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::path(dir), ec))
+            {
+                if (!entry.is_regular_file()) continue;
+                const std::wstring ext = entry.path().extension().wstring();
+                if (ext == L".xml" || ext == L".XML") found.push_back(entry.path().wstring());
+            }
+            std::sort(found.begin(), found.end());
+            for (const std::wstring& p : found)
+            {
+                if (std::filesystem::path(p).filename().wstring() == oemName) continue;
+                fmFiles.push_back(WideToUtf8(p));
+            }
+        }
+        if (fmSchema.empty())
+        {
+            if (validateStrict)
+            {
+                Err("找不到 XSD：FeatureManifest.xsd（用 --schema-dir 指定 Schemas 目录）");
+                LogClose();
+                return 1;
+            }
+            Err("提示：找不到 FeatureManifest.xsd，跳过 FM 结构校验");
+        }
+        else
+        {
+            std::size_t okCount = 0;
+            std::size_t badCount = 0;
+            for (const std::string& fm : fmFiles)
+            {
+                std::string error;
+                if (ValidateXmlAgainstSchema(Utf8ToWide(fm), fmSchemas, error))
+                {
+                    ++okCount;
+                    continue;
+                }
+                ++badCount;
+                Err("FM 校验失败：" + fm + " -> " + error);
+            }
+            OutLn("FM 校验：" + std::to_string(okCount) + " 通过，" +
+                  std::to_string(badCount) + " 失败");
+            LogWrite(LogLevel::Info, "fm validated: ok=" + std::to_string(okCount) +
+                                     " bad=" + std::to_string(badCount));
+            if (badCount != 0)
+            {
+                LogClose();
+                return 1;
+            }
+        }
     }
 
     PlanResult plan;

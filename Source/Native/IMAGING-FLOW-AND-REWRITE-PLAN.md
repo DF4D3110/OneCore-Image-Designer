@@ -415,3 +415,30 @@ Finalized disks → DismountVirtualHardDisk → Image processing complete
 3. `ValuePair` 逐条来源（尤其 `BuildLayer.*`、`WinREVersion`）。
 4. 顶层 `<Packages>` 199 与 `<EnumeratedPackages>` 194 的 5 条差集（需逐条列出：疑似 BSP 驱动 + InboxCompDB 包）。
 5. 20274（amd64）参照需同步验证（55 Feature / 181 包）。
+## §11 输入校验：XSD 资产与已知缺口（2026-10-21）
+
+**资产位置（已入库）**：`Schemas\adk\` 28 个 XSD（提交 `5eb2c7a`）+ 仓库原有 `Schemas\*.xsd` 11 个。
+来源是 ADK 托管程序集的**嵌入资源**，不是磁盘文件（ADK 目录里没有独立 .xsd）：
+`featureapi.dll`（FeatureManifest/OEMInput V1+V2/UpdateOSInput/UpdateOSOutput/UpdateHistory/Appx.FMAddOnAppX/Drivers.FMAddOnDrivers…）、
+`imagecommon.dll`（DeviceLayout*/OEMDevicePlatform/FMCollection/KML…）、`compdbcommon.dll`（DeviceCompDB/BuildCompDB/BSPCompDB/UpdateCompDB…）、
+`imagestorageservicemanaged.dll`（BcdLayout）。
+**提取方法**（零依赖、可复现，务必用 **32 位** PowerShell；64 位宿主 `LoadFile` 报 `0x800700C1`）：
+`C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe` +
+`[Reflection.Assembly]::LoadFile($dll)` → `GetManifestResourceNames()` → `GetManifestResourceStream($n)` → 写盘。
+
+**发布链**：`build-imaging.ps1` 把 `Schemas\*.xsd` 复制到 `Output\Imaging\schemas\`、`Schemas\adk\*.xsd` 复制到 `Output\Imaging\schemas\adk\`；
+`ocid_imagegen` 的 `FindSchema` 依次在 `<exe>\schemas`、`<exe>\..\schemas`、源码树 `Schemas` 及其 `adk` 子目录里找。
+
+**校验引擎**：系统 MSXML6 + 纯 IDispatch 晚绑定（`#import <msxml6.dll>` 与 windows.h 的 `msxml.h` 撞类型重定义，故不用 #import）。
+两个必须绕开的 MSXML 行为：
+1. `schemaCache.add(ns, "<文件路径>")` 在本进程恒 `E_ACCESSDENIED`；必须先读文本 → `loadXML` → `add(ns, VT_DISPATCH)`。
+2. **同一命名空间只能 add 一次**，而 ADK 的 `FeatureManifest.xsd` 引用的 `AppXType` 声明在同族另一文件里（多文件同命名空间 schema 集）。
+   实测 `xsd:include` 包装文档 add 成功但**校验仍报"元素未声明"**（MSXML 不处理 include），因此改为**文本级拼接**：
+   取每个 XSD 根标签的内部内容接到第一个文件的根标签下（三个文件根标签属性完全一致），再 `add` 一次。
+   FM 校验因此传入 `FeatureManifest.xsd + Appx.FMAddOnAppX.xsd + Drivers.FMAddOnDrivers.xsd`。
+
+**已知缺口（未处理）**：10x（build ≥ 20000）的 OEMInput 变体 XSD 不可得 —— 本机 ADK 只到 22621，
+10x 的 `featureapi.dll` 也没随包集提供。基线 `OEMInput.V2.xsd` 会对真机 10x OEMInput 报
+`0xC00CE011`（`<AppXOptionalPackages/>` 空容器不允许），属 schema 变体差异。
+`ocid_imagegen plan` 在 build 未知或 ≥ 20000 时把这一条降级为**提示**并继续（FM 仍逐份严格校验），
+其余校验错误照常失败。拿到 10x 的 `featureapi.dll` 后应抽其 OEMInput XSD 补进 `Schemas\adk\` 并去掉该降级。
