@@ -274,11 +274,22 @@ usable. See `Source/Native/OcidServicing/WSSM.md`.
 finalize) as project-owned code, split into DLLs so a failure points at one layer: `ocid_common.wcos.dll`
 (console, log, files, XML, MSXML6 XSD validation), `ocid_plan.wcos.dll` (selection from OEMInput +
 FeatureManifest), `ocid_cab.wcos.dll` (NONE/MSZIP decoders plus LZX/Quantum through the system `cabinet.dll`
-FDI), and the `ocid_imagegen.exe` console (`plan`, `cab list|entry|extract`, `schema validate|pick`).
+FDI), and the `ocid_imagegen.exe` console (`plan`, `packagelist`, `cab list|entry|extract`,
+`schema validate|pick`).
 
 Selection matches the reference runs entry-for-entry and in the same order: 10.0.20274 (amd64) 181/181, and
 10.0.20279 (arm64) 194/194. Inputs are validated against XSDs extracted from the ADK assemblies and shipped
-in-tree under `Schemas/adk/` (28 files). Still missing: disk creation, finalize, and the L0 orchestration that
+in-tree under `Schemas/adk/` (28 files).
+
+The package list (`packagelist`) never guesses metadata from CAB names: everything comes from the
+`update.mum` inside each package — `phoneRelease / phoneOwner / phoneOwnerType / phoneComponent` under
+`<customInformation>/<phoneInformation>` give `ReleaseType / Owner / OwnerType / Component`,
+`<package targetPartition>` gives `Partition`, and `<assemblyIdentity version>` gives `Version` (segments
+1/2/4, matching the reference tool's behaviour). Compared against the reference `PackageList.xml`: all
+fields identical for the 187 comparable packages; the only gaps are 6 QEMU BSP packages that are not
+present on this machine and 1 package that the later stage filters out.
+
+Still missing: disk creation, finalize, and the L0 orchestration that
 drives `UpdateDLL.dll` for the offline install; AppX is out of scope for now.
 
 ## Repository layout

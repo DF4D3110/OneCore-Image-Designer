@@ -264,11 +264,12 @@ ocid_wssm pcm build a.manifest out.pcm
 | `ocid_common.wcos.dll` | 控制台与日志、文件与 XML、MSXML6 XSD 校验 |
 | `ocid_plan.wcos.dll` | 选包：OEMInput + FeatureManifest → 包计划（8 类 section，含架构/语言展开） |
 | `ocid_cab.wcos.dll` | CAB 读取：NONE/MSZIP 自研解码，LZX/Quantum 走系统 `cabinet.dll` 的 FDI |
-| `ocid_imagegen.exe` | 入口：`plan` / `cab list|entry|extract` / `schema validate|pick` / `version` / `help` |
+| `ocid_imagegen.exe` | 入口：`plan` / `packagelist` / `cab list|entry|extract` / `schema validate|pick` / `version` / `help` |
 
 ```powershell
 Source\Native\build-imaging.ps1              # -> Source\Native\Output\Imaging\ocid_imagegen.exe
 ocid_imagegen plan --oem-input OEMInput.xml --fm-dir ProcessedFiles --arch arm64 --out plan.xml --list cabs.txt
+ocid_imagegen packagelist --oem-input OEMInput.xml --fm-dir ProcessedFiles --arch arm64 --cabs <包集目录> --out PackageList.xml
 ocid_imagegen cab extract a.cab --out dir
 ocid_imagegen schema validate OEMInput.xml --schema Schemas\adk\OEMInput.V2.OEMInputV2.xsd
 ```
@@ -276,6 +277,12 @@ ocid_imagegen schema validate OEMInput.xml --schema Schemas\adk\OEMInput.V2.OEMI
 选包结果与真机参照**逐条同序**：10.0.20274（amd64）181/181、10.0.20279（arm64）194/194。输入校验用 ADK
 托管程序集里抽出的 XSD（`Schemas/adk/`，28 个，随仓库提供），`plan` 默认校验 OEMInput 与每份 FM；CAB 解码
 结果与 `expand.exe` 逐字节一致。
+
+包清单（`packagelist`）的包元数据不从 cab 名猜，全部取自每个包内的 `update.mum`：
+`<customInformation>/<phoneInformation>` 的 `phoneRelease / phoneOwner / phoneOwnerType / phoneComponent`
+决定 `ReleaseType / Owner / OwnerType / Component`，`<package targetPartition>` 决定 `Partition`，
+`<assemblyIdentity version>` 决定 `Version`（按真机行为取第 1/2/4 段）。与真机 `Falsh.PackageList.xml`
+对拍：187 个可比包的全部字段零差异；差集只有 6 个本机缺失的 QEMU BSP 包和 1 个被后续阶段过滤掉的包。
 
 未完成：造盘（`Vhd`）、收尾（`Finalize`）与 L0 编排（调 `UpdateDLL.dll` 做离线安装）；AppX 相关先不做。
 `Source/Native/OcidServicing/UNRESOLVED-16299-pcm.md` 记录 10.0.16299 语料上 `t2` 串槽序这条未解规则。

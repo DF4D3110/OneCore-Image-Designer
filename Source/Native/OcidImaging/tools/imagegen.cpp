@@ -14,7 +14,9 @@
 #include "ocid/imaging/Plan.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
+#include <memory>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -35,6 +37,7 @@ void PrintUsage()
     OutLn("  ocid_imagegen plan --oem-input <OEMInput.xml> [选项]");
     OutLn("  ocid_imagegen schema validate <XML> --schema <XSD> [--schema <XSD>...]");
     OutLn("  ocid_imagegen schema pick --build <构建号> [--family V1|V2] [--schema-dir <目录>]");
+    OutLn("  ocid_imagegen packagelist --oem-input <OEMInput.xml> --cabs <cab 目录> --out <PackageList.xml>");
     OutLn("  ocid_imagegen cab list <文件.cab>");
     OutLn("  ocid_imagegen cab entry <文件.cab> <条目名> --out <文件>");
     OutLn("  ocid_imagegen cab extract <文件.cab> --out <目录>");
@@ -53,6 +56,11 @@ void PrintUsage()
     OutLn("  --family V1|V2           OEMInput schema 家族（默认 V2）");
     OutLn("  --no-validate            跳过 XSD 校验（默认会校验 OEMInput + 每个 FM）");
     OutLn("  --validate               严格校验：schema 找不到也算失败");
+    OutLn("");
+    OutLn("packagelist 选项：");
+    OutLn("  --cabs <目录>           包集所在目录（按 plan 选出的 cab 名去找）");
+    OutLn("  --out <文件>            写 PackageList.xml（对拍 imageapp 产物）");
+    OutLn("  元数据取自每个包内的 update.mum（phoneInformation / targetPartition / version）");
     OutLn("");
     OutLn("cab 说明：");
     OutLn("  list     打印压缩法、块数、包内条目（名字 / 大小 / folder / 时间）");
@@ -534,6 +542,214 @@ int CmdCab(const std::vector<std::string>& args)
     return 2;
 }
 
+// ── packagelist：按包集写 UpdateOSOutput（对拍 imageapp 的 <前缀>.PackageList.xml）──
+// 【元数据从哪来】imageapp 的包清单不是从 cab 名猜的。每个包的元数据都在包内 update.mum：
+//   <assemblyIdentity version="10.0.20279.1002">          → Identity/Version
+//   <package targetPartition="EFIESP" ...>                → Partition
+//   <customInformation>/<phoneInformation
+//        phoneRelease="Production" phoneOwner="Microsoft"
+//        phoneOwnerType="Microsoft" phoneComponent="OneCore.BcdCoreCore">
+//                                                          → ReleaseType / Owner / OwnerType / Component
+// 这三处来源是实测出来的：`WindowsDevicePortal-WCOS-Package` 的 phoneOwner=Microsoft、
+// phoneComponent=WindowsDevicePortal.WCOS，靠 cab 名推不出来（点分包名都会推错）。
+// Version 的映射同样是实测的：10.0.20279.1002 → Major=10 Minor=0 Build=1002 Qfe=0
+// （取第 1/2/4 段——Build 不是第 3 段，这是 imageapp 的实际行为，照抄以免对不上）。
+int CmdPackageList(const std::vector<std::string>& args)
+{
+    std::string oemInput;
+    std::string fmDir;
+    std::string cabsDir;
+    std::string outPath;
+    std::string logPath;
+    std::string arch = "arm64";
+    std::vector<std::string> fmFiles;
+
+    for (std::size_t i = 2; i < args.size(); ++i)
+    {
+        const std::string& a = args[i];
+        if (a == "--oem-input" || a == "--fm-dir" || a == "--fm" || a == "--arch" ||
+            a == "--cabs" || a == "--out" || a == "--log")
+        {
+            if (i + 1 >= args.size())
+            {
+                Err("参数 " + a + " 需要一个值");
+                return 2;
+            }
+            const std::string value = args[++i];
+            if (a == "--oem-input") oemInput = value;
+            else if (a == "--fm-dir") fmDir = value;
+            else if (a == "--fm") fmFiles.push_back(value);
+            else if (a == "--arch") arch = value;
+            else if (a == "--cabs") cabsDir = value;
+            else if (a == "--out") outPath = value;
+            else logPath = value;
+            continue;
+        }
+        Err("未知参数：" + a);
+        return 2;
+    }
+    if (oemInput.empty() || cabsDir.empty() || outPath.empty())
+    {
+        Err("用法：ocid_imagegen packagelist --oem-input <OEMInput.xml> --cabs <cab 目录> "
+            "--out <PackageList.xml> [--arch arm64] [--fm-dir <目录>] [--log <文件>]");
+        return 2;
+    }
+    std::string error;
+    if (!logPath.empty())
+    {
+        LogOpen(Utf8ToWide(logPath), error);
+    }
+
+    PlanInput input;
+    input.oemInputPath = oemInput;
+    input.fmDir = fmDir;
+    input.fmFiles = fmFiles;
+    input.arch = arch;
+
+    PlanResult plan;
+    if (!BuildPlan(input, plan, error))
+    {
+        Err(error);
+        LogClose();
+        return 1;
+    }
+    OutLn("包集：" + std::to_string(plan.packages.size()) + " 个 cab（架构 " + arch + "）");
+
+    std::string xml;
+    xml += "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n";
+    xml += "<UpdateOSOutput xmlns=\"http://schemas.microsoft.com/embedded/2004/10/ImageUpdate\">\r\n";
+    xml += "  <Description>List of packages currently in this image or on this device</Description>\r\n";
+    xml += "  <OverallResult>0</OverallResult>\r\n";
+    xml += "  <UpdateState>Update Complete</UpdateState>\r\n";
+    xml += "  <Packages>\r\n";
+
+    std::size_t okCount = 0;
+    std::size_t badCount = 0;
+    for (const PackageRef& ref : plan.packages)
+    {
+        const std::wstring cabPath = CombinePath(Utf8ToWide(cabsDir), Utf8ToWide(ref.cab));
+        std::string mum;
+        if (!CabExtractText(cabPath, "update.mum", mum, error))
+        {
+            ++badCount;
+            Err("读 update.mum 失败：" + ref.cab + " -> " + error);
+            continue;
+        }
+        std::unique_ptr<XmlDoc> doc = XmlParseText(mum, error);
+        if (!doc || doc->root == nullptr)
+        {
+            ++badCount;
+            Err("解 update.mum 失败：" + ref.cab + " -> " + error);
+            continue;
+        }
+        const XmlNode* root = doc->root;
+        const XmlNode* idNode = Child(root, "assemblyIdentity");
+        const XmlNode* pkgNode = Child(root, "package");
+        // phoneInformation 在 <package>/<customInformation> 之下（不是 <assembly> 的直系子节点）
+        const XmlNode* ciNode = Child(pkgNode, "customInformation");
+        const XmlNode* phoneNode = ciNode != nullptr ? Child(ciNode, "phoneInformation") : nullptr;
+
+        std::string name = AttrOr(idNode, "name", "");
+        const std::string version = AttrOr(idNode, "version", "");
+        std::string pkt = AttrOr(idNode, "publicKeyToken", "31bf3856ad364e35");
+        std::string archText = AttrOr(idNode, "processorArchitecture", ref.arch.c_str());
+        std::string language = AttrOr(idNode, "language", "neutral");
+        const std::string buildType = AttrOr(idNode, "buildType", "release");
+
+        // 小写化（PackageIdentity 里架构/语言都是小写，cab 文件名里架构是大写）
+        for (char& c : archText) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        for (char& c : pkt) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (EqualsNoCase(language, "neutral")) language.clear();
+
+        // Version：10.0.20279.1002 → 10 / 0 / 1002 / 0
+        std::string major = "0", minor = "0", build = "0";
+        {
+            std::vector<std::string> parts;
+            std::string cur;
+            for (char c : version)
+            {
+                if (c == '.') { parts.push_back(cur); cur.clear(); }
+                else cur.push_back(c);
+            }
+            if (!cur.empty()) parts.push_back(cur);
+            if (parts.size() >= 1) major = parts[0];
+            if (parts.size() >= 2) minor = parts[1];
+            if (parts.size() >= 4) build = parts[3];
+        }
+
+        xml += "    <Package>\r\n";
+        xml += "      <PackageType>Canonical</PackageType>\r\n";
+        xml += "      <PackageFile>\\\\?\\";
+        XmlEscapeTo(xml, WideToUtf8(cabPath));
+        xml += "</PackageFile>\r\n";
+        xml += "      <PackageIdentity>";
+        XmlEscapeTo(xml, name + "~" + pkt + "~" + archText + "~" + language + "~" + version);
+        xml += "</PackageIdentity>\r\n";
+        xml += "      <Identity>\r\n        <Owner>";
+        XmlEscapeTo(xml, AttrOr(phoneNode, "phoneOwner", "Microsoft"));
+        xml += "</Owner>\r\n        <Component>";
+        XmlEscapeTo(xml, AttrOr(phoneNode, "phoneComponent", ""));
+        xml += "</Component>\r\n        <Version Major=\"" + major + "\" Minor=\"" + minor +
+               "\" Build=\"" + build + "\" Qfe=\"0\" />\r\n      </Identity>\r\n";
+        xml += "      <ReleaseType>";
+        XmlEscapeTo(xml, AttrOr(phoneNode, "phoneRelease", "Production"));
+        xml += "</ReleaseType>\r\n      <OwnerType>";
+        XmlEscapeTo(xml, AttrOr(phoneNode, "phoneOwnerType", "Microsoft"));
+        xml += "</OwnerType>\r\n      <BuildType>";
+        xml += EqualsNoCase(buildType, "release") ? "Retail" : buildType;
+        xml += "</BuildType>\r\n      <HostCpuType>";
+        /* HostCpuType / GuestCpuType 是实测的：包内 processorArchitecture 决定
+               arm64 → ARM64 / Invalid、arm64.arm → ARM64 / ARM、
+               amd64 → AMD64 / Invalid、wow64 → AMD64 / X86（wow64 表示来宾是 x86）。 */
+        std::string hostCpu;
+        std::string guestCpu;
+        {
+            std::string first = archText;
+            std::string second;
+            const std::size_t dot = archText.find('.');
+            if (dot != std::string::npos)
+            {
+                first = archText.substr(0, dot);
+                second = archText.substr(dot + 1);
+            }
+            for (char& c : first) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            for (char& c : second) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            if (archText == "wow64")
+            {
+                hostCpu = "AMD64";
+                guestCpu = "X86";
+            }
+            else
+            {
+                hostCpu = first;
+                guestCpu = second.empty() ? "Invalid" : second;
+            }
+        }
+        xml += hostCpu;
+        xml += "</HostCpuType>\r\n      <GuestCpuType>";
+        xml += guestCpu;
+        xml += "</GuestCpuType>\r\n      <Partition>";
+        XmlEscapeTo(xml, AttrOr(pkgNode, "targetPartition", ""));
+        xml += "</Partition>\r\n      <Result>0</Result>\r\n      <CpuType>";
+        xml += archText;
+        xml += "</CpuType>\r\n    </Package>\r\n";
+        ++okCount;
+    }
+    xml += "  </Packages>\r\n</UpdateOSOutput>\r\n";
+
+    if (!WriteFileText(Utf8ToWide(outPath), xml, error))
+    {
+        Err(error);
+        LogClose();
+        return 1;
+    }
+    OutLn("已写 PackageList：" + outPath + "（条目 " + std::to_string(okCount) +
+          "，失败 " + std::to_string(badCount) + "）");
+    LogWrite(LogLevel::Info, "packagelist written: " + outPath + " entries=" + std::to_string(okCount));
+    LogClose();
+    return badCount == 0 ? 0 : 1;
+}
+
 } // namespace
 
 // 用 wmain 取宽字符命令行：
@@ -566,6 +782,10 @@ int wmain(int argc, wchar_t** wargv)
     if (command == "plan")
     {
         return CmdPlan(args);
+    }
+    if (command == "packagelist")
+    {
+        return CmdPackageList(args);
     }
     if (command == "schema")
     {
