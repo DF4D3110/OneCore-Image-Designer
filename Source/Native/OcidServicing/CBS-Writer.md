@@ -651,9 +651,9 @@ COMPONENTS 是自洽的 —— OCID 自己从包集装出来的镜像走这一�
         `01247`（isolationautomation）的 `<comClass progid=…>` 复用同一张 key-3 表，已由
         `32064aa` 解决（见 §10.1）。
      - `<genericCommands>`：按 `install` 属性**分两组**，每组一条记录 = 组内 `<genericCommand>` 的 uidx 数组（4 B 起，10 条一组就是 20 B）；发射位置在 migration 记录**之后**、`sppInstaller` 之**前**（真机 01879 槽序 82 migration / 83 install / 84 uninstall / 85 sppInstaller）；cache GUID install `104aa381-5642-6a43-89d6-794b97ca407c`、uninstall `5dfd45c1-9b1b-3847-9961-64034a3da28f`，按 `…sppInstaller < uninstall < install` 排进 GUID 表并注册进注册键 666（`79a323a`）。另：key-666 表的 `f0` 列 = 该行 **cache GUID 的 Data1**（不是行号），只有行数 ≥7 才落盘（`00549` 的 7 行真机就是逐行 Data1 升序）。
-     - 仍开放（185 份 = 171 份只差文档根记录 `b0` bit4..6 的不可复现样本 + 14 份真实残差，
-       9600 T4 2,599/2,784 = 93.4%，`58275a5` 之后）：
-       `t6` 撞车 4 份（`00852/01220/01344/01897`）与 `type 11` 撞车 1 份（`00611`）；`t2` 串池 intern 次序 6 份（`00003` 里 `HKEY_LOCAL_MACHINE` 与 `ja` 对调、`02995` 里 `amd64` 与中文串对调）；`<WinsockAppPermittedLspCategories>` 4 份（`00028/01888/01915/02232`，12 B `{Path,PermittedLspCategories,Extra}` 记录与 cache GUID 已发，只差 key-30 表的 `f1`）；`00549`（+5 槽，两条 4 B 记录）；`00028` 的 cache 簇多 1 槽（serviceData/sdd 记录位置）；其余 −1~−7 槽若干。
+     - 仍开放（184 份 = 171 份只差文档根记录 `b0` bit4..6 的不可复现样本 + 13 份真实残差，
+       9600 T4 2,600/2,784 = 93.4%，`7f4a9be` 之后）：
+       `t6` 撞车 4 份（`00852/01220/01344/01897`）与 `type 11` 撞车 1 份（`00611`）；`<WinsockAppPermittedLspCategories>` 4 份（`00028/01888/01915/02232`，12 B `{Path,PermittedLspCategories,Extra}` 记录与 cache GUID 已发，只差 key-30 表的 `f1`）；membership 组序 3 份（`00785/02738/02463`，subcategory 串入池时机未定）；`02259` 的 `t6` 行序 1 份。
        已定论但**不可由比较器复现**的部分：`00852`（profsvc，85 行 event 本地化表）三组 `f0` 撞车的真机次序是「2 组 f1 降、1 组 f1 升」，`00611` 的 `type 11` 两表一升一降 ⇒ 真机用的是**不稳定排序 + 哈希表迭代序**，取决于输入向量的构造顺序；`E:\ocid_verify\pcm9600\_tiescan.py` 扫全语料已确认每条撞车组内部单调、组间方向不一致，所以改比较器永远对不上，必须知道真机输入序（或换一条记录生成路径）。`<windowClass>` 侧：真机把每个 class 名入池并发 `type 2` 串槽外，还发 4 张 `type 4/5` 表（行 `{-1, a, b}` 三元组、b/c 引用串 id）；这 4 张表的语义（哪种元素被折叠成 `{-1,a,b}`）尚未定。（已解：见 §10.1 —— 它们就是身份表，类名先占串池 id 2..28/2..30，其后全部 id 整体 +27。）
 
      **8419 语料里的 install 记录极端样本**（`x86_…pnpplugininstaller_1122334455667788_6.2.8419.0_neutral_~_…`，
@@ -817,12 +817,12 @@ WinSxS 里没有 `ntoskrnl.exe` 时用 `--os-build` 明说。
 
 | 语料 | 对 | T1 槽数 | T2 type+len | T3 载荷 | T4 整文件 |
 | --- | --- | --- | --- | --- | --- |
-| 6.3.9600（2,784 对） | 2,784 | 2,779（99.8%） | 2,778（99.8%） | 2,599（93.4%） | **2,599（93.4%）** |
-| 6.2.8419 route9（2,757 对） | 2,757 | 2,755（99.9%） | 2,755（99.9%） | 2,753（99.9%） | **2,753（99.9%）** |
+| 6.3.9600（2,784 对） | 2,784 | 2,780（99.9%） | 2,779（99.8%） | 2,600（93.4%） | **2,600（93.4%）** |
+| 6.2.8419 route9（2,757 对） | 2,757 | 2,756（99.9%） | 2,756（99.9%） | 2,754（99.9%） | **2,754（99.9%）** |
 
 9600 的未命中由 `E:\ocid_verify\pcm9600\_b0split.py` 分诊（对每份把 `b0_extra`
 0..7 全试一遍）：**171 份只差文档根元素记录的 `b0` bit4..6**（真机未初始化栈字节，见下），
-其余 14 份有真实内容差。所以 9600 的"可推导上限"是 **2,613 / 2,784（93.9%）**。
+其余 13 份有真实内容差。所以 9600 的"可推导上限"是 **2,613 / 2,784（93.9%）**。
 
 ### 10.1 本轮新解出并已实现的规则
 
@@ -846,6 +846,9 @@ WinSxS 里没有 `ntoskrnl.exe` 时用 `--os-build` 明说。
 | 缓存 GUID 表全序：147 块成对约束反推的最小改动序（t8 的 `f1` = GUID 表下标，行按 `Data1` 升序） | `58275a5` |
 | `registryValue` 的 `operationHint`：`append` = 2，其余/缺省 = 1（20B 记录第 2 个 dword） | `58275a5` |
 
+| `<HTTPAI><AddUrl sddl=… url=…/>`（`00549` 全对）：`sddl` 串在 §4 字符串槽循环末尾入池并发 4 B `{sddlSlot}`；`url` 串在 kKeys 的 key-34 分支里入池并发 t6（`f0=0`、`f1=url 串 id`、`f2=4 B 记录槽`、`bit0=true`）；cache 记录 = §6 的 `{uidx}` + GUID `1ae0fe86-4a95-5df1-bc0c-cea7dfd72085` | `7f4a9be` |
+| 16299+ 的 `<file>` 记录是 **104 B**（26 个 u32）：将 9600/8419 的 96 B 记录在末列 `0` 之前插入 `{1,-1}`（`PcmBuildAtLeast(16299)`）| 本次 |
+
 ### 10.2 仍不可推导（已用全语料证据确认，不写"猜规则"的补丁）
 
 * **MdDl 根元素记录 `b0` bit4..6**：实测同一 `(min,max)` 组合在不同样本上给出不同值
@@ -862,3 +865,16 @@ WinSxS 里没有 `ntoskrnl.exe` 时用 `--os-build` 明说。
 `_fams.py` / `_b0split.py`（分诊）、`_b0root.py`（b0 证据）、`_tiescan.py`（撞车扫描）、
 `_ir2.py` / `_tp.py` / `_sl.py` / `_hex.py`（逐槽/逐表/逐字节）。`run9600.py` 写
 `built/` 与 `fails.json`，**不能并发跑**。
+
+### 10.3 16299 语料（新，2026-10-21）
+
+16299 镜像的 `WinSxS\ManifestCache\44cb0f7e4f16664a_blobs.bin` 只有 2,589,102 B（mcp.csv 引用的 bucket 91081d66 有 27.9 MB 空间），
+其中 **329 条记录的 offset 落在文件内**，已抽成真机 PCM 语料（`E:\ocid_verify\pcm16299\blocks`）。
+
+- 记录格式：`[16 B hash][u32 ? @0x10][u32 解压后长度 @0x14][u32 alg=2 @0x18][LZNT1 @0x1C]`，mcp.csv 的 offset 直指记录头。
+- **解压必须用 ntdll** `RtlDecompressBuffer(COMPRESSION_FORMAT_LZNT1=2, …)`；`E:\ocid_verify\mcp\unlz.py` 的纯 Python 实现有 bug。
+- 清单配对键 = `(arch, name, pkt, version, lang)`（清单名 `arch_name_pkt_VERSION_LANG_hash.manifest`）；mcp family 目录里的 hash **不是**清单文件名的 hash。
+- 当前基线：329 对，`T1 280(85.1%) / T2 0 / T3 0 / T4 0`（未包含 104 B 修正）。
+- **未解：字符串槽序**。页头串表 `0x54` 每条 4 B = string id → 槽号；身份表（t4/t5）引用 **id**，其它记录引用 **槽号**；id 序（intern 插入序）两边完全一致，差异只在 t2 槽序。
+  穷举了 `{码点,字节,u16} × {原样,A-Z 折小写} × poly{65599,33,37,31,131,16777619,0x01000193} × lanes{1..4} × mask{0xFFFFFFFF,0x1FFFFFFF,2^64} × 位移 0..28 × 取反 × 前缀 × 模数 2..6000`，
+  没有任何组合能让桶号沿真机序单调；MdSp 下标序、开放寻址（步长 1/3/5/7、n=16..209）也不行 ⇒ 判为 10.x 换了表实现，暂停。

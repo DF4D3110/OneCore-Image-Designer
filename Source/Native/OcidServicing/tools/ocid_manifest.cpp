@@ -3117,7 +3117,8 @@ static int CmdCbsPcmBuild(const std::wstring& manifestPath, const std::wstring& 
     std::vector<std::uint8_t> pcm;
     std::string buildError;
     if (!ocid::PcmBuildFromManifest(ToUtf8(xml),
-                                    static_cast<std::uint8_t>(b0Extra & 7), pcm, buildError))
+                                    static_cast<std::uint8_t>(b0Extra & 7), pcm, buildError,
+                                    g_osBuild))
     {
         OutLn("PCM 构建失败：" + buildError);
         return 1;

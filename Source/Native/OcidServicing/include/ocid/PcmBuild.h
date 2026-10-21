@@ -23,7 +23,10 @@ namespace ocid {
 //          默认 0；需要逐字节对拍时由调用方给真机值。
 //
 // 成功返回 true 并写 out（先清空）；失败返回 false 并写 error（中文）。
+// osBuild: os build number (0 = unknown). 16299+ file records carry two
+// extra columns, see BuildFileRecord.
 bool PcmBuildFromManifest(const std::string& xmlUtf8, std::uint8_t b0Extra,
-                          std::vector<std::uint8_t>& out, std::string& error);
+                          std::vector<std::uint8_t>& out, std::string& error,
+                          std::int32_t osBuild = 0);
 
 }  // namespace ocid

@@ -805,6 +805,13 @@ std::string BuildIdentTable(Interner& inter,
 // ---------------------------------------------------------------------------
 // 元素记录
 // ---------------------------------------------------------------------------
+// PCM element-record layout depends on the OS build.
+std::int32_t g_pcmOsBuild = 0;
+
+bool PcmBuildAtLeast(std::int32_t build) {
+    return g_pcmOsBuild > 0 && g_pcmOsBuild >= build;
+}
+
 std::string BuildFileRecord(Interner& inter, const Elem& e, int sddBlob, std::uint32_t targets,
                             int hashAttrBlob, int gacBlob, const std::string& sddName,
                             std::uint32_t writeType, std::uint32_t attrFlags,
@@ -852,7 +859,7 @@ std::string BuildFileRecord(Interner& inter, const Elem& e, int sddBlob, std::ui
     // 之前的 2+2*nDep+trust+4*ordinal 只是它的常见情形近似：每文件恰好
     // 新建 4 个 blob 时两者相等，blob 被共享（同 sdd/同 digest）时就偏大。
 
-    return PackU32({
+    std::vector<std::uint32_t> fields = {
         1u,                                               // [0]  writeableType
         kNoId,                                            // [1]  loadFrom 的 blob id 恒 -1
         static_cast<std::uint32_t>(idSrcPath),            // [2]  sourcePath
@@ -874,7 +881,15 @@ std::string BuildFileRecord(Interner& inter, const Elem& e, int sddBlob, std::ui
         attrFlags,                                        // [20] FILE_ATTRIBUTE 位（缺省 0xA0）
         static_cast<std::uint32_t>(sigBlob),               // [21] <signatureInfo> 8B blob id
         kNoId, 0u,                                         // [22][23]
-    });
+    };
+    if (PcmBuildAtLeast(16299)) {
+        // 16299+: 104-byte file record, {1, -1} inserted before the trailing 0.
+        fields.insert(fields.end() - 1, {1u, static_cast<std::uint32_t>(kNoId)});
+    }
+    std::string packed;
+    packed.reserve(fields.size() * 4);
+    for (std::uint32_t v : fields) packed += PackU32({v});
+    return packed;
 }
 
 // [11] 是**位置**而不是计数：它是 20B <deployment> 常量 blob 的槽号，也就是
@@ -3095,9 +3110,11 @@ bool BuildCore(const std::string& xmlUtf8, std::uint8_t b0Extra,
 }  // namespace
 
 bool PcmBuildFromManifest(const std::string& xmlUtf8, std::uint8_t b0Extra,
-                          std::vector<std::uint8_t>& out, std::string& error) {
+                          std::vector<std::uint8_t>& out, std::string& error,
+                          std::int32_t osBuild) {
     out.clear();
     error.clear();
+    g_pcmOsBuild = osBuild;
     if (!BuildCore(xmlUtf8, b0Extra, out, error)) {
         out.clear();
         return false;
