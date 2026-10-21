@@ -12,6 +12,7 @@
 #include "ocid/imaging/Cab.h"
 #include "ocid/imaging/Common.h"
 #include "ocid/imaging/Plan.h"
+#include "ocid/imaging/Vhd.h"
 
 #include <algorithm>
 #include <cctype>
@@ -2104,6 +2105,359 @@ int CmdLayout(const std::vector<std::string>& args)
     return failed == 0 ? 0 : 1;
 }
 
+    // ── vhd：虚拟磁盘（VirtDisk.dll）+ GPT 分区表 ─────────────────────────────
+    //
+    // 对应 imageapp 的 CreateVirtualHardDisk / AttachVirtualHardDisk /
+    // PartitionVirtualHardDisk 这三件事的 B 方案（单 VHDX + GPT，见 IMAGING-VHD-STUDY.md）。
+    static std::uint64_t VhdScaled(const std::string& text)
+    {
+        if (text.empty()) return 0;
+        char* end = nullptr;
+        const unsigned long long base = std::strtoull(text.c_str(), &end, 0);
+        std::uint64_t mul = 1;
+        if (end != nullptr && *end != 0)
+        {
+            const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(*end)));
+            if (c == 'K') mul = 1024ull;
+            else if (c == 'M') mul = 1024ull * 1024;
+            else if (c == 'G') mul = 1024ull * 1024 * 1024;
+            else if (c == 'T') mul = 1024ull * 1024 * 1024 * 1024;
+        }
+        return static_cast<std::uint64_t>(base) * mul;
+    }
+
+    static void PrintVhdUsage()
+    {
+        OutLn("用法：ocid_imagegen vhd <子命令> [参数]");
+        OutLn("");
+        OutLn("  create <文件.vhdx> --size <容量> [--fixed] [--block <字节>] [--sector 512|4096]");
+        OutLn("      建一个 VHDX。容量可写 8G / 42G / 4096M；默认动态扩展，--fixed 建固定盘。");
+        OutLn("  attach <文件.vhdx> [--readonly]");
+        OutLn("      挂载并打印物理盘路径（\\\\.\\PhysicalDriveN）。");
+        OutLn("  detach <文件.vhdx>");
+        OutLn("      卸载。");
+        OutLn("  info <文件.vhdx> [--partition]");
+        OutLn("      打印容量/块大小；--partition 时再读回盘上的 GPT 分区表。");
+        OutLn("  partition <文件.vhdx> [--layout <DeviceLayout.xml>] [--device <\\\\.\\PhysicalDriveN>]");
+        OutLn("            [--disk-id <GUID>] [--size <容量>] [--dry] [--keep-attached]");
+        OutLn("      按设备布局写 GPT：分区顺序/类型 GUID/分区 GUID/字节对齐都取自布局；");
+        OutLn("      不给 --device 会先挂载（结果保持挂载，用 vhd detach 收回）。");
+        OutLn("");
+        OutLn("说明：虚拟容量必须是 1 MiB 的整数倍；分区起始 1 MiB 之后、按 DefaultPartitionByteAlignment 对齐。");
+    }
+
+    // 按"存储池(Store)"分配：Store 内分区用 <UseAllSpace> 吃满该 Store 剩余空间，
+    // 否则用 <TotalSectors>/<TotalBytes>；分区起始按自身 <ByteAlignment>，Store 之间按
+    // <DefaultPartitionByteAlignment>。WSK 布局里分区统一写 41943040 扇区（20 GiB）+ UseAllSpace=true，
+    // 真实语义是"吃满所在 Store"，不能直接拿 TotalSectors 当分区大小。
+    static bool ParseHexOrDec(const std::string& text, std::uint64_t& value)
+    {
+        std::string t;
+        for (const char c : text)
+        {
+            if (c == ' ' || c == '\t') continue;
+            t.push_back(c);
+        }
+        if (t.empty()) return false;
+        try
+        {
+            std::size_t used = 0;
+            const bool hex = t.size() > 2 && t[0] == '0' && (t[1] == 'x' || t[1] == 'X');
+            value = hex ? std::stoull(t.substr(2), &used, 16) : std::stoull(t, &used, 10);
+            return used != 0;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    static bool BuildPartitionsFromLayout(const LayoutModel& model, std::uint64_t diskBytes,
+                                          std::vector<VhdPartition>& parts, std::string& error)
+    {
+        const std::uint64_t sector = model.sectorSize != 0 ? model.sectorSize : 512;
+        const std::uint64_t defaultAlignment = model.defaultAlignment != 0 ? model.defaultAlignment : (1024ull * 1024);
+        auto align = [](std::uint64_t v, std::uint64_t a) { return a == 0 ? v : (v + a - 1) / a * a; };
+        std::uint64_t cursor = align(1024ull * 1024, defaultAlignment);
+
+        for (const LayoutStore& store : model.pools)
+        {
+            if (store.storeType.rfind("VIRT_", 0) == 0) continue;
+            if (store.partitions.empty()) continue;
+
+            std::uint64_t storeBytes = 0;
+            if (store.hasSizeBytes && store.sizeInBytes != 0) storeBytes = store.sizeInBytes;
+            else if (store.sizeInSectors != 0) storeBytes = store.sizeInSectors * sector;
+
+            std::uint64_t declared = 0;
+            std::size_t flexible = 0;
+            for (const LayoutPartition& p : store.partitions)
+            {
+                std::uint64_t size = 0;
+                if (p.hasTotalBytes && p.totalBytes != 0) size = p.totalBytes;
+                else if (p.totalSectors != 0) size = p.totalSectors * sector;
+                if (p.useAllSpace || size == 0) { ++flexible; continue; }
+                declared += align(size, sector);
+            }
+
+            std::uint64_t flexibleBytes = 0;
+            if (flexible != 0 && storeBytes > declared) flexibleBytes = (storeBytes - declared) / flexible / sector * sector;
+
+            for (const LayoutPartition& p : store.partitions)
+            {
+                std::uint64_t size = 0;
+                if (p.hasTotalBytes && p.totalBytes != 0) size = p.totalBytes;
+                else if (p.totalSectors != 0) size = p.totalSectors * sector;
+                if (p.useAllSpace || size == 0) size = flexibleBytes;
+                if (size == 0) continue;
+                size = align(size, sector);
+
+                std::uint64_t alignment = defaultAlignment;
+                std::uint64_t custom = 0;
+                if (!p.byteAlignment.empty() && ParseHexOrDec(p.byteAlignment, custom) && custom != 0) alignment = custom;
+                if (p.singleSectorAlignment) alignment = sector;
+
+                VhdPartition vp;
+                vp.name = p.name;
+                vp.type = p.type;
+                vp.id = p.id;
+                vp.offsetBytes = align(cursor, alignment);
+                vp.sizeBytes = size;
+                parts.push_back(vp);
+                cursor = vp.offsetBytes + size;
+            }
+        }
+
+        if (parts.empty())
+        {
+            error = "布局里没有可分区的分区项";
+            return false;
+        }
+        if (diskBytes != 0 && cursor > diskBytes)
+        {
+            error = "分区总长超过虚拟盘容量（需要 " + FormatBytes(cursor) + "）";
+            return false;
+        }
+        return true;
+    }
+
+    bool WantsHelp(const std::vector<std::string>& args)
+    {
+        for (const std::string& a : args)
+        {
+            if (a == "--help" || a == "-h" || a == "/?") return true;
+        }
+        return false;
+    }
+
+    int CmdVhd(const std::vector<std::string>& args)
+    {
+        if (args.size() < 3 || WantsHelp(args))
+        {
+            PrintVhdUsage();
+            return args.size() < 3 ? 2 : 0;
+        }
+        const std::string sub = LowerText(args[2]);
+        std::string file, device, layout, diskId;
+        std::uint64_t size = 0, block = 0;
+        std::uint32_t sectorSize = 512;
+        bool fixed = false, readOnly = false, dry = false, keepAttached = false, wantPartitions = false;
+
+        for (std::size_t i = 3; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            auto next = [&](std::string& out) -> bool
+            {
+                if (i + 1 >= args.size()) return false;
+                out = args[++i];
+                return true;
+            };
+            if (a == "--readonly") readOnly = true;
+            else if (a == "--fixed") fixed = true;
+            else if (a == "--dry") dry = true;
+            else if (a == "--keep-attached") keepAttached = true;
+            else if (a == "--partition") wantPartitions = true;
+            else if (a == "--size") { std::string v; if (!next(v)) { Err("--size 缺少值"); return 2; } size = VhdScaled(v); }
+            else if (a == "--block") { std::string v; if (!next(v)) { Err("--block 缺少值"); return 2; } block = VhdScaled(v); }
+            else if (a == "--sector") { std::string v; if (!next(v)) { Err("--sector 缺少值"); return 2; } sectorSize = static_cast<std::uint32_t>(VhdScaled(v)); }
+            else if (a == "--device") { if (!next(device)) { Err("--device 缺少值"); return 2; } }
+            else if (a == "--layout") { if (!next(layout)) { Err("--layout 缺少值"); return 2; } }
+            else if (a == "--disk-id") { if (!next(diskId)) { Err("--disk-id 缺少值"); return 2; } }
+            else if (!a.empty() && a[0] == '-') { Err("未知参数：" + a); return 2; }
+            else if (file.empty()) file = a;
+            else { Err("多余的位置参数：" + a); return 2; }
+        }
+
+        if (file.empty())
+        {
+            Err("缺少 VHDX 文件路径");
+            return 2;
+        }
+        const std::wstring wideFile = Utf8ToWide(file);
+        std::string error;
+
+        if (sub == "create")
+        {
+            if (size == 0) { Err("create 需要 --size"); return 2; }
+            if (!VhdCreate(wideFile, size, fixed ? VhdKind::Fixed : VhdKind::Dynamic,
+                           static_cast<std::uint32_t>(block), sectorSize, error))
+            {
+                Err("建盘失败：" + error);
+                return 1;
+            }
+            VhdInfo info;
+            if (VhdQuery(wideFile, info, error))
+                OutLn("已创建：" + file + "（虚拟容量 " + FormatBytes(info.virtualBytes) + "，文件 " + FormatBytes(info.fileBytes) + "）");
+            else
+                OutLn("已创建：" + file);
+            return 0;
+        }
+
+        if (sub == "attach")
+        {
+            std::string devicePath;
+            if (!VhdAttach(wideFile, readOnly, devicePath, error))
+            {
+                Err("挂载失败：" + error);
+                return 1;
+            }
+            OutLn(devicePath);
+            return 0;
+        }
+
+        if (sub == "detach")
+        {
+            if (!VhdDetach(wideFile, error))
+            {
+                Err("卸载失败：" + error);
+                return 1;
+            }
+            OutLn("已卸载：" + file);
+            return 0;
+        }
+
+        if (sub == "info")
+        {
+            VhdInfo info;
+            if (!VhdQuery(wideFile, info, error))
+            {
+                Err("读取失败：" + error);
+                return 1;
+            }
+            OutLn("文件：" + info.path);
+            OutLn("文件大小：" + FormatBytes(info.fileBytes));
+            OutLn("虚拟容量：" + FormatBytes(info.virtualBytes));
+            OutLn(std::string("挂载：") + (info.attached ? info.devicePath : "否"));
+            if (wantPartitions && info.attached)
+            {
+                std::vector<VhdPartition> parts;
+                std::string id;
+                std::uint32_t sector = 512;
+                if (!VhdReadGpt(info.devicePath, id, parts, sector, error))
+                {
+                    Err("读分区表失败：" + error);
+                    return 1;
+                }
+                OutLn("磁盘 GUID：" + id + "  扇区 " + NumText(sector) + "  分区 " + NumText(parts.size()));
+                for (std::size_t i = 0; i < parts.size(); ++i)
+                {
+                    OutLn("  [" + NumText(i + 1) + "] " + parts[i].name +
+                          "  type=" + parts[i].type +
+                          "  id=" + parts[i].id +
+                          "  offset=" + FormatBytes(parts[i].offsetBytes) +
+                          "  size=" + FormatBytes(parts[i].sizeBytes));
+                }
+            }
+            return 0;
+        }
+
+        if (sub == "partition")
+        {
+            if (layout.empty()) { Err("partition 需要 --layout"); return 2; }
+            LayoutModel model;
+            if (!LoadLayout(layout, model, error))
+            {
+                Err("读布局失败：" + error);
+                return 1;
+            }
+            std::uint64_t diskBytes = size;
+            if (diskBytes == 0)
+            {
+                VhdInfo info;
+                if (VhdQuery(wideFile, info, error)) diskBytes = info.virtualBytes;
+            }
+            std::vector<VhdPartition> parts;
+            if (!BuildPartitionsFromLayout(model, diskBytes, parts, error))
+            {
+                Err("排分区失败：" + error);
+                return 1;
+            }
+            std::uint64_t end = 0;
+            OutLn("分区计划（共 " + NumText(parts.size()) + " 个）：");
+            for (std::size_t i = 0; i < parts.size(); ++i)
+            {
+                OutLn("  [" + NumText(i + 1) + "] " + parts[i].name +
+                      "  type=" + parts[i].type +
+                      "  offset=" + FormatBytes(parts[i].offsetBytes) +
+                      "  size=" + FormatBytes(parts[i].sizeBytes));
+                end = parts[i].offsetBytes + parts[i].sizeBytes;
+            }
+            OutLn("合计占用：" + FormatBytes(end) + "（虚拟盘 " + FormatBytes(diskBytes) + "）");
+            if (dry)
+            {
+                OutLn("--dry：不写盘");
+                return 0;
+            }
+
+            bool attachedHere = false;
+            if (device.empty())
+            {
+                if (!VhdAttach(wideFile, false, device, error))
+                {
+                    Err("挂载失败：" + error);
+                    return 1;
+                }
+                attachedHere = true;
+                OutLn("已挂载：" + device);
+            }
+            if (!VhdWriteGpt(device, diskId, parts, sectorSize, error))
+            {
+                Err("写 GPT 失败：" + error);
+                if (attachedHere && !keepAttached) (void)VhdDetach(wideFile, error);
+                return 1;
+            }
+            OutLn("已写 GPT：" + device);
+
+            std::vector<VhdPartition> readBack;
+            std::string readId;
+            std::uint32_t readSector = sectorSize;
+            if (VhdReadGpt(device, readId, readBack, readSector, error))
+            {
+                OutLn("读回：磁盘 GUID " + readId + "，分区 " + NumText(readBack.size()));
+                for (std::size_t i = 0; i < readBack.size(); ++i)
+                {
+                    OutLn("  [" + NumText(i + 1) + "] " + readBack[i].name +
+                          "  type=" + readBack[i].type +
+                          "  offset=" + FormatBytes(readBack[i].offsetBytes) +
+                          "  size=" + FormatBytes(readBack[i].sizeBytes));
+                }
+            }
+            else
+            {
+                OutLn("读回失败（不影响写盘）：" + error);
+            }
+            if (attachedHere && !keepAttached)
+            {
+                if (VhdDetach(wideFile, error)) OutLn("已卸载：" + file);
+                else Err("卸载失败：" + error);
+            }
+            return 0;
+        }
+
+        Err("未知子命令：" + args[2] + "（可用 create / attach / detach / info / partition）");
+        return 2;
+    }
+
 } // namespace
 
 // 用 wmain 取宽字符命令行：
@@ -2153,6 +2507,7 @@ int wmain(int argc, wchar_t** wargv)
     {
         return CmdDeviceDb(args);
     }
+    if (command == "vhd") return CmdVhd(args);
     if (command == "layout")
     {
         return CmdLayout(args);

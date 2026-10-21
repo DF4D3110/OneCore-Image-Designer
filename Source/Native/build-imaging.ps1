@@ -106,13 +106,20 @@ $cabObjs += Build-Object 'cab' 'src\Cab.cpp' @('/DOCID_CAB_BUILD')
 $cabLib = Join-Path $out 'ocid_cab.wcos.lib'
 Build-Dll 'cab' 'ocid_cab' $cabObjs @("`"$commonLib`"", 'cabinet.lib')
 
+# ---- 3b) vhd（虚拟磁盘：VirtDisk.dll + GPT 分区表）----
+$vhdObjs = @()
+$vhdObjs += Build-Object 'vhd' 'src\Vhd.cpp' @('/DOCID_VHD_BUILD')
+$vhdLib = Join-Path $out 'ocid_vhd.wcos.lib'
+Build-Dll 'vhd' 'ocid_vhd' $vhdObjs @("`"$commonLib`"", 'virtdisk.lib', 'ole32.lib', 'uuid.lib')
+
+
 # ---- 4) exe ----
 $exeObjs = @()
 $exeObjs += Build-Object 'imagegen' 'tools\imagegen.cpp'
 $exe = Join-Path $out 'ocid_imagegen.exe'
 $planLib = Join-Path $out 'ocid_plan.wcos.lib'
 $exeObjArgs = ($exeObjs | ForEach-Object { '"' + $_ + '"' }) -join ' '
-$linkLines = @("link /nologo /OUT:`"$exe`" $exeObjArgs `"$planLib`" `"$cabLib`" `"$commonLib`"")
+$linkLines = @("link /nologo /OUT:`"$exe`" $exeObjArgs `"$planLib`" `"$cabLib`" `"$vhdLib`" `"$commonLib`" virtdisk.lib ole32.lib")
 $null = Invoke-Batch 'imagegen' $linkLines
 Write-Host "[build] OK ocid_imagegen.exe"
 

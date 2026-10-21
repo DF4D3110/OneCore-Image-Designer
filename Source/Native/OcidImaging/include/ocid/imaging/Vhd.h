@@ -1,0 +1,91 @@
+// OCID Imaging —— 虚拟磁盘（VHDX）层。
+//
+// 这一层只做“把一个 .vhdx 建出来、挂上去、拿到它的物理盘路径、写分区表、卸下来”。
+// 它对应 imageapp 里 ImageStorageService 的 CreateVirtualHardDisk / AttachVirtualHardDisk /
+// PartitionVirtualHardDisk 这一小簇能力（那一簇本身走的是公开的 VirtDisk.dll）。
+//
+// 【为什么不用 imagestorageservice.dll】真 Storage Spaces 的池是 image core 私有的 SDB 栈
+// （私有 IOCTL 0x7C0F4 + 盘上元数据），见 D:\ADK2022Wrokspace\IMAGING-VHD-STUDY.md；
+// 这里先实现“单 VHDX + GPT 分区”的 B 方案，行为可逐项核对。
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#ifdef OCID_VHD_BUILD
+#define OCID_VHD_API __declspec(dllexport)
+#else
+#define OCID_VHD_API __declspec(dllimport)
+#endif
+
+namespace ocid
+{
+namespace imaging
+{
+    enum class VhdKind
+    {
+        Dynamic,
+        Fixed,
+    };
+
+    struct VhdInfo
+    {
+        std::string path;          // UTF-8 文件路径
+        std::uint64_t fileBytes = 0;
+        std::uint64_t virtualBytes = 0;
+        std::uint32_t blockSize = 0;
+        std::uint32_t physicalSectorSize = 0;
+        bool attached = false;
+        std::string devicePath;    // 已挂载时形如 \\.\PhysicalDriveN
+        std::string diskId;        // GPT 磁盘 GUID（若已分区）
+        std::uint32_t partitionCount = 0;
+    };
+
+    // 一个 GPT 分区（与设备布局里的 <Partition> 一一对应）。
+    struct VhdPartition
+    {
+        std::string name;          // GPT 分区名（最长 36 个 UTF-16 字符）
+        std::string type;          // {'57434f53-...'} 形式的 GUID 文本
+        std::string id;            // 分区 GUID 文本；空则自动生成
+        std::uint64_t offsetBytes = 0;
+        std::uint64_t sizeBytes = 0;
+        std::uint64_t attributes = 0;
+    };
+
+    OCID_VHD_API std::string VhdVersion();
+
+    // 建一个 VHDX。virtualBytes 必须是 MB 的整数倍（VirtDisk 的硬要求）。
+    OCID_VHD_API bool VhdCreate(const std::wstring& path,
+                                std::uint64_t virtualBytes,
+                                VhdKind kind,
+                                std::uint32_t blockSize,
+                                std::uint32_t physicalSectorSize,
+                                std::string& error);
+
+    // 挂载（读写），成功后 devicePath 形如 \\.\PhysicalDriveN。
+    OCID_VHD_API bool VhdAttach(const std::wstring& path,
+                                bool readOnly,
+                                std::string& devicePath,
+                                std::string& error);
+
+    OCID_VHD_API bool VhdDetach(const std::wstring& path, std::string& error);
+
+    // 查询：不挂载也能拿到虚拟容量/块大小；已挂载时补 devicePath。
+    OCID_VHD_API bool VhdQuery(const std::wstring& path, VhdInfo& info, std::string& error);
+
+    // 写 GPT：清掉已有分区表，按 parts 顺序建（offset/size 用字节，内部换算成扇区）。
+    OCID_VHD_API bool VhdWriteGpt(const std::string& devicePath,
+                                  const std::string& diskId,
+                                  const std::vector<VhdPartition>& parts,
+                                  std::uint32_t sectorSize,
+                                  std::string& error);
+
+    // 读回磁盘上的 GPT（用于验收：分区数、每段的 GUID/偏移/大小）。
+    OCID_VHD_API bool VhdReadGpt(const std::string& devicePath,
+                                 std::string& diskId,
+                                 std::vector<VhdPartition>& parts,
+                                 std::uint32_t& sectorSize,
+                                 std::string& error);
+}
+}
