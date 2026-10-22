@@ -37,6 +37,7 @@ struct UpdateRequest
     unsigned int poolVersion = 24;
     std::wstring stagingDirectory;      // 服务临时目录 + UpdateDLL 的 AlternateStagingLocation
     std::vector<std::wstring> spaces;   // 要挂上并取 store id 的 space 名（布局里的 StoreType）
+    std::wstring mainOsSpaceName;       // 含 MainOS 分区的 space 名（AssignMountPoints 需要它的 store 句柄）
     std::vector<std::wstring> deviceLayoutPaths;  // 传给 SetAllDeviceLayoutPaths
     std::wstring driveLetterConfigPath; // 可为空
     std::wstring actionListFile;

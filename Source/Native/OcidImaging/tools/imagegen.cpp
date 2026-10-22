@@ -2669,6 +2669,290 @@ int CmdLayout(const std::vector<std::string>& args)
         return nullptr;
     }
 
+    // 以子进程方式运行自身命令，并带超时 + 作业对象强杀。
+    // 服务侧调用（ImageStorageService/UpdateDLL）可能在内核里永久挂起，
+    // 父进程绝不能跟着挂：超时后 TerminateJobObject，保证“结束进程时结束干净”。
+    static bool RunSelfWithTimeout(const std::vector<std::string>& childArgs, unsigned long timeoutMs,
+                                   unsigned long& exitCode, std::string& error)
+    {
+        wchar_t self[MAX_PATH * 4];
+        const DWORD selfLen = GetModuleFileNameW(nullptr, self, static_cast<DWORD>(sizeof(self) / sizeof(self[0])));
+        if (selfLen == 0)
+        {
+            error = "取自身路径失败（win32=" + std::to_string(GetLastError()) + "）";
+            return false;
+        }
+        std::wstring cmd = L"\"" + std::wstring(self, selfLen) + L"\"";
+        for (const std::string& a : childArgs)
+        {
+            cmd += L" \"";
+            cmd += Utf8ToWide(a);
+            cmd += L"\"";
+        }
+
+        HANDLE job = CreateJobObjectW(nullptr, nullptr);
+        if (job != nullptr)
+        {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info, sizeof(info));
+        }
+
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        std::vector<wchar_t> buffer(cmd.begin(), cmd.end());
+        buffer.push_back(0);
+        if (!CreateProcessW(nullptr, buffer.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED,
+                            nullptr, nullptr, &si, &pi))
+        {
+            const DWORD rc = GetLastError();
+            if (job != nullptr) CloseHandle(job);
+            error = "启动子进程失败（win32=" + std::to_string(rc) + "）";
+            return false;
+        }
+        if (job != nullptr) AssignProcessToJobObject(job, pi.hProcess);
+        ResumeThread(pi.hThread);
+        CloseHandle(pi.hThread);
+
+        const DWORD wait = WaitForSingleObject(pi.hProcess, timeoutMs);
+        if (wait == WAIT_TIMEOUT)
+        {
+            if (job != nullptr) TerminateJobObject(job, 0xE0000002);
+            else TerminateProcess(pi.hProcess, 0xE0000002);
+            WaitForSingleObject(pi.hProcess, 5000);
+            CloseHandle(pi.hProcess);
+            if (job != nullptr) CloseHandle(job);
+            error = "子进程超时（" + std::to_string(timeoutMs) + " ms）已强制结束";
+            return false;
+        }
+        DWORD code = 0;
+        GetExitCodeProcess(pi.hProcess, &code);
+        exitCode = code;
+        CloseHandle(pi.hProcess);
+        if (job != nullptr) CloseHandle(job);
+        return true;
+    }
+
+    // 与 RunSelfWithTimeout 相同，但整条命令行由调用方给出（可带 NSudo 前缀）。
+    static bool RunCommandWithTimeout(const std::wstring& cmdline, unsigned long timeoutMs,
+                                      unsigned long& exitCode, std::string& error)
+    {
+        HANDLE job = CreateJobObjectW(nullptr, nullptr);
+        if (job != nullptr)
+        {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info, sizeof(info));
+        }
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        std::vector<wchar_t> buffer(cmdline.begin(), cmdline.end());
+        buffer.push_back(0);
+        if (!CreateProcessW(nullptr, buffer.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED,
+                            nullptr, nullptr, &si, &pi))
+        {
+            const DWORD rc = GetLastError();
+            if (job != nullptr) CloseHandle(job);
+            error = "\u542f\u52a8\u5b50\u8fdb\u7a0b\u5931\u8d25\uff08win32=" + std::to_string(rc) + "\uff09";
+            return false;
+        }
+        if (job != nullptr) AssignProcessToJobObject(job, pi.hProcess);
+        ResumeThread(pi.hThread);
+        CloseHandle(pi.hThread);
+        const DWORD wait = WaitForSingleObject(pi.hProcess, timeoutMs);
+        if (wait == WAIT_TIMEOUT)
+        {
+            if (job != nullptr) TerminateJobObject(job, 0xE0000002);
+            else TerminateProcess(pi.hProcess, 0xE0000002);
+            WaitForSingleObject(pi.hProcess, 5000);
+            CloseHandle(pi.hProcess);
+            if (job != nullptr) CloseHandle(job);
+            error = "\u5b50\u8fdb\u7a0b\u8d85\u65f6\uff08" + std::to_string(timeoutMs) + " ms\uff09\u5df2\u5f3a\u5236\u7ed3\u675f";
+            return false;
+        }
+        DWORD code = 0;
+        GetExitCodeProcess(pi.hProcess, &code);
+        exitCode = code;
+        CloseHandle(pi.hProcess);
+        if (job != nullptr) CloseHandle(job);
+        return true;
+    }
+
+    // \u67e5\u627e NSudo.exe\uff08\u4ee5 TrustedInstaller \u8eab\u4efd\u91cd\u542f\u81ea\u5df1\u7528\uff09\u3002
+    static bool FileExistsNotDir(const std::wstring& path)
+    {
+        const DWORD attrs = GetFileAttributesW(path.c_str());
+        return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+    }
+
+    static std::wstring FindNsudo()
+    {
+        const char* env = std::getenv("OCID_NSUDO");
+        if (env != nullptr && env[0] != '\0')
+        {
+            const std::wstring candidate = Utf8ToWide(env);
+            if (FileExistsNotDir(candidate)) return candidate;
+        }
+        const wchar_t* roots[] = { L"D:\\apps", L"C:\\apps", L"D:\\Tools", L"C:\\Tools" };
+        for (const wchar_t* root : roots)
+        {
+            std::error_code ec;
+            std::filesystem::directory_iterator it(root, std::filesystem::directory_options::skip_permission_denied, ec);
+            std::filesystem::directory_iterator end;
+            for (; it != end; it.increment(ec))
+            {
+                if (ec)
+                {
+                    ec.clear();
+                    continue;
+                }
+                std::error_code typeError;
+                if (!it->is_directory(typeError) || typeError) continue;
+                std::wstring name = it->path().filename().wstring();
+                for (wchar_t& ch : name) ch = static_cast<wchar_t>(towlower(ch));
+                if (name.rfind(L"nsudo", 0) != 0) continue;
+                for (const wchar_t* archDir : { L"Win32", L"x64" })
+                {
+                    const std::wstring candidate = (it->path() / archDir / L"NSudo.exe").wstring();
+                    if (FileExistsNotDir(candidate)) return candidate;
+                }
+            }
+        }
+        return std::wstring();
+    }
+
+    // 扫描候选目录下我们自己造过的 .vhd/.vhdx，报告挂载状态，可强制清理。
+    static void CollectVhdxFiles(const std::filesystem::path& root, std::vector<std::filesystem::path>& out)
+    {
+        std::error_code ec;
+        std::filesystem::recursive_directory_iterator it(root, std::filesystem::directory_options::skip_permission_denied, ec);
+        std::filesystem::recursive_directory_iterator end;
+        for (; it != end; it.increment(ec))
+        {
+            if (ec)
+            {
+                ec.clear();
+                continue;
+            }
+            std::error_code typeError;
+            if (!it->is_regular_file(typeError) || typeError) continue;
+            std::wstring ext = it->path().extension().wstring();
+            for (wchar_t& ch : ext) ch = static_cast<wchar_t>(towlower(ch));
+            if (ext == L".vhdx" || ext == L".vhd") out.push_back(it->path());
+        }
+    }
+
+    static int CmdDoctor(const std::vector<std::string>& args)
+    {
+        const std::string sub = args.size() > 2 ? LowerText(args[2]) : std::string("disks");
+        if (sub == "help" || sub == "--help")
+        {
+            OutLn("用法：");
+            OutLn("  doctor disks [--clean] [--kill] [--root <目录>]   列出/强制卸载我们造过的虚拟磁盘");
+            return 0;
+        }
+        if (sub != "disks")
+        {
+            Err("doctor 只支持 disks（收到：" + sub + "）");
+            return 2;
+        }
+        bool clean = false, killHolders = false;
+        std::vector<std::string> roots;
+        for (std::size_t i = 3; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            if (a == "--clean") clean = true;
+            else if (a == "--kill") killHolders = true;
+            else if (a == "--root")
+            {
+                if (i + 1 >= args.size())
+                {
+                    Err("--root 缺少值");
+                    return 2;
+                }
+                roots.push_back(args[++i]);
+            }
+            else
+            {
+                Err("未知参数：" + a);
+                return 2;
+            }
+        }
+        if (roots.empty())
+        {
+            roots.push_back("D:\\ADK2022Wrokspace");
+            wchar_t temp[MAX_PATH * 2];
+            const DWORD tempLen = GetTempPathW(static_cast<DWORD>(sizeof(temp) / sizeof(temp[0])), temp);
+            if (tempLen > 0 && tempLen < sizeof(temp) / sizeof(temp[0]))
+                roots.push_back(WideToUtf8(std::wstring(temp, tempLen)));
+        }
+
+        std::vector<std::filesystem::path> files;
+        for (const std::string& root : roots)
+        {
+            if (!DirExists(Utf8ToWide(root)))
+            {
+                OutLn("跳过不存在的目录：" + root);
+                continue;
+            }
+            CollectVhdxFiles(std::filesystem::path(Utf8ToWide(root)), files);
+        }
+        if (files.empty())
+        {
+            OutLn("没有找到 .vhd/.vhdx 文件（扫描根：" + roots.front() + " 等）");
+            return 0;
+        }
+
+        unsigned int attachedCount = 0;
+        unsigned int cleaned = 0;
+        for (const std::filesystem::path& file : files)
+        {
+            const std::wstring wide = file.wstring();
+            bool attached = false;
+            std::string error;
+            if (!VhdIsAttached(wide, attached, error))
+            {
+                OutLn("  ?? " + WideToUtf8(wide) + "：" + error);
+                continue;
+            }
+            if (!attached)
+            {
+                OutLn("  ok " + WideToUtf8(wide));
+                continue;
+            }
+            ++attachedCount;
+            OutLn("  !! " + WideToUtf8(wide) + "（已挂载）");
+            if (!clean) continue;
+            std::vector<std::string> child;
+            child.push_back("vhd");
+            child.push_back("detach");
+            child.push_back(WideToUtf8(wide));
+            child.push_back("--force");
+            if (killHolders) child.push_back("--kill");
+            unsigned long childExit = 0;
+            std::string childError;
+            if (!RunSelfWithTimeout(child, 45000, childExit, childError))
+            {
+                Err("    强制卸载未完成：" + childError);
+                continue;
+            }
+            if (childExit == 0)
+            {
+                ++cleaned;
+                OutLn("    已强制卸载");
+            }
+            else
+            {
+                Err("    强制卸载失败（退出码 " + std::to_string(childExit) + "）");
+            }
+        }
+        OutLn("合计 " + std::to_string(files.size()) + " 个虚拟磁盘，其中挂载 " + std::to_string(attachedCount) +
+              " 个" + (clean ? "，已清理 " + std::to_string(cleaned) + " 个" : "（加 --clean 清理）"));
+        return attachedCount == 0 || cleaned == attachedCount ? 0 : 1;
+    }
+
     int CmdDisk(const std::vector<std::string>& args)
     {
         if (args.size() < 3 || WantsHelp(args))
@@ -2953,7 +3237,7 @@ int CmdLayout(const std::vector<std::string>& args)
         std::uint64_t size = 0, block = 0;
         std::uint32_t sectorSize = 512;
         bool fixed = false, readOnly = false, dry = false, keepAttached = false, wantPartitions = false;
-        bool apply = false, physicalView = false;
+        bool apply = false, physicalView = false, force = false, killHolders = false;
 
         for (std::size_t i = 3; i < args.size(); ++i)
         {
@@ -2971,6 +3255,8 @@ int CmdLayout(const std::vector<std::string>& args)
             else if (a == "--apply") apply = true;
             else if (a == "--physical") physicalView = true;
             else if (a == "--partition") wantPartitions = true;
+            else if (a == "--force") force = true;
+            else if (a == "--kill") killHolders = true;
             else if (a == "--size") { std::string v; if (!next(v)) { Err("--size 缺少值"); return 2; } size = VhdScaled(v); }
             else if (a == "--block") { std::string v; if (!next(v)) { Err("--block 缺少值"); return 2; } block = VhdScaled(v); }
             else if (a == "--sector") { std::string v; if (!next(v)) { Err("--sector 缺少值"); return 2; } sectorSize = static_cast<std::uint32_t>(VhdScaled(v)); }
@@ -3021,12 +3307,42 @@ int CmdLayout(const std::vector<std::string>& args)
 
         if (sub == "detach")
         {
+            if (force || killHolders)
+            {
+                std::vector<std::string> forceReport;
+                if (!VhdForceDetach(wideFile, killHolders, forceReport, error))
+                {
+                    for (const std::string& line : forceReport) OutLn("  " + line);
+                    Err("强制卸载失败：" + error);
+                    return 1;
+                }
+                for (const std::string& line : forceReport) OutLn("  " + line);
+                OutLn("已卸载：" + file);
+                return 0;
+            }
             if (!VhdDetach(wideFile, error))
             {
                 Err("卸载失败：" + error);
                 return 1;
             }
             OutLn("已卸载：" + file);
+            return 0;
+        }
+
+        if (sub == "status")
+        {
+            bool attached = false;
+            if (!VhdIsAttached(wideFile, attached, error))
+            {
+                Err("检查失败：" + error);
+                return 1;
+            }
+            OutLn("文件：" + file);
+            OutLn("挂载：" + std::string(attached ? "是" : "否"));
+            VhdInfo info;
+            std::string infoError;
+            if (VhdQuery(wideFile, info, infoError))
+                OutLn("虚拟容量：" + FormatBytes(info.virtualBytes) + "，文件 " + FormatBytes(info.fileBytes));
             return 0;
         }
 
@@ -3652,6 +3968,9 @@ int CmdLayout(const std::vector<std::string>& args)
         bool stageOnly = false;
         bool keepOpen = false;
         bool dry = false;
+        bool worker = false;
+        bool ti = false;
+        unsigned long timeoutSec = 1800;
 
         for (std::size_t i = 2; i < args.size(); ++i)
         {
@@ -3683,6 +4002,14 @@ int CmdLayout(const std::vector<std::string>& args)
                 version = static_cast<unsigned int>(std::strtoul(v.c_str(), nullptr, 0));
             }
             else if (a == "--store-style") { if (!next(storeStyle)) { Err("--store-style 缺少值"); return 2; } }
+            else if (a == "--worker") worker = true;
+            else if (a == "--ti") ti = true;
+            else if (a == "--timeout")
+            {
+                std::string v;
+                if (!next(v)) { Err("--timeout 缺少值"); return 2; }
+                timeoutSec = static_cast<unsigned long>(std::strtoul(v.c_str(), nullptr, 0));
+            }
             else if (a == "--stage-only") stageOnly = true;
             else if (a == "--keep-open") keepOpen = true;
             else if (a == "--dry") dry = true;
@@ -3707,6 +4034,100 @@ int CmdLayout(const std::vector<std::string>& args)
             EnsureDirectory(Utf8ToWide(stagingDir), mkError);
         }
 
+        if (!worker)
+        {
+            // 父进程只负责三件事：拉起子进程（可 TM/超时强杀）、收尸、清理。
+            // 真正碰 ImageStorageService / UpdateDLL 的代码全部在子进程里跑。
+            std::vector<std::string> childArgs;
+            for (std::size_t k = 1; k < args.size(); ++k)
+            {
+                if (args[k] == "--worker" || args[k] == "--ti") continue;
+                if (args[k] == "--timeout")
+                {
+                    ++k;
+                    continue;
+                }
+                childArgs.push_back(args[k]);
+            }
+            childArgs.push_back("--worker");
+            wchar_t self[MAX_PATH * 4];
+            const DWORD selfLen = GetModuleFileNameW(nullptr, self, static_cast<DWORD>(sizeof(self) / sizeof(self[0])));
+            if (selfLen == 0)
+            {
+                Err("\u53d6\u81ea\u8eab\u8def\u5f84\u5931\u8d25");
+                return 1;
+            }
+            std::wstring cmdline = L"\"" + std::wstring(self, selfLen) + L"\"";
+            for (const std::string& a : childArgs)
+            {
+                cmdline += L" \"";
+                cmdline += Utf8ToWide(a);
+                cmdline += L"\"";
+            }
+            if (ti)
+            {
+                const std::wstring nsudo = FindNsudo();
+                if (nsudo.empty())
+                {
+                    Err("\u627e\u4e0d\u5230 NSudo.exe\uff08\u53ef\u7528 OCID_NSUDO \u6307\u5b9a\uff09\uff0c\u65e0\u6cd5\u4ee5 TrustedInstaller \u8eab\u4efd\u843d\u5305");
+                    return 1;
+                }
+                cmdline = L"\"" + nsudo + L"\" -U:T -P:E -M:S -Wait " + cmdline;
+                OutLn("\u4ee5 TrustedInstaller \u8eab\u4efd\u8fd0\u884c\u843d\u5305\u5b50\u8fdb\u7a0b");
+            }
+            OutLn("\u843d\u5305\u5b50\u8fdb\u7a0b\u8d85\u65f6\uff1a" + std::to_string(timeoutSec) + " \u79d2" +
+                  (ti ? "\uff08TI\uff09" : "") + "\uff0c\u7ed3\u675f\u540e\u81ea\u52a8\u6e05\u7406\u6302\u8f7d\u3002");
+            unsigned long childExit = 0;
+            std::string childError;
+            const bool finished = RunCommandWithTimeout(cmdline, timeoutSec * 1000, childExit, childError);
+            if (!finished) Err("\u843d\u5305\u5b50\u8fdb\u7a0b\u672a\u6b63\u5e38\u7ed3\u675f\uff1a" + childError);
+
+            // \u5b50\u8fdb\u7a0b\u88ab\u5f3a\u6740\u65f6\uff0cspace \u4e0e\u57fa\u5ea7\u76d8\u7684\u5378\u8f7d\u7531\u7236\u8fdb\u7a0b\u6536\u5e72\u51c0\u3002
+            std::string deviceFromChild;
+            {
+                std::ifstream in((outDir + "\\ocid-device.txt").c_str());
+                std::string line;
+                if (std::getline(in, line)) deviceFromChild = line;
+            }
+            if (!deviceFromChild.empty() && !layoutPath.empty())
+            {
+                std::vector<std::string> child;
+                child.push_back("pool");
+                child.push_back("detach");
+                child.push_back("--vhd");
+                child.push_back(deviceFromChild);
+                child.push_back("--layout");
+                child.push_back(layoutPath);
+                child.push_back("--dir");
+                child.push_back(stagingDir);
+                unsigned long cleanupExit = 0;
+                std::string cleanupError;
+                if (!RunSelfWithTimeout(child, 60000, cleanupExit, cleanupError))
+                    Err("\u6536\u5c3e\uff08\u91ca\u653e\u6c60 space\uff09\uff1a" + cleanupError);
+                else if (cleanupExit != 0)
+                    Err("\u6536\u5c3e\uff08\u91ca\u653e\u6c60 space\uff09\u9000\u51fa\u7801 " + std::to_string(cleanupExit));
+            }
+            std::string baseVhd = imagePath;
+            if (baseVhd.size() > 4 && baseVhd.compare(0, 4, "\\\\.\\") == 0) baseVhd.clear();
+            if (!baseVhd.empty())
+            {
+                std::vector<std::string> child;
+                child.push_back("vhd");
+                child.push_back("detach");
+                child.push_back(baseVhd);
+                child.push_back("--force");
+                child.push_back("--kill");
+                unsigned long cleanupExit = 0;
+                std::string cleanupError;
+                if (!RunSelfWithTimeout(child, 60000, cleanupExit, cleanupError))
+                    Err("\u6536\u5c3e\uff08\u5f3a\u5236\u5378\u8f7d\uff09\uff1a" + cleanupError);
+                else if (cleanupExit != 0)
+                    Err("\u6536\u5c3e\uff08\u5f3a\u5236\u5378\u8f7d\uff09\u9000\u51fa\u7801 " + std::to_string(cleanupExit));
+            }
+            if (!finished) return 1;
+            return childExit == 0 ? 0 : 1;
+        }
+
         // 池载体磁盘在流水线内不得卸载：有 SPACEDB 时 DetachVirtualDisk 会挂住；
         // 需要冷却残留挂载时请重启，或先 pool finalize 释放 space。本命令不主动卸载。
 
@@ -3721,8 +4142,13 @@ int CmdLayout(const std::vector<std::string>& args)
         const unsigned int poolVersion = LayoutPoolVersion(poolGroup, version);
         const std::vector<LayoutStore>& spaceStores = poolGroup != nullptr ? poolGroup->stores : model.pools;
         std::vector<std::wstring> spaceNames;
+        std::wstring mainOsSpaceName;
         for (const LayoutStore& store : spaceStores)
         {
+            for (const LayoutPartition& part : store.partitions)
+            {
+                if (EqualsNoCase(part.name, "MainOS")) mainOsSpaceName = Utf8ToWide(store.storeType);
+            }
             if (store.storeType.empty()) continue;
             bool wanted = spaceOnly.empty();
             for (const std::string& only : spaceOnly)
@@ -3764,6 +4190,8 @@ int CmdLayout(const std::vector<std::string>& args)
         request.poolVersion = poolVersion;
         request.stagingDirectory = Utf8ToWide(stagingDir);
         request.spaces = spaceNames;
+        request.mainOsSpaceName = mainOsSpaceName;
+        if (mainOsSpaceName.empty()) OutLn("提示：布局里没有 MainOS 分区，落包将无法挂载 MainOS");
         request.deviceLayoutPaths.push_back(Utf8ToWide(layoutPath));
         if (!driveLetterConfig.empty()) request.driveLetterConfigPath = Utf8ToWide(driveLetterConfig);
         request.actionListFile = Utf8ToWide(actionList);
@@ -3800,28 +4228,56 @@ int CmdLayout(const std::vector<std::string>& args)
             OutLn("已挂载：" + devicePath);
         }
         request.imagePath = Utf8ToWide(devicePath);
+        {
+            std::ofstream deviceOut((outDir + "\\ocid-device.txt").c_str(), std::ios::trunc);
+            if (deviceOut) deviceOut << devicePath << "\n";
+        }
 
         std::vector<std::string> report;
         const bool applied = UpdateApply(request, report, error);
         for (const std::string& line : report) OutLn("  " + line);
-        if (!keepOpen)
+        if (!keepOpen && !worker)
         {
-            std::vector<std::string> detachReport;
-            std::string detachError;
-            if (ocid::imaging::PoolDetachSpaces(Utf8ToWide(devicePath), widePool, poolVersion, Utf8ToWide(stagingDir),
-                                                 spaceNames, detachReport, detachError))
+            // 收尾统一走子进程 + 超时：服务侧调用可能在内核里挂死，父进程必须能强制结束它。
+            auto runChild = [&](const std::vector<std::string>& childArgs, const char* what) -> bool
             {
-                for (const std::string& line : detachReport) OutLn("  " + line);
-            }
-            else
+                unsigned long childExit = 0;
+                std::string childError;
+                OutLn(std::string("  收尾：") + what);
+                if (!RunSelfWithTimeout(childArgs, 60000, childExit, childError))
+                {
+                    Err(std::string("  收尾（") + what + "）未完成：" + childError);
+                    return false;
+                }
+                if (childExit != 0)
+                {
+                    Err(std::string("  收尾（") + what + "）退出码 " + std::to_string(childExit));
+                    return false;
+                }
+                return true;
+            };
+            if (!layoutPath.empty() && !stagingDir.empty())
             {
-                Err("收尾卸载失败：" + detachError);
+                std::vector<std::string> child;
+                child.push_back("pool");
+                child.push_back("detach");
+                child.push_back("--vhd");
+                child.push_back(devicePath);
+                child.push_back("--layout");
+                child.push_back(layoutPath);
+                child.push_back("--dir");
+                child.push_back(stagingDir);
+                runChild(child, "释放池 space");
             }
             if (!vhdFile.empty())
             {
-                std::string detachBaseError;
-                if (VhdDetach(Utf8ToWide(vhdFile), detachBaseError)) OutLn("  基座磁盘已卸载");
-                else Err("基座磁盘卸载失败：" + detachBaseError);
+                std::vector<std::string> child;
+                child.push_back("vhd");
+                child.push_back("detach");
+                child.push_back(vhdFile);
+                child.push_back("--force");
+                child.push_back("--kill");
+                runChild(child, "强制卸载基座磁盘");
             }
         }
         if (!applied)
@@ -4143,6 +4599,7 @@ int wmain(int argc, wchar_t** wargv)
     if (command == "disk") return CmdDisk(args);
     if (command == "pool") return CmdPool(args);
     if (command == "apply") return CmdApply(args);
+    if (command == "doctor") return CmdDoctor(args);
     if (command == "layout")
     {
         return CmdLayout(args);

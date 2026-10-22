@@ -114,13 +114,39 @@ std::string NarrowPath(const std::wstring& text)
 bool EnsureDirTreeLocal(const std::wstring& path, std::string& error)
 {
     if (path.empty()) { error = "empty directory path"; return false; }
-    std::wstring current;
-    for (std::size_t i = 0; i < path.size(); ++i)
+    // 设备路径（\\?\Volume{..}\、\\?\C:\、\\server\share\）的前缀不能拿去 CreateDirectoryW，
+    // 否则会得到 ERROR_INVALID_NAME(123)；先切出前缀，再逐段创建。
+    std::size_t start = 0;
+    if (path.size() >= 4 && path.compare(0, 4, L"\\\\?\\") == 0) start = 4;
+    else if (path.size() >= 4 && path.compare(0, 4, L"\\??\\") == 0) start = 4;
+    else if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\') start = 2;
+    const std::size_t slash = path.find_first_of(L"\\/", start);
+    const std::size_t prefixEnd = (slash == std::wstring::npos) ? path.size() : slash + 1;
+    if (prefixEnd >= path.size()) return true;
+
+    std::wstring current = path.substr(0, prefixEnd);
+    for (std::size_t i = prefixEnd; i < path.size(); ++i)
     {
-        current.push_back(path[i]);
-        const bool slash = (path[i] == L'\\' || path[i] == L'/');
-        if (!slash || i + 1 == path.size()) continue;
-        if (current.size() <= 1 || (current.size() == 3 && current[1] == L':')) continue;
+        const wchar_t ch = path[i];
+        if (ch == L'\\' || ch == L'/')
+        {
+            if (i + 1 == path.size()) break;
+            if (!CreateDirectoryW(current.c_str(), nullptr))
+            {
+                const DWORD code = GetLastError();
+                if (code != ERROR_ALREADY_EXISTS)
+                {
+                    error = "CreateDirectoryW failed (win32=" + std::to_string(code) + ")";
+                    return false;
+                }
+            }
+            current.push_back(ch);
+            continue;
+        }
+        current.push_back(ch);
+    }
+    if (!current.empty() && current.back() != L'\\' && current.back() != L'/')
+    {
         if (!CreateDirectoryW(current.c_str(), nullptr))
         {
             const DWORD code = GetLastError();
@@ -139,6 +165,7 @@ bool EnsureDirTreeLocal(const std::wstring& path, std::string& error)
 bool CreateEmptyUpdateOsWim(const std::wstring& mainOsPath, const std::wstring& tempRoot, std::string& error)
 {
     std::wstring base = mainOsPath;
+    if (base.size() >= 4 && base.compare(0, 4, L"\\??\\") == 0) base = L"\\\\?\\" + base.substr(4);
     if (!base.empty() && base.back() != L'\\' && base.back() != L'/') base.push_back(L'\\');
     const std::wstring wimPath = base + L"PROGRAMS\\UpdateOS\\UpdateOS.wim";
     std::wstring dir = wimPath;
@@ -252,7 +279,7 @@ bool UpdateApply(const UpdateRequest& request, std::vector<std::string>& report,
     OutLn("[apply] mounting pool spaces ...");
     std::wstring mainOsPath;
     if (!PoolMountForUpdate(request.imagePath, request.poolName, request.poolVersion,
-                            request.stagingDirectory, request.spaces, storeIds, mainOsPath,
+                            request.stagingDirectory, request.spaces, request.mainOsSpaceName, storeIds, mainOsPath,
                             attachReport, error))
     {
         FreeLibrary(module);
@@ -312,10 +339,8 @@ bool UpdateApply(const UpdateRequest& request, std::vector<std::string>& report,
         {
             SetEnvironmentVariableW(L"MIXED_RUNTIME_PROJECTION", L"1");
         }
-        if (!layoutPointers.empty() && setLayouts != nullptr)
-        {
-            setLayouts(context, layoutPointers.data(), static_cast<int>(layoutPointers.size()));
-        }
+        // 参照 ImageApp：Initialize 之前不设布局（布局在 PrepareUpdate 阶段设），
+        // 提前设会让 UpdateDLL 在 store 还没就绪时去找布局里的分区，返回 0x80070490。
         OutLn("[apply] Initialize(InitForInput) ...");
         int rc = initialize(context, storeCount, flat.data(), request.actionListFile.c_str(),
                             request.packagesRoot.c_str(), request.updateInputFile.c_str(),

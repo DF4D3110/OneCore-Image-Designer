@@ -1,4 +1,4 @@
-# build-imaging.ps1 —— 构建 OcidImaging 工程（ocid_imagegen.exe + *.wcos.dll）
+﻿# build-imaging.ps1 —— 构建 OcidImaging 工程（ocid_imagegen.exe + *.wcos.dll）
 #
 # 为什么要独立脚本（不复用 build-servicing.ps1）：
 #   build-servicing.ps1 以 OcidServicing 为根，输出目录/obj 命名都按那边的约定，
@@ -110,13 +110,13 @@ Build-Dll 'cab' 'ocid_cab' $cabObjs @("`"$commonLib`"", 'cabinet.lib')
 $vhdObjs = @()
 $vhdObjs += Build-Object 'vhd' 'src\Vhd.cpp' @('/DOCID_VHD_BUILD')
 $vhdLib = Join-Path $out 'ocid_vhd.wcos.lib'
-Build-Dll 'vhd' 'ocid_vhd' $vhdObjs @("`"$commonLib`"", 'virtdisk.lib', 'ole32.lib', 'uuid.lib')
+Build-Dll 'vhd' 'ocid_vhd' $vhdObjs @("`"$commonLib`"", 'virtdisk.lib', 'ole32.lib', 'uuid.lib', 'rstrtmgr.lib')
 # ---- 3c) pool (ImageStorageService.dll wrapper: pool/space) ----
 $poolObjs = @()
 $poolObjs += Build-Object 'pool' 'src\Pool.cpp' @('/DOCID_POOL_BUILD')
 $poolObjs += Build-Object 'pool' 'src\PoolMount.cpp' @('/DOCID_POOL_BUILD')
 $poolLib = Join-Path $out 'ocid_pool.wcos.lib'
-Build-Dll 'pool' 'ocid_pool' $poolObjs @("`"$commonLib`"", 'advapi32.lib', "`"$vhdLib`"", 'advapi32.lib')
+Build-Dll 'pool' 'ocid_pool' $poolObjs @("`"$commonLib`"", 'advapi32.lib', "`"$vhdLib`"", 'user32.lib')
 
 
 

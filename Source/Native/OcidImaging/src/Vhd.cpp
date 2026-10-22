@@ -13,6 +13,8 @@
 #include <winioctl.h>
 #include <virtdisk.h>
 #include <objbase.h>
+#include <restartmanager.h>
+#include <cwctype>
 
 #include "ocid/imaging/Vhd.h"
 
@@ -719,6 +721,202 @@ namespace imaging
         }
         return true;
     }
+
+
+    // ================= 挂载状态与强制卸载 =================
+    namespace
+    {
+        std::string WideToUtf8Text(const std::wstring& text)
+        {
+            if (text.empty()) return std::string();
+            const int need = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+            if (need <= 1) return std::string();
+            std::string out(static_cast<std::size_t>(need - 1), '\0');
+            WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, &out[0], need, nullptr, nullptr);
+            return out;
+        }
+
+        std::wstring ProcessImagePathW(unsigned long pid)
+        {
+            HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            if (process == nullptr) return std::wstring();
+            wchar_t buffer[1024];
+            DWORD size = 1024;
+            std::wstring out;
+            if (QueryFullProcessImageNameW(process, 0, buffer, &size)) out.assign(buffer, size);
+            CloseHandle(process);
+            return out;
+        }
+
+        std::wstring LowerName(const std::wstring& path)
+        {
+            const std::size_t at = path.find_last_of(L"\\/");
+            std::wstring name = (at == std::wstring::npos) ? path : path.substr(at + 1);
+            for (wchar_t& ch : name) ch = static_cast<wchar_t>(towlower(ch));
+            return name;
+        }
+
+        // 只结束我们自己的工具进程：不动系统与其他软件。
+        bool IsKillableImage(const std::wstring& path)
+        {
+            const std::wstring name = LowerName(path);
+            return name == L"ocid_imagegen.exe" || name == L"nsudo.exe" || name == L"nsudoc.exe" ||
+                   name == L"nsudog.exe" || name == L"dism.exe";
+        }
+    }
+
+    bool VhdIsAttached(const std::wstring& imagePath, bool& attached, std::string& error)
+    {
+        attached = false;
+        HANDLE file = CreateFileW(imagePath.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                                  FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(file);
+            return true;
+        }
+        const DWORD rc = GetLastError();
+        if (rc == ERROR_SHARING_VIOLATION || rc == ERROR_LOCK_VIOLATION)
+        {
+            attached = true;
+            return true;
+        }
+        if (rc == ERROR_FILE_NOT_FOUND || rc == ERROR_PATH_NOT_FOUND)
+        {
+            error = "镜像文件不存在";
+            return false;
+        }
+        error = LastErrorText("检查镜像占用");
+        return false;
+    }
+
+    bool VhdHolders(const std::wstring& imagePath, std::vector<unsigned long>& pids, std::string& error)
+    {
+        pids.clear();
+        DWORD session = 0;
+        wchar_t key[CCH_RM_SESSION_KEY + 1] = {};
+        DWORD rc = RmStartSession(&session, 0, key);
+        if (rc != ERROR_SUCCESS)
+        {
+            error = "RmStartSession 失败（win32=" + std::to_string(rc) + "）";
+            return false;
+        }
+        const wchar_t* files[1] = { imagePath.c_str() };
+        rc = RmRegisterResources(session, 1, files, 0, nullptr, 0, nullptr);
+        if (rc != ERROR_SUCCESS)
+        {
+            RmEndSession(session);
+            error = "RmRegisterResources 失败（win32=" + std::to_string(rc) + "）";
+            return false;
+        }
+        UINT needed = 0;
+        UINT count = 0;
+        rc = RmGetList(session, &needed, &count, nullptr, nullptr);
+        if (rc == ERROR_SUCCESS && needed == 0)
+        {
+            RmEndSession(session);
+            return true;
+        }
+        if (rc != ERROR_MORE_DATA && rc != ERROR_SUCCESS)
+        {
+            RmEndSession(session);
+            error = "RmGetList 失败（win32=" + std::to_string(rc) + "）";
+            return false;
+        }
+        std::vector<RM_PROCESS_INFO> info(static_cast<std::size_t>(needed) + 4);
+        count = static_cast<UINT>(info.size());
+        rc = RmGetList(session, &needed, &count, info.data(), nullptr);
+        if (rc != ERROR_SUCCESS)
+        {
+            RmEndSession(session);
+            error = "RmGetList 失败（win32=" + std::to_string(rc) + "）";
+            return false;
+        }
+        for (UINT k = 0; k < count; ++k) pids.push_back(static_cast<unsigned long>(info[k].Process.dwProcessId));
+        RmEndSession(session);
+        return true;
+    }
+
+    bool VhdForceDetach(const std::wstring& imagePath, bool killHolders,
+                        std::vector<std::string>& report, std::string& error)
+    {
+        error.clear();
+        bool attached = false;
+        if (!VhdIsAttached(imagePath, attached, error)) return false;
+        if (!attached)
+        {
+            report.push_back("镜像未处于挂载状态");
+            return true;
+        }
+
+        for (int attempt = 0; attempt < 3; ++attempt)
+        {
+            HANDLE handle = INVALID_HANDLE_VALUE;
+            std::string detachError;
+            if (OpenVirtual(imagePath, VIRTUAL_DISK_ACCESS_DETACH, handle, detachError))
+            {
+                const DWORD rc = DetachVirtualDisk(handle, DETACH_VIRTUAL_DISK_FLAG_NONE, 0);
+                // 对 PERMANENT_LIFETIME 挂载的盘还要按永久语义再卸一次（此 SDK 头里没有该枚举值，取值 1）。
+                DetachVirtualDisk(handle, static_cast<DETACH_VIRTUAL_DISK_FLAG>(1), 0);
+                CloseHandle(handle);
+                char text[256];
+                std::snprintf(text, sizeof(text), "DetachVirtualDisk rc=%lu", static_cast<unsigned long>(rc));
+                report.push_back(text);
+            }
+            else
+            {
+                report.push_back("打开镜像失败：" + detachError);
+            }
+
+            if (!VhdIsAttached(imagePath, attached, error)) return false;
+            if (!attached)
+            {
+                report.push_back("已卸载");
+                return true;
+            }
+
+            std::vector<unsigned long> holders;
+            std::string holderError;
+            if (VhdHolders(imagePath, holders, holderError))
+            {
+                for (unsigned long pid : holders)
+                {
+                    const std::wstring image = ProcessImagePathW(pid);
+                    std::string line = "占用进程 pid=" + std::to_string(pid) + " " +
+                                       (image.empty() ? std::string("(无法读取)") : WideToUtf8Text(image));
+                    report.push_back(line);
+                    if (killHolders && IsKillableImage(image))
+                    {
+                        HANDLE process = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+                        if (process != nullptr)
+                        {
+                            const BOOL killed = TerminateProcess(process, 0xE0000001);
+                            CloseHandle(process);
+                            report.push_back(killed ? "已结束占用进程"
+                                                    : "结束占用进程失败");
+                        }
+                    }
+                }
+            }
+            else
+            {
+                report.push_back("查询占用进程失败：" + holderError);
+            }
+            Sleep(300);
+        }
+
+        if (!VhdIsAttached(imagePath, attached, error)) return false;
+        if (!attached)
+        {
+            report.push_back("已卸载");
+            return true;
+        }
+        error = "镜像仍处于挂载状态"
+                "（可能有内核侧 space/池依赖"
+                "，需重启或先 detach space）";
+        return false;
+    }
+
 
 }
 

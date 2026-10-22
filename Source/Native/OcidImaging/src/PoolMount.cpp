@@ -29,8 +29,25 @@ typedef long(__stdcall* OpenPoolFn)(void*, const wchar_t*, const wchar_t*, int, 
 typedef long(__stdcall* ClosePoolFn)(void*, void*, int);
 typedef long(__stdcall* AttachSpaceFn)(void*, void*, const wchar_t*, int, void**);
 typedef long(__stdcall* DetachSpaceFn)(void*, void*, const wchar_t*, int);
+// GetPartitionPath_Native 的 STORE_ID 参数是“按值”传（托管声明 storeId 而非 ref/out），
+// 20 字节结构会直接压栈；早前按指针传导致 ABI 错位，服务返回 0x80070490。
+#pragma pack(push, 4)
+struct StoreIdValue
+{
+    unsigned int storeType;
+    unsigned char guid[16];
+};
+#pragma pack(pop)
 typedef long(__stdcall* AssignMountPointsFn)(void*, void*, unsigned char*, unsigned int, int);
-typedef long(__stdcall* GetPartitionPathFn)(void*, const unsigned char*, const wchar_t*, wchar_t*, unsigned int, int);
+typedef long(__stdcall* GetPartitionPathFn)(void*, StoreIdValue, const wchar_t*, wchar_t*, unsigned int, int);
+static StoreIdValue ToStoreIdValue(const std::vector<unsigned char>& id)
+{
+    StoreIdValue value{};
+    value.storeType = static_cast<unsigned int>(id[0]) | (static_cast<unsigned int>(id[1]) << 8) |
+                      (static_cast<unsigned int>(id[2]) << 16) | (static_cast<unsigned int>(id[3]) << 24);
+    for (int i = 0; i < 16; ++i) value.guid[i] = id[4 + i];
+    return value;
+}
 
 std::string WideToLocal(const wchar_t* text)
 {
@@ -83,6 +100,7 @@ bool PoolMountForUpdate(const std::wstring& imagePath,
                         unsigned int version,
                         const std::wstring& directory,
                         const std::vector<std::wstring>& spaceNames,
+                        const std::wstring& mainOsSpaceName,
                         std::vector<std::vector<unsigned char> >& storeIds,
                         std::wstring& mainOsPath,
                         std::vector<std::string>& report,
@@ -204,6 +222,7 @@ bool PoolMountForUpdate(const std::wstring& imagePath,
 
     OutLn("[mount] base store id captured");
     storeIds.push_back(std::vector<unsigned char>(baseStore, baseStore + 20));
+    std::vector<void*> spaceHandles;
     for (const std::wstring& name : spaceNames)
     {
         void* spaceDisk = nullptr;
@@ -230,57 +249,99 @@ bool PoolMountForUpdate(const std::wstring& imagePath,
             return false;
         }
         storeIds.push_back(std::vector<unsigned char>(storeId, storeId + 20));
+        spaceHandles.push_back(spaceDisk);
         report.push_back("space " + WideToLocal(name.c_str()) + ": storeId captured");
     }
 
-    std::vector<unsigned char> flat;
-    flat.reserve(storeIds.size() * 20);
-    for (const std::vector<unsigned char>& one : storeIds) flat.insert(flat.end(), one.begin(), one.end());
-
-    void* volumeDisk = baseDisk;
-    if (volumeDisk == nullptr)
+    // AssignMountPoints 的第二个参数在 MS 托管代码里是 MainOSStorage.SafeStoreHandle，
+    // 即 MainOS 所在 space 的 store 句柄，不是基座物理盘句柄（传错会得到 0x80070490）。
+    std::size_t mainOsIndex = spaceHandles.size();
+    for (std::size_t i = 0; i < spaceNames.size(); ++i)
     {
-        volumeDisk = CreateFileW(diskName, GENERIC_READ | GENERIC_WRITE,
-                                 FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
-        if (volumeDisk == INVALID_HANDLE_VALUE) volumeDisk = nullptr;
-    }
-    if (volumeDisk == nullptr)
-    {
-        error = "open base disk handle for AssignMountPoints failed.";
-        closePool(service, pool, 0);
-        closeService(service);
-        FreeLibrary(module);
-        return false;
-    }
-
-    OutLn("[mount] AssignMountPoints ...");
-    rc = assignMountPoints(service, volumeDisk, &flat[0], static_cast<unsigned int>(storeIds.size()), 0);
-    if (rc < 0)
-    {
-        error = "AssignMountPoints failed (" + Hex(rc) + ").";
-        if (baseDisk == nullptr) CloseHandle(volumeDisk);
-        closePool(service, pool, 0);
-        closeService(service);
-        FreeLibrary(module);
-        return false;
-    }
-    report.push_back("mount points assigned");
-
-    // MainOS 是 space 里的分区名；逐个 store 试，找到能解析出路径的即可。
-    wchar_t pathBuffer[512] = { 0 };
-    for (std::size_t i = 1; i < storeIds.size() && mainOsPath.empty(); ++i)
-    {
-        const std::vector<unsigned char>& id = storeIds[i];
-        OutLn("[mount] GetPartitionPath MainOS ...");
-        rc = getPartitionPath(service, &id[0], L"MainOS", pathBuffer, 512, 1);
-        if (rc >= 0 && pathBuffer[0] != L'\0')
+        if (!mainOsSpaceName.empty() && spaceNames[i] == mainOsSpaceName)
         {
-            mainOsPath.assign(pathBuffer);
-            report.push_back("MainOS path: " + WideToLocal(pathBuffer));
+            mainOsIndex = i;
+            break;
+        }
+    }
+    if (mainOsIndex >= spaceHandles.size())
+    {
+        error = "no space in this pool holds a MainOS partition.";
+        closePool(service, pool, 0);
+        if (baseDisk != nullptr) CloseHandle(baseDisk);
+        closeService(service);
+        FreeLibrary(module);
+        return false;
+    }
+
+    // 先试一次 AssignMountPoints：ImageApp 在造 UpdateOS.wim 之前就把盘符装进 MountManager，
+    // UpdateDLL 之后按盘符解析 <MainOS>\PROGRAMS\UpdateOS\UpdateOS.wim。成功与否都继续。
+    {
+        std::vector<unsigned char> assignFlat;
+        assignFlat.reserve(storeIds.size() * 20);
+        for (std::size_t i = 1; i < storeIds.size(); ++i)
+            assignFlat.insert(assignFlat.end(), storeIds[i].begin(), storeIds[i].end());
+        OutLn("[mount] AssignMountPoints ...");
+        const long assignRc = assignMountPoints(service, spaceHandles[mainOsIndex], &assignFlat[0],
+                                               static_cast<unsigned int>(storeIds.size() - 1), 0);
+        char line[128] = {};
+        wsprintfA(line, "AssignMountPoints rc=%ld (0x%08lx)", assignRc, static_cast<unsigned long>(assignRc));
+        report.push_back(line);
+        OutLn(std::string("  ") + line);
+    }
+
+    // 先直接要 MainOS 卷路径（GetPartitionPath 带 waitForVolume=1，卷出现后会返回）。
+    // AssignMountPoints 在“没有 ImageApp 那套 FFU store 状态”的进程里会返回 0x80070490，
+    // 而造 UpdateOS.wim 只需要卷路径，不需要盘符，所以这里以 GetPartitionPath 为主。
+    wchar_t pathBuffer[512] = { 0 };
+    mainOsPath.clear();
+    for (int attempt = 0; attempt < 12 && mainOsPath.empty(); ++attempt)
+    {
+        for (std::size_t i = 0; i < spaceHandles.size() && mainOsPath.empty(); ++i)
+        {
+            const std::vector<unsigned char>& id = storeIds[i + 1];
+            pathBuffer[0] = L'\0';
+            const long pathRc = getPartitionPath(service, ToStoreIdValue(id), L"MainOS", pathBuffer, 512, 1);
+            if (pathRc >= 0 && pathBuffer[0] != L'\0')
+            {
+                mainOsPath.assign(pathBuffer);
+                report.push_back("MainOS path: " + WideToLocal(pathBuffer));
+            }
+        }
+        if (mainOsPath.empty()) Sleep(500);
+    }
+    if (mainOsPath.empty())
+    {
+        report.push_back("GetPartitionPath(MainOS) 12 次均未拿到路径，尝试 AssignMountPoints 兜底");
+        std::vector<unsigned char> assignFlat;
+        assignFlat.reserve(storeIds.size() * 20);
+        for (std::size_t i = 1; i < storeIds.size(); ++i)
+            assignFlat.insert(assignFlat.end(), storeIds[i].begin(), storeIds[i].end());
+        OutLn("[mount] AssignMountPoints ...");
+        rc = assignMountPoints(service, spaceHandles[mainOsIndex], &assignFlat[0],
+                               static_cast<unsigned int>(storeIds.size() - 1), 0);
+        if (rc < 0)
+        {
+            error = "GetPartitionPath(MainOS) failed and AssignMountPoints failed (" + Hex(rc) + ").";
+            closePool(service, pool, 0);
+            if (baseDisk != nullptr) CloseHandle(baseDisk);
+            closeService(service);
+            FreeLibrary(module);
+            return false;
+        }
+        for (int attempt = 0; attempt < 12 && mainOsPath.empty(); ++attempt)
+        {
+            for (std::size_t i = 0; i < spaceHandles.size() && mainOsPath.empty(); ++i)
+            {
+                const std::vector<unsigned char>& id = storeIds[i + 1];
+                pathBuffer[0] = L'\0';
+                if (getPartitionPath(service, ToStoreIdValue(id), L"MainOS", pathBuffer, 512, 1) >= 0 && pathBuffer[0] != L'\0')
+                    mainOsPath.assign(pathBuffer);
+            }
+            if (mainOsPath.empty()) Sleep(500);
         }
     }
 
-    if (baseDisk == nullptr && volumeDisk != nullptr) CloseHandle(volumeDisk);
     (void)detachSpace; // space 保持挂载，UpdateDLL 还要用
     closePool(service, pool, 0);
     closeService(service);

@@ -115,5 +115,17 @@ namespace imaging
                                    void* data,
                                    std::size_t size,
                                    std::string& error);
+    // ---- 挂载状态与强制卸载 ----
+
+    // 判断镜像是否处于挂载/被占用状态（按文件独占打开探测）。
+    OCID_VHD_API bool VhdIsAttached(const std::wstring& imagePath, bool& attached, std::string& error);
+
+    // 查询占用该镜像的进程（Restart Manager）。
+    OCID_VHD_API bool VhdHolders(const std::wstring& imagePath, std::vector<unsigned long>& pids, std::string& error);
+
+    // 强制卸载：多次重试 + 可选结束占用进程。
+    OCID_VHD_API bool VhdForceDetach(const std::wstring& imagePath, bool killHolders,
+                                     std::vector<std::string>& report, std::string& error);
+
 }
 }
