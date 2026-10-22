@@ -56,6 +56,10 @@ OCID_UPDATE_API bool UpdateApply(const UpdateRequest& request,
                                  std::vector<std::string>& report,
                                  std::string& error);
 
+OCID_UPDATE_API bool UpdateCreateEmptyUpdateOsWim(const std::wstring& mainOsPath,
+                                              const std::wstring& tempRoot,
+                                              std::string& error);
+
 OCID_UPDATE_API const char* UpdateVersion();
 
 }  // namespace imaging

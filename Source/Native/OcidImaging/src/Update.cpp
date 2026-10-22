@@ -97,8 +97,8 @@ namespace
 {
 typedef HANDLE(__stdcall* WimCreateFileFn)(const wchar_t*, unsigned long, unsigned long, unsigned long,
                                            unsigned long, unsigned long*);
-typedef int(__stdcall* WimCaptureImageFn)(HANDLE, const wchar_t*, unsigned long);
-typedef int(__stdcall* WimSetBootImageFn)(HANDLE, unsigned long);
+typedef HANDLE(__stdcall* WimCaptureImageFn)(HANDLE, const wchar_t*, unsigned long);
+typedef HANDLE(__stdcall* WimSetBootImageFn)(HANDLE, unsigned long);
 typedef int(__stdcall* WimCloseHandleFn)(HANDLE);
 
 std::string NarrowPath(const std::wstring& text)
@@ -203,7 +203,7 @@ bool CreateEmptyUpdateOsWim(const std::wstring& mainOsPath, const std::wstring& 
         return false;
     }
     unsigned long creationResult = 0;
-    HANDLE handle = createWim(wimPath.c_str(), 0x40000000ul, 2ul, 2ul | 0x20000000ul, 2ul, &creationResult);
+    HANDLE handle = createWim(wimPath.c_str(), 0x40000000ul, 2ul, 2ul, 2ul, &creationResult);
     if (handle == INVALID_HANDLE_VALUE || handle == nullptr)
     {
         const DWORD code = GetLastError();
@@ -211,7 +211,9 @@ bool CreateEmptyUpdateOsWim(const std::wstring& mainOsPath, const std::wstring& 
         error = "WIMCreateFile failed (win32=" + std::to_string(code) + "): " + NarrowPath(wimPath);
         return false;
     }
-    if (captureImage(handle, captureDir.c_str(), 0) == 0)
+    // WIMCaptureImage / WIMSetBootImage 返回的是新的 WIM 句柄（不是 BOOL）。
+    HANDLE captured = captureImage(handle, captureDir.c_str(), 0);
+    if (captured == nullptr || captured == INVALID_HANDLE_VALUE)
     {
         const DWORD code = GetLastError();
         closeWim(handle);
@@ -219,9 +221,74 @@ bool CreateEmptyUpdateOsWim(const std::wstring& mainOsPath, const std::wstring& 
         error = "WIMCaptureImage failed (win32=" + std::to_string(code) + ")";
         return false;
     }
-    if (setBootImage != nullptr) setBootImage(handle, 1);
-    closeWim(handle);
+    if (setBootImage != nullptr)
+    {
+        HANDLE booted = setBootImage(captured, 1);
+        if (booted != nullptr && booted != INVALID_HANDLE_VALUE && booted != captured) closeWim(booted);
+    }
+    closeWim(captured);
+    if (captured != handle) closeWim(handle);
     FreeLibrary(module);
+    return true;
+}
+} // namespace
+
+bool UpdateCreateEmptyUpdateOsWim(const std::wstring& mainOsPath, const std::wstring& tempRoot, std::string& error)
+{
+    error.clear();
+    return CreateEmptyUpdateOsWim(mainOsPath, tempRoot, error);
+}
+
+namespace
+{
+bool CreateWimViaChildProcess(const std::wstring& mainOsPath, const std::wstring& tempRoot, std::string& error)
+{
+    wchar_t exePath[MAX_PATH * 4] = {0};
+    const DWORD count = GetModuleFileNameW(nullptr, exePath, static_cast<DWORD>(sizeof(exePath) / sizeof(exePath[0])));
+    if (count == 0 || count >= sizeof(exePath) / sizeof(exePath[0]))
+    {
+        error = "GetModuleFileNameW failed";
+        return false;
+    }
+    std::wstring mainOsClean = mainOsPath;
+    while (!mainOsClean.empty() && (mainOsClean.back() == L'\\' || mainOsClean.back() == L'/')) mainOsClean.pop_back();
+    std::wstring tempClean = tempRoot;
+    while (!tempClean.empty() && (tempClean.back() == L'\\' || tempClean.back() == L'/')) tempClean.pop_back();
+    std::wstring commandLine = L"\"";
+    commandLine += exePath;
+    commandLine += L"\" wim create-empty \"";
+    commandLine += mainOsClean;
+    commandLine += L"\" \"";
+    commandLine += tempClean;
+    commandLine += L"\"";
+    std::vector<wchar_t> buffer(commandLine.begin(), commandLine.end());
+    buffer.push_back(0);
+    STARTUPINFOW startup;
+    ZeroMemory(&startup, sizeof(startup));
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process;
+    ZeroMemory(&process, sizeof(process));
+    if (!CreateProcessW(nullptr, buffer.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                        nullptr, nullptr, &startup, &process))
+    {
+        error = "CreateProcessW(wim create-empty) failed (win32=" + std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    const DWORD waited = WaitForSingleObject(process.hProcess, 180000);
+    DWORD code = 0;
+    GetExitCodeProcess(process.hProcess, &code);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    if (waited != WAIT_OBJECT_0)
+    {
+        error = "wim create-empty timeout";
+        return false;
+    }
+    if (code != 0)
+    {
+        error = "wim create-empty failed (exit=" + std::to_string(code) + ")";
+        return false;
+    }
     return true;
 }
 } // namespace
@@ -295,7 +362,7 @@ bool UpdateApply(const UpdateRequest& request, std::vector<std::string>& report,
 
     OutLn("[apply] creating empty UpdateOS.wim ...");
     // MainOS 上现场造空 UpdateOS.wim：ImageApp 在 Initialize 之前就这么做。
-    if (!CreateEmptyUpdateOsWim(mainOsPath, request.stagingDirectory, error))
+    if (!CreateWimViaChildProcess(mainOsPath, request.stagingDirectory, error))
     {
         FreeLibrary(module);
         return false;
@@ -341,6 +408,9 @@ bool UpdateApply(const UpdateRequest& request, std::vector<std::string>& report,
         }
         // 参照 ImageApp：Initialize 之前不设布局（布局在 PrepareUpdate 阶段设），
         // 提前设会让 UpdateDLL 在 store 还没就绪时去找布局里的分区，返回 0x80070490。
+        // UpdateDLL 在 Initialize 阶段就会去找设备布局（日志：Did not find any device layouts），
+        // 所以布局必须在 Initialize 之前就设进去；PrepareUpdate 阶段再设一次也无害。
+        if (!layoutPointers.empty()) setLayouts(context, layoutPointers.data(), static_cast<int>(layoutPointers.size()));
         OutLn("[apply] Initialize(InitForInput) ...");
         int rc = initialize(context, storeCount, flat.data(), request.actionListFile.c_str(),
                             request.packagesRoot.c_str(), request.updateInputFile.c_str(),

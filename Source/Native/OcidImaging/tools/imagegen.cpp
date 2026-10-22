@@ -3918,19 +3918,36 @@ int CmdLayout(const std::vector<std::string>& args)
 
         const std::wstring wideFile = Utf8ToWide(file);
         const bool isDevice = file.size() > 4 && file.compare(0, 4, "\\\\.\\") == 0;
+        std::string device = file;
         VhdInfo vhdInfo;
-        if (!isDevice && !VhdQuery(wideFile, vhdInfo, error))
+        if (!isDevice)
         {
-            Err("拒绝操作：不是可识别的虚拟磁盘（" + file + "）：" + error);
-            return 1;
+            if (!VhdQuery(wideFile, vhdInfo, error))
+            {
+                Err("拒绝操作：不是可识别的虚拟磁盘（" + file + "）：" + error);
+                return 1;
+            }
+            if (!VhdAttach(wideFile, false, device, error))
+            {
+                Err("挂载虚拟磁盘失败：" + error);
+                return 1;
+            }
+            OutLn("  已挂载：" + device);
         }
+        const std::wstring wideDevice(device.begin(), device.end());
         std::vector<std::string> report;
-        const bool prepared = PoolPrepareSpaces(wideFile, widePool, poolVersion, Utf8ToWide(directory), spaces,
+        const bool prepared = PoolPrepareSpaces(wideDevice, widePool, poolVersion, Utf8ToWide(directory), spaces,
                                                 doFormat, report, error);
         for (const std::string& line : report) OutLn("  " + line);
+        std::vector<std::wstring> spaceNames;
+        for (const SpacePrepareSpec& spec : spaces) spaceNames.push_back(spec.name);
+        std::vector<std::string> detachReport;
+        std::string detachError;
+        PoolDetachSpaces(wideDevice, widePool, poolVersion, Utf8ToWide(directory), spaceNames, detachReport, detachError);
+        for (const std::string& line : detachReport) OutLn("  " + line);
         if (!prepared) { Err("池内分区/格式化失败：" + error); return 1; }
         OutLn("池内准备完成：" + file);
-        if (!isDevice) OutLn("  基座磁盘非永久挂载，进程退出后自动卸载");
+        if (!isDevice) OutLn("  space 已 detach；基座磁盘由进程退出自动卸载");
         return 0;
     }
 
@@ -4252,7 +4269,7 @@ int CmdLayout(const std::vector<std::string>& args)
         std::vector<std::string> report;
         const bool applied = UpdateApply(request, report, error);
         for (const std::string& line : report) OutLn("  " + line);
-        if (!keepOpen && !worker)
+        if (!keepOpen)
         {
             // 收尾统一走子进程 + 超时：服务侧调用可能在内核里挂死，父进程必须能强制结束它。
             auto runChild = [&](const std::vector<std::string>& childArgs, const char* what) -> bool
@@ -4565,6 +4582,34 @@ int CmdLayout(const std::vector<std::string>& args)
 // 用 wmain 取宽字符命令行：
 // 清单/镜像路径经常带中文（例如 ...\成品\ProcessedFiles），ANSI 的 main 会按当前代码页
 // 折成本地编码，再转回 UTF-8 时字符就丢了。宽字符直接保真。
+    static int CmdWim(const std::vector<std::string>& args)
+    {
+        if (args.size() < 3 || WantsHelp(args))
+        {
+            OutLn("用法：imagegen wim create-empty <MainOS 路径> <临时目录>");
+            return args.size() < 3 ? 2 : 0;
+        }
+        const std::string sub = args[2];
+        if (sub != "create-empty")
+        {
+            Err("wim 未知子命令：" + sub);
+            return 2;
+        }
+        if (args.size() < 5)
+        {
+            Err("wim create-empty 需要 <MainOS 路径> <临时目录>");
+            return 2;
+        }
+        std::string error;
+        if (!UpdateCreateEmptyUpdateOsWim(Utf8ToWide(args[3]), Utf8ToWide(args[4]), error))
+        {
+            Err("造空 UpdateOS.wim 失败：" + error);
+            return 1;
+        }
+        OutLn("UpdateOS.wim 已创建（独立进程，句柄随进程退出释放）");
+        return 0;
+    }
+
 static int RunMain(int argc, wchar_t** wargv)
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -4614,6 +4659,7 @@ static int RunMain(int argc, wchar_t** wargv)
     if (command == "vhd") return CmdVhd(args);
     if (command == "disk") return CmdDisk(args);
     if (command == "pool") return CmdPool(args);
+    if (command == "wim") return CmdWim(args);
     if (command == "apply") return CmdApply(args);
     if (command == "doctor") return CmdDoctor(args);
     if (command == "layout")
@@ -4632,4 +4678,5 @@ int wmain(int argc, wchar_t** wargv)
     const int rc = RunMain(argc, wargv);
     VhdReleaseAll();
     return rc;
+
 }
