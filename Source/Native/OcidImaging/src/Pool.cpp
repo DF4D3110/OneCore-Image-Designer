@@ -1470,6 +1470,19 @@ bool PoolDetachSpaces(const std::wstring& imagePath, const std::wstring& poolNam
             ++detached;
             report.push_back("space detached: " + std::string(name.begin(), name.end()));
         }
+        else
+        {
+            char buffer[128] = { 0 };
+            sprintf_s(buffer, sizeof(buffer), "space detach failed: %ls (hr=0x%08X)", name.c_str(),
+                      static_cast<unsigned int>(detachRc));
+            report.push_back(buffer);
+            const long retryRc = detachSpace(service, pool, name.c_str(), 1);
+            if (retryRc >= 0)
+            {
+                ++detached;
+                report.push_back("space detached on retry: " + std::string(name.begin(), name.end()));
+            }
+        }
     }
     (void)closePool(service, pool, 0);
     closeService(service);
