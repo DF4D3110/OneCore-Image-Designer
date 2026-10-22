@@ -51,6 +51,8 @@ namespace imaging
         std::uint64_t offsetBytes = 0;
         std::uint64_t sizeBytes = 0;
         std::uint64_t attributes = 0;
+        unsigned int mbrType = 0;   // MBR 分区类型字节（v1 布局的 0xNN）
+        bool bootable = false;      // MBR 活动分区（0x80）
     };
 
     OCID_VHD_API std::string VhdVersion();
@@ -96,6 +98,17 @@ namespace imaging
                                     const void* data,
                                     std::size_t size,
                                     std::string& error);
+
+    // 写/读 MBR（v1 平铺布局：BIOS 引导，分区类型 0xNN）。parts 最多 4 项，偏移/大小必须是扇区整数倍。
+    OCID_VHD_API bool VhdWriteMbr(const std::string& devicePath,
+                                  const std::vector<VhdPartition>& parts,
+                                  std::uint32_t sectorSize,
+                                  std::string& error);
+
+    OCID_VHD_API bool VhdReadMbr(const std::string& devicePath,
+                                 std::vector<VhdPartition>& parts,
+                                 std::uint32_t sectorSize,
+                                 std::string& error);
 
     OCID_VHD_API bool VhdReadBytes(const std::string& devicePath,
                                    std::uint64_t offset,

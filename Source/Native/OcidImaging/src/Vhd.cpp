@@ -250,6 +250,8 @@ namespace imaging
         // win32=21 ERROR_NOT_READY）。
         if (!OpenVirtual(path, VIRTUAL_DISK_ACCESS_DETACH, handle, error)) return false;
         const DWORD rc = DetachVirtualDisk(handle, DETACH_VIRTUAL_DISK_FLAG_NONE, 0);
+    // 对 PERMANENT_LIFETIME 挂载的盘还要按永久语义再卸一次（此 SDK 头里没有该枚举值，1 取自 API 文档）。
+    DetachVirtualDisk(handle, static_cast<DETACH_VIRTUAL_DISK_FLAG>(1), 0);
         CloseHandle(handle);
         // ERROR_NOT_READY：这块盘本来就没挂着（已经是目标状态），按成功处理。
         if (rc != ERROR_SUCCESS && rc != ERROR_NOT_READY)
@@ -610,5 +612,115 @@ namespace imaging
         CloseHandle(device);
         return true;
     }
+    namespace
+    {
+        void LbaToChs(std::uint64_t lba, std::uint8_t out[3])
+        {
+            const std::uint64_t heads = 255, sectors = 63;
+            std::uint64_t c = lba / (heads * sectors);
+            std::uint64_t h = (lba / sectors) % heads;
+            std::uint64_t s = lba % sectors + 1;
+            if (c > 1023) { c = 1023; h = 254; s = 63; }
+            out[0] = static_cast<std::uint8_t>(h);
+            out[1] = static_cast<std::uint8_t>((s & 0x3F) | ((c >> 2) & 0xC0));
+            out[2] = static_cast<std::uint8_t>(c & 0xFF);
+        }
+    }
+
+    bool VhdWriteMbr(const std::string& devicePath,
+                     const std::vector<VhdPartition>& parts,
+                     std::uint32_t sectorSize,
+                     std::string& error)
+    {
+        if (parts.empty())
+        {
+            error = "分区表为空";
+            return false;
+        }
+        if (parts.size() > 4)
+        {
+            error = "MBR 最多 4 个主分区（布局给了 " + std::to_string(parts.size()) + " 个）";
+            return false;
+        }
+        if (sectorSize == 0) sectorSize = 512;
+        if (!VhdEnsureVirtualDisk(devicePath, error)) return false;
+
+        const std::size_t sectorBytes = sectorSize;
+        std::vector<std::uint8_t> sector(sectorBytes, 0);
+        for (std::size_t i = 0; i < parts.size(); ++i)
+        {
+            const VhdPartition& p = parts[i];
+            if (p.offsetBytes % sectorSize != 0 || p.sizeBytes % sectorSize != 0)
+            {
+                error = "分区 " + p.name + " 的偏移/大小不是扇区整数倍";
+                return false;
+            }
+            const std::uint64_t startLba = p.offsetBytes / sectorSize;
+            const std::uint64_t countLba = p.sizeBytes / sectorSize;
+            if (startLba > 0xFFFFFFFFull || countLba > 0xFFFFFFFFull)
+            {
+                error = "分区 " + p.name + " 超出 MBR 32 位 LBA 范围";
+                return false;
+            }
+            std::uint8_t* entry = sector.data() + 446 + 16 * i;
+            entry[0] = p.bootable ? 0x80 : 0x00;
+            LbaToChs(startLba, entry + 1);
+            entry[4] = static_cast<std::uint8_t>(p.mbrType & 0xFF);
+            LbaToChs(startLba + countLba - 1, entry + 5);
+            std::memcpy(entry + 8, &startLba, 4);
+            const std::uint32_t count32 = static_cast<std::uint32_t>(countLba);
+            std::memcpy(entry + 12, &count32, 4);
+        }
+        sector[510] = 0x55;
+        sector[511] = 0xAA;
+
+        if (!VhdWriteBytes(devicePath, 0, sector.data(), sectorBytes, error)) return false;
+
+        std::vector<std::uint8_t> check(sectorBytes, 0);
+        if (!VhdReadBytes(devicePath, 0, check.data(), sectorBytes, error)) return false;
+        if (check[510] != 0x55 || check[511] != 0xAA || std::memcmp(check.data(), sector.data(), 446) != 0)
+        {
+            error = "MBR 回读校验失败";
+            return false;
+        }
+        return true;
+    }
+
+    bool VhdReadMbr(const std::string& devicePath,
+                    std::vector<VhdPartition>& parts,
+                    std::uint32_t sectorSize,
+                    std::string& error)
+    {
+        if (sectorSize == 0) sectorSize = 512;
+        parts.clear();
+        if (!VhdEnsureVirtualDisk(devicePath, error)) return false;
+        std::vector<std::uint8_t> sector(sectorSize, 0);
+        if (!VhdReadBytes(devicePath, 0, sector.data(), sectorSize, error)) return false;
+        if (sector[510] != 0x55 || sector[511] != 0xAA)
+        {
+            error = "扇区 0 没有 MBR 签名";
+            return false;
+        }
+        for (std::size_t i = 0; i < 4; ++i)
+        {
+            const std::uint8_t* entry = sector.data() + 446 + 16 * i;
+            const std::uint8_t type = entry[4];
+            if (type == 0) continue;
+            std::uint32_t start32 = 0, count32 = 0;
+            std::memcpy(&start32, entry + 8, 4);
+            std::memcpy(&count32, entry + 12, 4);
+            VhdPartition p;
+            p.name = "partition" + std::to_string(i + 1);
+            p.mbrType = type;
+            p.bootable = (entry[0] & 0x80) != 0;
+            p.offsetBytes = static_cast<std::uint64_t>(start32) * sectorSize;
+            p.sizeBytes = static_cast<std::uint64_t>(count32) * sectorSize;
+            parts.push_back(p);
+        }
+        return true;
+    }
+
 }
+
+
 }

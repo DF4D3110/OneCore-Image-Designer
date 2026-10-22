@@ -641,4 +641,99 @@ bool PoolPrepareSpaces(const std::wstring& imagePath, const std::wstring& poolNa
 
 
 
+
+bool PoolClose(const std::wstring& imagePath, const std::wstring& directory, bool detachSpaces,
+               std::vector<std::string>& report, std::string& error)
+{
+    report.clear();
+    error.clear();
+    g_poolLog.clear();
+    if (imagePath.empty())
+    {
+        error = "未指定虚拟磁盘（VHD/VHDX）路径";
+        return false;
+    }
+    std::string dllPath;
+    std::vector<std::string> found;
+    std::vector<std::string> missing;
+    if (!PoolProbe(dllPath, found, missing, error)) return false;
+    if (!missing.empty())
+    {
+        error = "ImageStorageService 缺少导出：" + missing[0];
+        return false;
+    }
+    const std::wstring wideDll(dllPath.begin(), dllPath.end());
+    HMODULE module = LoadLibraryW(wideDll.c_str());
+    if (module == nullptr)
+    {
+        error = "LoadLibraryW 失败（win32=" + std::to_string(GetLastError()) + "）。";
+        return false;
+    }
+    CreateServiceFn createService = reinterpret_cast<CreateServiceFn>(GetProcAddress(module, "CreateStorageService"));
+    CloseServiceFn closeService = reinterpret_cast<CloseServiceFn>(GetProcAddress(module, "CloseImageStorageService"));
+    OpenVhdFn openVhd = reinterpret_cast<OpenVhdFn>(GetProcAddress(module, "OpenVirtualHardDisk"));
+    GetDiskNameFn getDiskName = reinterpret_cast<GetDiskNameFn>(GetProcAddress(module, "GetDiskName"));
+    OpenPoolFn openPool = reinterpret_cast<OpenPoolFn>(GetProcAddress(module, "OpenStoragePool"));
+    ClosePoolFn closePool = reinterpret_cast<ClosePoolFn>(GetProcAddress(module, "CloseStoragePool"));
+    if (createService == nullptr || closeService == nullptr || openVhd == nullptr || getDiskName == nullptr ||
+        openPool == nullptr || closePool == nullptr)
+    {
+        FreeLibrary(module);
+        error = "GetProcAddress 失败（OpenVirtualHardDisk/GetDiskName/OpenStoragePool/CloseStoragePool）。";
+        return false;
+    }
+    void* service = nullptr;
+    long rc = createService(&service, PoolLogCallback, 0, nullptr, 1);
+    if (rc < 0 || service == nullptr)
+    {
+        FreeLibrary(module);
+        error = "CreateStorageService 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "）。";
+        return false;
+    }
+    unsigned char storeId[32] = {};
+    void* baseDisk = nullptr;
+    rc = openVhd(service, imagePath.c_str(), 0, storeId, &baseDisk);
+    if (rc < 0 || baseDisk == nullptr)
+    {
+        closeService(service);
+        FreeLibrary(module);
+        error = "OpenVirtualHardDisk 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "）。";
+        return false;
+    }
+    wchar_t diskName[512] = {};
+    rc = getDiskName(baseDisk, diskName, 512);
+    if (rc < 0 || diskName[0] == 0)
+    {
+        CloseHandle(baseDisk);
+        closeService(service);
+        FreeLibrary(module);
+        error = "GetDiskName 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "）。";
+        return false;
+    }
+    std::string baseDiskName;
+    for (std::size_t k = 0; diskName[k] != 0; ++k) baseDiskName.push_back(static_cast<char>(diskName[k]));
+    void* pool = nullptr;
+    rc = openPool(service, diskName, directory.c_str(), 1, &pool);
+    if (rc < 0 || pool == nullptr)
+    {
+        CloseHandle(baseDisk);
+        closeService(service);
+        FreeLibrary(module);
+        error = "OpenStoragePool 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "，disk=" + baseDiskName + "）。";
+        return false;
+    }
+    report.push_back("池已打开：" + baseDiskName);
+    const long closeRc = closePool(service, pool, detachSpaces ? 1 : 0);
+    CloseHandle(baseDisk);
+    closeService(service);
+    FreeLibrary(module);
+    if (closeRc < 0)
+    {
+        error = "CloseStoragePool 失败（hr=" + std::to_string(static_cast<long long>(closeRc)) + "）。";
+        return false;
+    }
+    report.push_back(detachSpaces ? "池已关闭，space 已卸下" : "池已关闭（space 保留）");
+    return true;
+}
+
 } // namespace ocid::imaging

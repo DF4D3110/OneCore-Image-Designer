@@ -56,6 +56,7 @@ struct PoolSpaceSpec
 {
     std::wstring name;
     unsigned long long sizeBytes = 0;
+    unsigned int sectorSize = 512;
     bool thin = true;
     unsigned int usage = 2;   // 2 = Data
 };
@@ -94,6 +95,15 @@ struct SpacePrepareSpec
 // 打开已有池（OpenStoragePool）→ 逐个 space 挂上（AttachStorageSpace）→ 在 space 内写 GPT
 // → 按需 FormatPartition → 卸下（DetachStorageSpace）→ 关池。
 // 调用方负责先把虚拟磁盘挂上并过 VhdEnsureVirtualDisk。
+
+// 关闭池：OpenVirtualHardDisk -> OpenStoragePool -> CloseStoragePool。detachSpaces=true 时
+// 顺带把 space 虚拟盘卸下（用于清场；成品镜像不需要这一步）。
+OCID_POOL_API bool PoolClose(const std::wstring& imagePath,
+                             const std::wstring& directory,
+                             bool detachSpaces,
+                             std::vector<std::string>& report,
+                             std::string& error);
+
 OCID_POOL_API bool PoolPrepareSpaces(const std::wstring& devicePath,
                                      const std::wstring& poolName,
                                      unsigned int version,

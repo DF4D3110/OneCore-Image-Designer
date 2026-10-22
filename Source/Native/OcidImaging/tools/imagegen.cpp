@@ -1361,8 +1361,17 @@ struct LayoutStore
     unsigned long long sizeInBytes = 0;
     bool hasSize = false;
     bool hasSizeBytes = false;
+    unsigned long long sectorSize = 0;
+    bool hasSectorSize = false;
     bool onlyAllocateDefinedGptEntries = false;
     std::vector<LayoutPartition> partitions;
+};
+
+struct LayoutPool
+{
+    std::string name;
+    unsigned long long version = 0;
+    std::vector<LayoutStore> stores;
 };
 
 struct LayoutModel
@@ -1379,6 +1388,7 @@ struct LayoutModel
     bool emitMergeTag = false;
     std::vector<std::string> oemDevicePaths;  // OEM 半份的 DevicePath（仅信息）
     std::vector<LayoutStore> pools;
+    std::vector<LayoutPool> poolGroups;
     std::vector<LayoutStore> stores;
     unsigned long long minSectorCount = 0;
     bool hasMinSectorCount = false;
@@ -1447,6 +1457,9 @@ LayoutStore ParseStore(const XmlNode* node)
     const std::string sizeBytes = NodeText(node, "SizeInBytes");
     store.hasSizeBytes = !sizeBytes.empty();
     store.sizeInBytes = ParseNum(sizeBytes);
+    const std::string storeSector = NodeText(node, "SectorSize");
+    store.hasSectorSize = !storeSector.empty();
+    store.sectorSize = ParseNum(storeSector);
     store.onlyAllocateDefinedGptEntries = ReadFlag(node, "OnlyAllocateDefinedGptEntries");
     ParsePartitions(node, store);
     return store;
@@ -1497,12 +1510,21 @@ bool LoadLayout(const std::string& path, LayoutModel& model, std::string& error)
     {
         for (const XmlNode* pool = Child(pools, "StoragePool"); pool != nullptr; pool = Next(pool, "StoragePool"))
         {
+            LayoutPool group;
+            group.name = NodeText(pool, "Name");
+            group.version = ParseNum(NodeText(pool, "PoolVersion"));
+            if (group.version == 0) group.version = ParseNum(NodeText(pool, "Version"));
             const XmlNode* stores = Child(pool, "Stores");
-            if (stores == nullptr) continue;
-            for (const XmlNode* store = Child(stores, "Store"); store != nullptr; store = Next(store, "Store"))
+            if (stores != nullptr)
             {
-                model.pools.push_back(ParseStore(store));
+                for (const XmlNode* store = Child(stores, "Store"); store != nullptr; store = Next(store, "Store"))
+                {
+                    group.stores.push_back(ParseStore(store));
+                    model.pools.push_back(ParseStore(store));
+                }
             }
+            if (group.name.empty()) group.name = "OSPool";
+            model.poolGroups.push_back(group);
         }
     }
     if (const XmlNode* stores = Child(root, "Stores"))
@@ -1672,6 +1694,22 @@ bool MergeLayouts(const LayoutModel& ms, const LayoutModel& oem, LayoutModel& ou
             s.partitions.erase(std::remove_if(s.partitions.begin(), s.partitions.end(),
                 [](const LayoutPartition& p) { return EqualsNoCase(p.name, "OPP"); }), s.partitions.end());
         }
+    }
+    out.poolGroups.clear();
+    if (!out.pools.empty())
+    {
+        LayoutPool group;
+        if (!ms.poolGroups.empty())
+        {
+            group.name = ms.poolGroups.front().name;
+            group.version = ms.poolGroups.front().version;
+        }
+        else
+        {
+            group.name = "OSPool";
+        }
+        group.stores = out.pools;
+        out.poolGroups.push_back(group);
     }
     FillUnits(out);
     return true;
@@ -2176,6 +2214,201 @@ int CmdLayout(const std::vector<std::string>& args)
         }
     }
 
+    // 多盘布局里每个物理盘的扇区可能不同（QC 用 4096），这里按 store 取。
+    static std::uint64_t StoreSectorBytes(const LayoutModel& model, const LayoutStore& store)
+    {
+        if (store.hasSectorSize && store.sectorSize != 0) return store.sectorSize;
+        if (model.hasSectorSize && model.sectorSize != 0) return model.sectorSize;
+        return 512;
+    }
+
+    // 布局里的 <Partition Name="OSPool"> 只是语义标记：真正的池由 ImageStorageService 追加，
+    // 我们不写它的 GPT 项（等价于 imageapp 的做法）。
+    static bool IsPoolPartition(const LayoutPartition& p)
+    {
+        if (LowerText(p.name) == "ospool") return true;
+        const std::string t = LowerText(p.type);
+        return t.find("e75caf8f-f680-4cee-afa3-b001e56efc2d") != std::string::npos;
+    }
+
+    // 选一个存储池：布局里有多个池时必须用 --pool 指定。
+    static const LayoutPool* SelectLayoutPool(const LayoutModel& model, const std::string& want,
+                                              std::string& error)
+    {
+        if (model.poolGroups.empty()) return nullptr;
+        if (!want.empty())
+        {
+            for (const LayoutPool& pool : model.poolGroups)
+            {
+                if (EqualsNoCase(pool.name, want)) return &pool;
+            }
+            error = "布局里没有名为 " + want + " 的存储池";
+            return nullptr;
+        }
+        if (model.poolGroups.size() == 1) return &model.poolGroups.front();
+        error = "布局里有多个存储池，请用 --pool 指定：";
+        for (const LayoutPool& pool : model.poolGroups) error += pool.name + " ";
+        return nullptr;
+    }
+
+    static std::wstring LayoutPoolName(const LayoutPool* pool)
+    {
+        return pool != nullptr ? Utf8ToWide(pool->name) : std::wstring(L"OSPool");
+    }
+
+    static unsigned int LayoutPoolVersion(const LayoutPool* pool, unsigned int fallback)
+    {
+        if (pool != nullptr && pool->version != 0) return static_cast<unsigned int>(pool->version);
+        return fallback != 0 ? fallback : 24u;
+    }
+
+    struct PhysicalDiskPlan
+    {
+        std::string storeType;
+        std::string devicePath;
+        std::string fileName;
+        std::uint64_t bytes = 0;
+        std::uint64_t sector = 512;
+        bool holdsPool = false;
+        bool onlyDefinedEntries = false;
+        std::vector<VhdPartition> parts;
+    };
+
+    // 一块物理盘（或 v1 平铺盘）的分区表：池载体分区不写，UseAllSpace 分区吃掉剩余空间。
+    static bool BuildPhysicalDiskParts(const LayoutModel& model, const LayoutStore& store,
+                                       std::uint64_t diskBytes, std::vector<VhdPartition>& parts,
+                                       bool& holdsPool, std::string& error)
+    {
+        const std::uint64_t sector = StoreSectorBytes(model, store);
+        const std::uint64_t defaultAlignment = model.defaultAlignment != 0 ? model.defaultAlignment : (1024ull * 1024);
+        auto align = [](std::uint64_t v, std::uint64_t a) { return a == 0 ? v : (v + a - 1) / a * a; };
+
+        for (const LayoutPartition& p : store.partitions)
+        {
+            if (IsPoolPartition(p)) holdsPool = true;
+        }
+        // 尺寸紧凑的盘（OnlyAllocateDefinedGptEntries=true，如 XBL 只有 1024 个 4K 扇区）
+        // 不能从 1 MiB 起，只需要让开 MBR/GPT 头。
+        std::uint64_t cursor = store.onlyAllocateDefinedGptEntries ? align(2 * sector, defaultAlignment)
+                                                                  : align(1024ull * 1024, defaultAlignment);
+
+        auto partAlign = [&](const LayoutPartition& p) -> std::uint64_t
+        {
+            std::uint64_t alignment = defaultAlignment;
+            std::uint64_t custom = 0;
+            if (!p.byteAlignment.empty() && ParseHexOrDec(p.byteAlignment, custom) && custom != 0) alignment = custom;
+            if (p.singleSectorAlignment) alignment = sector;
+            return alignment;
+        };
+        // 先按顺序压固定尺寸分区，求出真实已用空间，再给 UseAllSpace 分区分剩余。
+        std::uint64_t fixedEnd = cursor;
+        std::size_t flexible = 0;
+        for (const LayoutPartition& p : store.partitions)
+        {
+            if (IsPoolPartition(p)) continue;
+            std::uint64_t size = 0;
+            if (p.hasTotalBytes && p.totalBytes != 0) size = p.totalBytes;
+            else if (p.totalSectors != 0) size = p.totalSectors * sector;
+            if (size == 0 && p.minFreeBytes != 0) size = p.minFreeBytes;
+            if (size == 0 && p.minFreeSectors != 0) size = p.minFreeSectors * sector;
+            if (p.useAllSpace || size == 0) { ++flexible; continue; }
+            size = align(size, sector);
+            fixedEnd = align(fixedEnd, partAlign(p)) + size;
+        }
+        // 末尾要给备份 GPT 留位（容错 33 个扇区，普通盘按 1 MiB）。
+        const std::uint64_t tailReserve = store.onlyAllocateDefinedGptEntries ? 33 * sector : (1024ull * 1024);
+        std::uint64_t available = diskBytes > fixedEnd + tailReserve ? diskBytes - fixedEnd - tailReserve : 0;
+        std::uint64_t flexibleBytes = 0;
+        if (flexible != 0 && available != 0)
+        {
+            flexibleBytes = available / flexible / sector * sector;
+            if (flexibleBytes == 0) flexibleBytes = sector;
+        }
+
+        for (const LayoutPartition& p : store.partitions)
+        {
+            if (IsPoolPartition(p)) continue;
+            std::uint64_t size = 0;
+            if (p.hasTotalBytes && p.totalBytes != 0) size = p.totalBytes;
+            else if (p.totalSectors != 0) size = p.totalSectors * sector;
+            if (size == 0 && p.minFreeBytes != 0) size = p.minFreeBytes;
+            if (size == 0 && p.minFreeSectors != 0) size = p.minFreeSectors * sector;
+            if (p.useAllSpace || size == 0) size = flexibleBytes;
+            if (size == 0) { error = "分区 " + p.name + " 没有可用尺寸"; return false; }
+            size = align(size, sector);
+
+            const std::uint64_t alignment = partAlign(p);
+
+            VhdPartition vp;
+            vp.name = p.name;
+            vp.type = p.type;
+            vp.id = p.id;
+            vp.offsetBytes = align(cursor, alignment);
+            vp.sizeBytes = size;
+            vp.mbrType = static_cast<unsigned int>(ParseNum(p.type) & 0xFF);
+            vp.bootable = p.bootable;
+            parts.push_back(vp);
+            cursor = vp.offsetBytes + size;
+        }
+        if (parts.empty()) { error = "物理存储 " + store.storeType + " 没有可分配的分区"; return false; }
+        if (cursor + tailReserve > diskBytes)
+        {
+            error = "物理存储 " + store.storeType + " 的分区总长超出磁盘（需要 " +
+                    FormatBytes(cursor + tailReserve) + "，磁盘 " + FormatBytes(diskBytes) + "）";
+            return false;
+        }
+        return true;
+    }
+
+    // 全部分区都带 MBR 类型码 ⇒ 这张盘用 MBR 分区表（v1 平铺 / BIOS 引导）。
+    static bool AllMbrTypes(const std::vector<VhdPartition>& parts)
+    {
+        if (parts.empty()) return false;
+        for (const VhdPartition& vp : parts)
+        {
+            if (vp.mbrType == 0) return false;
+        }
+        return true;
+    }
+
+    // v1 平铺布局没给 <SizeInSectors> 时，按分区尺寸和推一个默认盘大小。
+    static std::uint64_t DefaultFlatDiskBytes(const LayoutModel& model)
+    {
+        const std::uint64_t defaultAlignment = model.defaultAlignment != 0 ? model.defaultAlignment : (1024ull * 1024);
+        auto align = [](std::uint64_t v, std::uint64_t a) { return a == 0 ? v : (v + a - 1) / a * a; };
+        std::uint64_t total = align(1024ull * 1024, defaultAlignment) * 2;
+        for (const LayoutStore& store : model.stores)
+        {
+            const std::uint64_t sector = StoreSectorBytes(model, store);
+            for (const LayoutPartition& p : store.partitions)
+            {
+                std::uint64_t size = 0;
+                if (p.hasTotalBytes && p.totalBytes != 0) size = p.totalBytes;
+                else if (p.totalSectors != 0) size = p.totalSectors * sector;
+                if (size == 0 && p.minFreeBytes != 0) size = p.minFreeBytes;
+                if (size == 0 && p.minFreeSectors != 0) size = p.minFreeSectors * sector;
+                if (size == 0) size = 512ull * 1024 * 1024;
+                total += align(size, 1024ull * 1024) + 1024ull * 1024;
+            }
+        }
+        if (model.minSectorCount != 0)
+        {
+            const std::uint64_t min = model.minSectorCount * (model.hasSectorSize ? model.sectorSize : 512);
+            if (total < min) total = min;
+        }
+        if (total < 64ull * 1024 * 1024) total = 64ull * 1024 * 1024;
+        return align(total, 1024ull * 1024);
+    }
+
+    bool WantsHelp(const std::vector<std::string>& args)
+    {
+        for (const std::string& a : args)
+        {
+            if (a == "--help" || a == "-h" || a == "/?") return true;
+        }
+        return false;
+    }
+
     static bool BuildPartitionsFromLayout(const LayoutModel& model, std::uint64_t diskBytes,
                                           std::vector<VhdPartition>& parts, std::string& error)
     {
@@ -2193,113 +2426,32 @@ int CmdLayout(const std::vector<std::string>& args)
             if (store.hasSizeBytes && store.sizeInBytes != 0) storeBytes = store.sizeInBytes;
             else if (store.sizeInSectors != 0) storeBytes = store.sizeInSectors * sector;
 
-            std::uint64_t declared = 0;
-            std::size_t flexible = 0;
-            for (const LayoutPartition& p : store.partitions)
-            {
-                std::uint64_t size = 0;
-                if (p.hasTotalBytes && p.totalBytes != 0) size = p.totalBytes;
-                else if (p.totalSectors != 0) size = p.totalSectors * sector;
-                if (p.useAllSpace || size == 0) { ++flexible; continue; }
-                declared += align(size, sector);
-            }
-
-            std::uint64_t flexibleBytes = 0;
-            if (flexible != 0 && storeBytes > declared) flexibleBytes = (storeBytes - declared) / flexible / sector * sector;
-
-            for (const LayoutPartition& p : store.partitions)
-            {
-                std::uint64_t size = 0;
-                if (p.hasTotalBytes && p.totalBytes != 0) size = p.totalBytes;
-                else if (p.totalSectors != 0) size = p.totalSectors * sector;
-                if (p.useAllSpace || size == 0) size = flexibleBytes;
-                if (size == 0) continue;
-                size = align(size, sector);
-
-                std::uint64_t alignment = defaultAlignment;
-                std::uint64_t custom = 0;
-                if (!p.byteAlignment.empty() && ParseHexOrDec(p.byteAlignment, custom) && custom != 0) alignment = custom;
-                if (p.singleSectorAlignment) alignment = sector;
-
-                VhdPartition vp;
-                vp.name = p.name;
-                vp.type = p.type;
-                vp.id = p.id;
-                vp.offsetBytes = align(cursor, alignment);
-                vp.sizeBytes = size;
-                parts.push_back(vp);
-                cursor = vp.offsetBytes + size;
-            }
-        }
-
-        if (parts.empty())
+            auto partAlign = [&](const LayoutPartition& p) -> std::uint64_t
         {
-            error = "布局里没有可分区的分区项";
-            return false;
-        }
-        if (diskBytes != 0 && cursor > diskBytes)
-        {
-            error = "分区总长超过虚拟盘容量（需要 " + FormatBytes(cursor) + "）";
-            return false;
-        }
-        return true;
-    }
-
-    bool WantsHelp(const std::vector<std::string>& args)
-    {
-        for (const std::string& a : args)
-        {
-            if (a == "--help" || a == "-h" || a == "/?") return true;
-        }
-        return false;
-    }
-
-    // ── 多磁盘：QC(SDM845/QC8998)、HoloLens 这类“一个 FFU 里四块盘”的布局 ──
-    // 物理存储 = 顶层 <Stores> 中带 <DevicePath> 的 <Store>；每块对应一个独立磁盘
-    // （imageapp 的 InitializeVirtualHardDisk 逐块建 VHD，日志里出现 4 个 PhysicalDrive）。
-    // 其中带 <OSPool> 分区的是“池载体盘”：GPT 只写非池分区，OSPool 由
-    // ImageStorageService.CreateStoragePool 自己追加。
-    struct PhysicalDiskPlan
-    {
-        std::string storeType;
-        std::string devicePath;
-        std::string fileName;
-        std::uint64_t bytes = 0;
-        bool holdsPool = false;
-        bool onlyDefinedEntries = false;
-        std::vector<VhdPartition> parts;
-    };
-
-    static bool BuildPhysicalDiskParts(const LayoutModel& model, const LayoutStore& store,
-                                       std::uint64_t diskBytes, std::vector<VhdPartition>& parts,
-                                       bool& holdsPool, std::string& error)
-    {
-        const std::uint64_t sector = model.sectorSize != 0 ? model.sectorSize : 512;
-        const std::uint64_t defaultAlignment = model.defaultAlignment != 0 ? model.defaultAlignment : (1024ull * 1024);
-        auto align = [](std::uint64_t v, std::uint64_t a) { return a == 0 ? v : (v + a - 1) / a * a; };
-
-        for (const LayoutPartition& p : store.partitions)
-        {
-            if (LowerText(p.name) == "ospool") holdsPool = true;
-        }
-        // 尺寸紧的盘（OnlyAllocateDefinedGptEntries=true，如 XBL 只有 1024 个 4K 扇区）
-        // 不能按 1 MiB 起步，要紧接 MBR+GPT 头；其余按 1 MiB 起步。
-        std::uint64_t cursor = store.onlyAllocateDefinedGptEntries ? align(2 * sector, defaultAlignment)
-                                                                  : align(1024ull * 1024, defaultAlignment);
-        std::uint64_t declared = 0;
+            std::uint64_t alignment = defaultAlignment;
+            std::uint64_t custom = 0;
+            if (!p.byteAlignment.empty() && ParseHexOrDec(p.byteAlignment, custom) && custom != 0) alignment = custom;
+            if (p.singleSectorAlignment) alignment = sector;
+            return alignment;
+        };
+        // 先按顺序把固定尺寸分区「排一遍」，得到剩余空间的真实起点（含对齐空档）。
+        std::uint64_t fixedEnd = cursor;
         std::size_t flexible = 0;
         for (const LayoutPartition& p : store.partitions)
         {
-            if (LowerText(p.name) == "ospool") continue;
+            if (IsPoolPartition(p)) continue;
             std::uint64_t size = 0;
             if (p.hasTotalBytes && p.totalBytes != 0) size = p.totalBytes;
             else if (p.totalSectors != 0) size = p.totalSectors * sector;
+            if (size == 0 && p.minFreeBytes != 0) size = p.minFreeBytes;
+            if (size == 0 && p.minFreeSectors != 0) size = p.minFreeSectors * sector;
             if (p.useAllSpace || size == 0) { ++flexible; continue; }
-            declared += align(size, sector);
+            size = align(size, sector);
+            fixedEnd = align(fixedEnd, partAlign(p)) + size;
         }
         // 尾部留备份 GPT：紧尺寸盘 33 个扇区，普通盘 1 MiB。
         const std::uint64_t tailReserve = store.onlyAllocateDefinedGptEntries ? 33 * sector : (1024ull * 1024);
-        std::uint64_t available = diskBytes > declared + tailReserve ? diskBytes - declared - tailReserve : 0;
+        std::uint64_t available = diskBytes > fixedEnd + tailReserve ? diskBytes - fixedEnd - tailReserve : 0;
         std::uint64_t flexibleBytes = 0;
         if (flexible != 0 && available != 0)
         {
@@ -2309,18 +2461,17 @@ int CmdLayout(const std::vector<std::string>& args)
 
         for (const LayoutPartition& p : store.partitions)
         {
-            if (LowerText(p.name) == "ospool") continue;
+            if (IsPoolPartition(p)) continue;
             std::uint64_t size = 0;
             if (p.hasTotalBytes && p.totalBytes != 0) size = p.totalBytes;
             else if (p.totalSectors != 0) size = p.totalSectors * sector;
+            if (size == 0 && p.minFreeBytes != 0) size = p.minFreeBytes;
+            if (size == 0 && p.minFreeSectors != 0) size = p.minFreeSectors * sector;
             if (p.useAllSpace || size == 0) size = flexibleBytes;
             if (size == 0) { error = "分区 " + p.name + " 没有可用尺寸"; return false; }
             size = align(size, sector);
 
-            std::uint64_t alignment = defaultAlignment;
-            std::uint64_t custom = 0;
-            if (!p.byteAlignment.empty() && ParseHexOrDec(p.byteAlignment, custom) && custom != 0) alignment = custom;
-            if (p.singleSectorAlignment) alignment = sector;
+            const std::uint64_t alignment = partAlign(p);
 
             VhdPartition vp;
             vp.name = p.name;
@@ -2328,6 +2479,8 @@ int CmdLayout(const std::vector<std::string>& args)
             vp.id = p.id;
             vp.offsetBytes = align(cursor, alignment);
             vp.sizeBytes = size;
+            vp.mbrType = static_cast<unsigned int>(ParseNum(p.type) & 0xFF);
+            vp.bootable = p.bootable;
             parts.push_back(vp);
             cursor = vp.offsetBytes + size;
         }
@@ -2338,13 +2491,14 @@ int CmdLayout(const std::vector<std::string>& args)
                     FormatBytes(cursor + tailReserve) + "，磁盘 " + FormatBytes(diskBytes) + "）";
             return false;
         }
+        }
         return true;
     }
 
     static bool PlanPhysicalDisks(const LayoutModel& model, const std::string& outDir,
-                                  std::vector<PhysicalDiskPlan>& plans, std::string& error)
+                                  std::vector<PhysicalDiskPlan>& plans, std::uint64_t flatBytes,
+                                  std::string& error)
     {
-        const std::uint64_t sector = model.sectorSize != 0 ? model.sectorSize : 512;
         std::size_t physical = 0;
         for (const LayoutStore& store : model.stores)
         {
@@ -2354,16 +2508,40 @@ int CmdLayout(const std::vector<std::string>& args)
             plan.storeType = store.storeType;
             plan.devicePath = store.devicePath;
             plan.onlyDefinedEntries = store.onlyAllocateDefinedGptEntries;
+            plan.sector = StoreSectorBytes(model, store);
             plan.bytes = (store.hasSizeBytes && store.sizeInBytes != 0) ? store.sizeInBytes
-                                                                        : store.sizeInSectors * sector;
+                                                                        : store.sizeInSectors * plan.sector;
             if (plan.bytes == 0) { error = "物理存储 " + store.storeType + " 没有尺寸"; return false; }
             if (!BuildPhysicalDiskParts(model, store, plan.bytes, plan.parts, plan.holdsPool, error)) return false;
-            plan.fileName = outDir.empty() ? (store.storeType + ".vhdx") : (outDir + "\\" + store.storeType + ".vhdx");
+            std::string leaf = store.storeType.empty() ? ("disk" + std::to_string(physical)) : store.storeType;
+            if (physical > 1)
+            {
+                bool clash = false;
+                for (const PhysicalDiskPlan& other : plans) if (EqualsNoCase(other.storeType, leaf)) clash = true;
+                if (clash) leaf += "_" + std::to_string(physical);
+            }
+            plan.fileName = outDir.empty() ? (leaf + ".vhdx") : (outDir + "\\" + leaf + ".vhdx");
             plans.push_back(plan);
         }
         if (physical == 0)
         {
-            error = "布局里没有带 <DevicePath> 的物理 <Store>；单盘布局请用 pool build";
+            // v1 平铺布局（GenericGPT / VMGen1）：没有 Store，所有分区直接铺在一块盘上。
+            const LayoutStore* flat = nullptr;
+            for (const LayoutStore& s : model.stores) if (s.storeType.find("v1") != std::string::npos) flat = &s;
+            if (flat == nullptr && model.pools.size() == 1) flat = &model.pools[0];
+            if (flat != nullptr)
+            {
+                PhysicalDiskPlan plan;
+                plan.storeType = "Default";
+                plan.sector = model.sectorSize != 0 ? model.sectorSize : 512;
+                plan.bytes = flatBytes != 0 ? flatBytes : DefaultFlatDiskBytes(model);
+                plan.bytes = (plan.bytes + plan.sector - 1) / plan.sector * plan.sector;
+                if (!BuildPhysicalDiskParts(model, *flat, plan.bytes, plan.parts, plan.holdsPool, error)) return false;
+                plan.fileName = outDir.empty() ? std::string("Default.vhdx") : (outDir + "\\Default.vhdx");
+                plans.push_back(plan);
+                return true;
+            }
+            error = "布局里没有带 <DevicePath> 的物理 <Store>；单盘池布局请用 pool build";
             return false;
         }
         return true;
@@ -2499,6 +2677,8 @@ int CmdLayout(const std::vector<std::string>& args)
         OutLn("");
         OutLn("  --firmware <目录>  固件分区灌内容：目录里 <分区名>.bin/.img/.raw 原样写入该分区");
             OutLn("  --packages <dir>  firmware payloads from package cabs (update.mum binaryPartition/targetPartition)");
+            OutLn("  --size <n>        v1 平铺布局（无 Store 尺寸）的盘容量；缺省 = 固定分区之和 + 8 GiB");
+            OutLn("  --pool <name>     storage pool name from the layout (default: the only <StoragePool>); --version 24|26");
             OutLn("");
             OutLn("  plan   只打印将要生成的物理磁盘（每个带 <DevicePath> 的 <Store> 一块）。");
             OutLn("  build  逐块建 VHDX + 写 GPT；带 OSPool 分区的那块随后建池与 space。");
@@ -2509,7 +2689,9 @@ int CmdLayout(const std::vector<std::string>& args)
             return args.size() < 3 ? 2 : 0;
         }
         const std::string sub = args[2];
-        std::string layoutPath, outDir, onlyStore, firmwareDir, packagesDir;
+        std::string layoutPath, outDir, onlyStore, firmwareDir, packagesDir, poolName;
+        unsigned int version = 24;
+        std::uint64_t sizeOption = 0;
         bool dry = false;
         for (std::size_t i = 3; i < args.size(); ++i)
         {
@@ -2519,7 +2701,21 @@ int CmdLayout(const std::vector<std::string>& args)
             else if (a == "--outdir") { if (!next(outDir)) { Err("--outdir 缺少值"); return 2; } }
             else if (a == "--store") { if (!next(onlyStore)) { Err("--store 缺少值"); return 2; } }
             else if (a == "--packages") { if (!next(packagesDir)) { Err("--packages missing value"); return 2; } }
+            else if (a == "--pool") { if (!next(poolName)) { Err("--pool missing value"); return 2; } }
+            else if (a == "--version")
+            {
+                std::string v;
+                if (!next(v)) { Err("--version missing value"); return 2; }
+                version = static_cast<unsigned int>(std::strtoul(v.c_str(), nullptr, 0));
+            }
             else if (a == "--firmware") { if (!next(firmwareDir)) { Err("--firmware 缺少值"); return 2; } }
+            else if (a == "--size")
+            {
+                std::string v;
+                if (!next(v)) { Err("--size 缺少值"); return 2; }
+                sizeOption = ParseNum(v);
+                if (sizeOption == 0) { Err("--size 无法解析：" + v); return 2; }
+            }
             else if (a == "--dry") dry = true;
             else if (!a.empty() && a[0] == '-') { Err("未知参数：" + a); return 2; }
             else { Err("多余的位置参数：" + a); return 2; }
@@ -2530,19 +2726,26 @@ int CmdLayout(const std::vector<std::string>& args)
         if (!LoadLayout(layoutPath, model, error)) { Err("读布局失败：" + error); return 1; }
 
         std::vector<PhysicalDiskPlan> plans;
-        if (!PlanPhysicalDisks(model, outDir, plans, error)) { Err(error); return 1; }
+        if (!PlanPhysicalDisks(model, outDir, plans, sizeOption, error)) { Err(error); return 1; }
 
-        const std::uint64_t sectorSize = model.sectorSize != 0 ? model.sectorSize : 512;
+        std::string poolError;
+        const LayoutPool* poolGroup = SelectLayoutPool(model, poolName, poolError);
+        if (poolGroup == nullptr && !poolError.empty()) { Err(poolError); return 1; }
+        const std::wstring widePool = LayoutPoolName(poolGroup);
+        const unsigned int poolVersion = LayoutPoolVersion(poolGroup, version);
+        const std::vector<LayoutStore>& spaceStores = poolGroup != nullptr ? poolGroup->stores : model.pools;
         std::vector<PoolSpaceSpec> spaces;
-        for (const LayoutStore& store : model.pools)
+        for (const LayoutStore& store : spaceStores)
         {
+            const std::uint64_t storeSector = StoreSectorBytes(model, store);
             unsigned long long spaceSize = (store.hasSizeBytes && store.sizeInBytes != 0)
                                                ? store.sizeInBytes
-                                               : store.sizeInSectors * sectorSize;
+                                               : store.sizeInSectors * storeSector;
             if (spaceSize == 0 || store.storeType.empty()) continue;
             PoolSpaceSpec spec;
             spec.name = Utf8ToWide(store.storeType);
             spec.sizeBytes = spaceSize;
+            spec.sectorSize = static_cast<unsigned int>(storeSector);
             spaces.push_back(spec);
         }
 
@@ -2558,8 +2761,11 @@ int CmdLayout(const std::vector<std::string>& args)
             for (const VhdPartition& vp : plan.parts)
             {
                 OutLn("  分区 " + vp.name + "  type=" + vp.type + "  offset=" + FormatBytes(vp.offsetBytes) +
-                      "  size=" + FormatBytes(vp.sizeBytes));
+                      "  size=" + FormatBytes(vp.sizeBytes) +
+                      (vp.mbrType != 0 ? ("  mbr=" + NumText(vp.mbrType)) : std::string()) +
+                      (vp.bootable ? "  active" : ""));
             }
+            OutLn(AllMbrTypes(plan.parts) ? "  分区表：MBR（v1 平铺 / BIOS 引导）" : "  分区表：GPT");
             OutLn(plan.holdsPool ? "  角色：池载体（GPT 只写非池分区，OSPool 由服务追加）"
                                  : "  角色：裸分区盘（RequiredToFlash）");
         }
@@ -2595,7 +2801,6 @@ int CmdLayout(const std::vector<std::string>& args)
             }
         }
 
-        const std::uint32_t sector32 = static_cast<std::uint32_t>(sectorSize);
         for (const PhysicalDiskPlan& plan : plans)
         {
             if (!onlyStore.empty() && !EqualsNoCase(plan.storeType, onlyStore)) continue;
@@ -2613,7 +2818,8 @@ int CmdLayout(const std::vector<std::string>& args)
                     return 1;
                 }
             }
-            if (!VhdCreate(path, plan.bytes, VhdKind::Dynamic, 0, sector32, error))
+            const std::uint32_t planSector = static_cast<std::uint32_t>(plan.sector != 0 ? plan.sector : 512);
+            if (!VhdCreate(path, plan.bytes, VhdKind::Dynamic, 0, planSector, error))
             {
                 Err("创建 " + plan.fileName + " 失败：" + error);
                 return 1;
@@ -2625,11 +2831,14 @@ int CmdLayout(const std::vector<std::string>& args)
                 return 1;
             }
             OutLn(plan.storeType + " 已挂载：" + devicePath);
-            if (!VhdWriteGpt(devicePath, std::string(), plan.parts, sector32, error))
+            const bool mbrTable = AllMbrTypes(plan.parts);
+            const bool wroteTable = mbrTable ? VhdWriteMbr(devicePath, plan.parts, planSector, error)
+                                             : VhdWriteGpt(devicePath, std::string(), plan.parts, planSector, error);
+            if (!wroteTable)
             {
                 std::string ignored;
                 VhdDetach(path, ignored);
-                Err("写 GPT 失败：" + error);
+                Err(std::string("写") + (mbrTable ? "MBR" : "GPT") + " 失败：" + error);
                 return 1;
             }
             if (!firmwareDir.empty() || !packagesDir.empty())
@@ -2669,7 +2878,7 @@ int CmdLayout(const std::vector<std::string>& args)
                         return 1;
                     }
                     std::vector<std::uint8_t> padded = blob;
-                    const std::size_t sector = static_cast<std::size_t>(sectorSize > 512 ? sectorSize : 512);
+                    const std::size_t sector = static_cast<std::size_t>(plan.sector > 512 ? plan.sector : 512);
                     const std::size_t aligned = ((padded.size() + sector - 1) / sector) * sector;
                     if (aligned > vp.sizeBytes)
                     {
@@ -2704,7 +2913,7 @@ int CmdLayout(const std::vector<std::string>& args)
             if (plan.holdsPool)
             {
                 std::vector<std::string> created;
-                if (!PoolBuild(Utf8ToWide(devicePath), L"OSPool", 24, Utf8ToWide(outDir), spaces, created, error))
+                if (!PoolBuild(Utf8ToWide(devicePath), widePool, poolVersion, Utf8ToWide(outDir), spaces, created, error))
                 {
                     Err("建池失败：" + error);
                     return 1;
@@ -2953,7 +3162,7 @@ int CmdLayout(const std::vector<std::string>& args)
 
     int CmdPoolBuild(const std::vector<std::string>& args)
     {
-        std::string file, layoutPath, diskId, directory;
+        std::string file, layoutPath, directory, diskId, poolName;
         unsigned int version = 24;
         bool dry = false;
         for (std::size_t i = 3; i < args.size(); ++i)
@@ -2967,6 +3176,7 @@ int CmdLayout(const std::vector<std::string>& args)
             };
             if (a == "--vhd") { if (!next(file)) { Err("--vhd 缺少值"); return 2; } }
             else if (a == "--layout") { if (!next(layoutPath)) { Err("--layout 缺少值"); return 2; } }
+            else if (a == "--pool") { if (!next(poolName)) { Err("--pool missing value"); return 2; } }
             else if (a == "--disk-id") { if (!next(diskId)) { Err("--disk-id 缺少值"); return 2; } }
             else if (a == "--dir") { if (!next(directory)) { Err("--dir 缺少值"); return 2; } }
             else if (a == "--version")
@@ -2999,7 +3209,7 @@ int CmdLayout(const std::vector<std::string>& args)
         {
             for (const LayoutPartition& p : store.partitions)
             {
-                if (LowerText(p.name) == "ospool") continue;
+                if (IsPoolPartition(p)) continue;
                 std::uint64_t size = 0;
                 if (p.hasTotalBytes && p.totalBytes != 0) size = p.totalBytes;
                 else if (p.totalSectors != 0) size = p.totalSectors * sector;
@@ -3020,16 +3230,24 @@ int CmdLayout(const std::vector<std::string>& args)
         }
         if (parts.empty()) { Err("布局的物理 <Stores> 里没有可写分区"); return 1; }
 
+        std::string poolError;
+        const LayoutPool* poolGroup = SelectLayoutPool(model, poolName, poolError);
+        if (poolGroup == nullptr && !poolError.empty()) { Err(poolError); return 1; }
+        const std::wstring widePool = LayoutPoolName(poolGroup);
+        const unsigned int poolVersion = LayoutPoolVersion(poolGroup, version);
+        const std::vector<LayoutStore>& spaceStores = poolGroup != nullptr ? poolGroup->stores : model.pools;
         std::vector<PoolSpaceSpec> spaces;
-        for (const LayoutStore& store : model.pools)
+        for (const LayoutStore& store : spaceStores)
         {
+            const std::uint64_t storeSector = StoreSectorBytes(model, store);
             unsigned long long spaceSize = 0;
             if (store.hasSizeBytes && store.sizeInBytes != 0) spaceSize = store.sizeInBytes;
-            else if (store.sizeInSectors != 0) spaceSize = store.sizeInSectors * sector;
+            else if (store.sizeInSectors != 0) spaceSize = store.sizeInSectors * storeSector;
             if (spaceSize == 0 || store.storeType.empty()) continue;
             PoolSpaceSpec spec;
             spec.name = Utf8ToWide(store.storeType);
             spec.sizeBytes = spaceSize;
+            spec.sectorSize = static_cast<unsigned int>(storeSector);
             spaces.push_back(spec);
         }
 
@@ -3070,7 +3288,7 @@ int CmdLayout(const std::vector<std::string>& args)
         OutLn("已写物理 GPT：" + device);
         const std::wstring wideDevice(device.begin(), device.end());
         std::vector<std::string> created;
-        const bool built = PoolBuild(wideDevice, L"OSPool", version, Utf8ToWide(directory), spaces, created, error);
+        const bool built = PoolBuild(wideDevice, widePool, poolVersion, Utf8ToWide(directory), spaces, created, error);
         std::string detachError;
         const bool detached = VhdDetach(wideFile, detachError);
         for (const std::string& name : created) OutLn("  space 已建：" + name);
@@ -3080,9 +3298,41 @@ int CmdLayout(const std::vector<std::string>& args)
         return 0;
     }
 
+    int CmdPoolClose(const std::vector<std::string>& args)
+    {
+        std::string file, directory;
+        bool keepSpaces = false;
+        for (std::size_t i = 3; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            auto next = [&](std::string& out) -> bool
+            {
+                if (i + 1 >= args.size()) return false;
+                out = args[++i];
+                return true;
+            };
+            if (a == "--vhd") { if (!next(file)) { Err("--vhd 缺少值"); return 2; } }
+            else if (a == "--dir") { if (!next(directory)) { Err("--dir 缺少值"); return 2; } }
+            else if (a == "--keep-spaces") keepSpaces = true;
+            else if (!a.empty() && a[0] == '-') { Err("未知参数：" + a); return 2; }
+            else { Err("多余的位置参数：" + a); return 2; }
+        }
+        if (file.empty())
+        {
+            Err("pool close 需要 --vhd <虚拟磁盘>");
+            return 2;
+        }
+        std::vector<std::string> report;
+        std::string error;
+        const bool ok = PoolClose(Utf8ToWide(file), Utf8ToWide(directory), !keepSpaces, report, error);
+        for (const std::string& line : report) OutLn(line);
+        if (!ok) { Err("关闭池失败：" + error); return 1; }
+        return 0;
+    }
+
     int CmdPoolPrepare(const std::vector<std::string>& args)
     {
-        std::string file, layoutPath, directory, onlySpace;
+        std::string file, layoutPath, directory, onlySpace, poolName;
         unsigned int version = 24;
         bool dry = false;
         bool doFormat = false;
@@ -3098,6 +3348,7 @@ int CmdLayout(const std::vector<std::string>& args)
             if (a == "--vhd") { if (!next(file)) { Err("--vhd 缺少值"); return 2; } }
             else if (a == "--layout") { if (!next(layoutPath)) { Err("--layout 缺少值"); return 2; } }
             else if (a == "--dir") { if (!next(directory)) { Err("--dir 缺少值"); return 2; } }
+            else if (a == "--pool") { if (!next(poolName)) { Err("--pool missing value"); return 2; } }
             else if (a == "--space") { if (!next(onlySpace)) { Err("--space 缺少值"); return 2; } }
             else if (a == "--version")
             {
@@ -3122,18 +3373,25 @@ int CmdLayout(const std::vector<std::string>& args)
         const std::uint64_t defaultAlignment = model.defaultAlignment != 0 ? model.defaultAlignment : (1024ull * 1024);
         auto align = [](std::uint64_t v, std::uint64_t a) { return a == 0 ? v : (v + a - 1) / a * a; };
 
+        std::string poolError;
+        const LayoutPool* poolGroup = SelectLayoutPool(model, poolName, poolError);
+        if (poolGroup == nullptr && !poolError.empty()) { Err(poolError); return 1; }
+        const std::wstring widePool = LayoutPoolName(poolGroup);
+        const unsigned int poolVersion = LayoutPoolVersion(poolGroup, version);
+        const std::vector<LayoutStore>& spaceStores = poolGroup != nullptr ? poolGroup->stores : model.pools;
         std::vector<SpacePrepareSpec> spaces;
-        for (const LayoutStore& store : model.pools)
+        for (const LayoutStore& store : spaceStores)
         {
             if (store.storeType.empty()) continue;
             if (!onlySpace.empty() && !EqualsNoCase(store.storeType, onlySpace)) continue;
+            const std::uint64_t storeSector = StoreSectorBytes(model, store);
             unsigned long long spaceSize = 0;
             if (store.hasSizeBytes && store.sizeInBytes != 0) spaceSize = store.sizeInBytes;
-            else if (store.sizeInSectors != 0) spaceSize = store.sizeInSectors * sector;
+            else if (store.sizeInSectors != 0) spaceSize = store.sizeInSectors * storeSector;
             if (spaceSize == 0) continue;
             SpacePrepareSpec spec;
             spec.name = Utf8ToWide(store.storeType);
-            spec.sectorSize = static_cast<unsigned int>(sector);
+            spec.sectorSize = static_cast<unsigned int>(storeSector);
             std::uint64_t cursor = align(1024ull * 1024, defaultAlignment);
             for (const LayoutPartition& p : store.partitions)
             {
@@ -3199,7 +3457,7 @@ int CmdLayout(const std::vector<std::string>& args)
             return 1;
         }
         std::vector<std::string> report;
-        const bool prepared = PoolPrepareSpaces(wideFile, L"OSPool", version, Utf8ToWide(directory), spaces,
+        const bool prepared = PoolPrepareSpaces(wideFile, widePool, poolVersion, Utf8ToWide(directory), spaces,
                                                 doFormat, report, error);
         for (const std::string& line : report) OutLn("  " + line);
         if (!prepared) { Err("池内分区/格式化失败：" + error); return 1; }
@@ -3221,12 +3479,14 @@ int CmdLayout(const std::vector<std::string>& args)
             OutLn("  pool build --vhd <vhdx> --layout <xml> [--version 24|26] [--disk-id <guid>] [--dir <临时目录>] [--dry]");
             OutLn("                                写物理 GPT（只含 BS_EFIESP）→ 建池 → 按布局 <StoragePool>/<Stores> 逐 store 建 space");
             OutLn("  pool prepare --vhd <vhdx> --layout <xml> [--space <名>] [--format] [--dir <临时目录>] [--dry]");
+            OutLn("  pool close --vhd <vhdx> [--dir <临时目录>] [--keep-spaces]");
             OutLn("                                打开已有池 → 每个 space 内写 GPT（按布局 ByteAlignment/DefaultPartitionByteAlignment）");
             OutLn("                                加 --format 才按布局 FileSystem/ClusterSize 格式化分区");
             return sub.empty() ? 2 : 0;
         }
         if (sub == "build") return CmdPoolBuild(args);
         if (sub == "prepare") return CmdPoolPrepare(args);
+        if (sub == "close") return CmdPoolClose(args);
         if (sub == "probe")
         {
             std::string dll, error;
@@ -3279,6 +3539,13 @@ int CmdLayout(const std::vector<std::string>& args)
             std::vector<const XmlNode*> pools = kidsOf(rootNode, "StoragePools");
             if (pools.empty()) { Err("布局里没有 <StoragePools>（v1 布局无存储池）"); return 1; }
             int printed = 0;
+            unsigned long long rootSector = 512;
+            const std::string rootSectorText = TextOf(rootNode, "SectorSize");
+            if (!rootSectorText.empty())
+            {
+                unsigned long long v = std::strtoull(rootSectorText.c_str(), nullptr, 0);
+                if (v != 0) rootSector = v;
+            }
             for (const XmlNode* poolNode : kidsOf(pools[0], "StoragePool"))
             {
                 const std::string name = TextOf(poolNode, "Name");
@@ -3292,10 +3559,23 @@ int CmdLayout(const std::vector<std::string>& args)
                     ++index;
                     const std::string type = TextOf(store, "StoreType");
                     const std::string sid = TextOf(store, "Id");
-                    unsigned long long sectors = 0;
-                    const std::string sectorsText = TextOf(store, "SizeInSectors");
-                    if (!sectorsText.empty()) sectors = std::strtoull(sectorsText.c_str(), nullptr, 0);
-                    unsigned long long bytes = sectors * 512ull;
+                    const std::string storeSectorText = TextOf(store, "SectorSize");
+                    unsigned long long storeSector = rootSector;
+                    if (!storeSectorText.empty())
+                    {
+                        unsigned long long v = std::strtoull(storeSectorText.c_str(), nullptr, 0);
+                        if (v != 0) storeSector = v;
+                    }
+                    unsigned long long bytes = 0;
+                    const std::string sizeBytesText = TextOf(store, "SizeInBytes");
+                    if (!sizeBytesText.empty()) bytes = std::strtoull(sizeBytesText.c_str(), nullptr, 0);
+                    if (bytes == 0)
+                    {
+                        unsigned long long sectors = 0;
+                        const std::string sectorsText = TextOf(store, "SizeInSectors");
+                        if (!sectorsText.empty()) sectors = std::strtoull(sectorsText.c_str(), nullptr, 0);
+                        bytes = sectors * storeSector;
+                    }
                     std::vector<const XmlNode*> parts = kidsOf(store, "Partitions");
                     std::string partNames;
                     for (const XmlNode* part : parts.empty() ? std::vector<const XmlNode*>() : kidsOf(parts[0], "Partition"))
@@ -3311,7 +3591,6 @@ int CmdLayout(const std::vector<std::string>& args)
                 ++printed;
             }
             if (printed == 0) { Err("布局的 <StoragePool> 为空"); return 1; }
-            OutLn("（演练）pool create 尚未接通：需要 CreateStorageService / STORE_ID / TI 权限。");
             return 0;
         }
         if (sub == "create")
