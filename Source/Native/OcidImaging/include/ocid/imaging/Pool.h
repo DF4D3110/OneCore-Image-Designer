@@ -114,6 +114,25 @@ OCID_POOL_API bool PoolFinalize(const std::wstring& imagePath,
                              std::vector<std::string>& report,
                              std::string& error);
 
+// 按文件名与必需导出查找 ADK 工具集中的 DLL（UpdateDLL.dll / UpdateAgent.dll ...）。
+OCID_POOL_API bool PoolFindAdkDll(const std::wstring& fileName,
+                                  const std::string& requiredExport,
+                                  std::wstring& outPath,
+                                  std::string& error);
+
+// 为落包（UpdateDLL）准备 store id：挂载基座虚拟盘、打开池、逐个挂载 space 并取
+// GetStoreId。返回的 ids 每项 20 字节（u32 storeType + GUID），顺序 = 基座 + 各 space。
+// 注意：本函数有意**不**卸载 space、不关闭池（UpdateDLL 在后继调用里要用这些挂载），
+// 由进程退出时清理。
+OCID_POOL_API bool PoolAttachForUpdate(const std::wstring& imagePath,
+                                       const std::wstring& poolName,
+                                       unsigned int version,
+                                       const std::wstring& directory,
+                                       const std::vector<std::wstring>& spaceNames,
+                                       std::vector<std::vector<unsigned char> >& storeIds,
+                                       std::vector<std::string>& report,
+                                       std::string& error);
+
 OCID_POOL_API bool PoolPrepareSpaces(const std::wstring& devicePath,
                                      const std::wstring& poolName,
                                      unsigned int version,

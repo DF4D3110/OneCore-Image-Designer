@@ -119,13 +119,18 @@ Build-Dll 'pool' 'ocid_pool' $poolObjs @("`"$commonLib`"", 'advapi32.lib', "`"$v
 
 
 
+# ---- 3d) update (UpdateDLL.dll wrapper: staging + commit) ----
+$updateObjs = @()
+$updateObjs += Build-Object 'update' 'src\Update.cpp' @('/DOCID_UPDATE_BUILD')
+$updateLib = Join-Path $out 'ocid_update.wcos.lib'
+Build-Dll 'update' 'ocid_update' $updateObjs @("`"$commonLib`"", "`"$poolLib`"")
 # ---- 4) exe ----
 $exeObjs = @()
 $exeObjs += Build-Object 'imagegen' 'tools\imagegen.cpp'
 $exe = Join-Path $out 'ocid_imagegen.exe'
 $planLib = Join-Path $out 'ocid_plan.wcos.lib'
 $exeObjArgs = ($exeObjs | ForEach-Object { '"' + $_ + '"' }) -join ' '
-$linkLines = @("link /nologo /OUT:`"$exe`" $exeObjArgs `"$planLib`" `"$cabLib`" `"$vhdLib`" `"$poolLib`" `"$commonLib`" virtdisk.lib ole32.lib")
+$linkLines = @("link /nologo /OUT:`"$exe`" $exeObjArgs `"$planLib`" `"$cabLib`" `"$vhdLib`" `"$poolLib`" `"$updateLib`" `"$commonLib`" virtdisk.lib ole32.lib advapi32.lib")
 $null = Invoke-Batch 'imagegen' $linkLines
 Write-Host "[build] OK ocid_imagegen.exe"
 

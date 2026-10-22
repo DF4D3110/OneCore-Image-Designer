@@ -14,6 +14,7 @@
 #include "ocid/imaging/Plan.h"
 #include "ocid/imaging/Vhd.h"
 #include "ocid/imaging/Pool.h"
+#include "ocid/imaging/Update.h"
 
 #include <algorithm>
 #include <cctype>
@@ -32,7 +33,7 @@ using namespace ocid::imaging;
 namespace
 {
 
-const char* const kVersion = "0.4.0";
+const char* const kVersion = "0.5.0";
 
 void PrintUsage()
 {
@@ -3582,6 +3583,202 @@ int CmdLayout(const std::vector<std::string>& args)
     }
 
 
+// OCID Imaging —— apply（落包：UpdateDLL 暂存 + 提交）
+//
+// 一条命令把"已建好盘/池/space 的镜像"与"包清单"接起来：
+//   1) 从布局取 space 名（OSPool 下每个 Store 的 StoreType）；
+//   2) 生成 UpdateInput.xml（PackageFiles = 有序 cab 绝对路径，带 \\?\ 前缀）；
+//   3) 调 UpdateDLL：Initialize(InitForInput) → PrepareUpdate → Initialize(InitForOutput) → ExecuteUpdate。
+// 包清单的决策规则不在这里重写——直接用 plan 那一层（BuildPlan）。
+    static bool WriteUpdateInputXml(const PlanResult& plan, const std::string& packagesDir,
+                                    const std::string& outPath, std::string& error)
+    {
+        std::string xml;
+        xml += "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n";
+        xml += "<UpdateOSInput xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
+               "xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\" "
+               "xmlns=\"http://schemas.microsoft.com/embedded/2004/10/ImageUpdate\">\r\n";
+        xml += "  <Description>ocid_imagegen apply</Description>\r\n";
+        xml += "  <PackageFiles>\r\n";
+        for (const PackageRef& ref : plan.packages)
+        {
+            xml += "    <PackageFile>\\\\?\\";
+            XmlEscapeTo(xml, packagesDir + "\\" + ref.cab);
+            xml += "</PackageFile>\r\n";
+        }
+        xml += "  </PackageFiles>\r\n";
+        xml += "</UpdateOSInput>\r\n";
+        return WriteFileText(Utf8ToWide(outPath), xml, error);
+    }
+
+    int CmdApply(const std::vector<std::string>& args)
+    {
+        std::string imagePath;
+        std::string layoutPath;
+        std::string packagesDir;
+        std::string packagesRootOverride;
+        std::string oemInputPath;
+        std::string fmDir;
+        std::string arch = "amd64";
+        std::string actionList;
+        std::string outDir;
+        std::string stagingDir;
+        std::string driveLetterConfig;
+        std::string updateInputPath;
+        std::string storeStyle;
+        std::string poolName;
+        std::vector<std::string> spaceOnly;
+        unsigned int version = 0;
+        bool stageOnly = false;
+        bool dry = false;
+
+        for (std::size_t i = 2; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            auto next = [&](std::string& out) -> bool {
+                if (i + 1 >= args.size()) return false;
+                out = args[++i];
+                return true;
+            };
+            if (a == "--vhd") { if (!next(imagePath)) { Err("--vhd 缺少值"); return 2; } }
+            else if (a == "--layout") { if (!next(layoutPath)) { Err("--layout 缺少值"); return 2; } }
+            else if (a == "--packages") { if (!next(packagesDir)) { Err("--packages 缺少值"); return 2; } }
+            else if (a == "--packages-root") { if (!next(packagesRootOverride)) { Err("--packages-root 缺少值"); return 2; } }
+            else if (a == "--oem-input") { if (!next(oemInputPath)) { Err("--oem-input 缺少值"); return 2; } }
+            else if (a == "--fm-dir") { if (!next(fmDir)) { Err("--fm-dir 缺少值"); return 2; } }
+            else if (a == "--arch") { if (!next(arch)) { Err("--arch 缺少值"); return 2; } }
+            else if (a == "--action-list") { if (!next(actionList)) { Err("--action-list 缺少值"); return 2; } }
+            else if (a == "--outdir") { if (!next(outDir)) { Err("--outdir 缺少值"); return 2; } }
+            else if (a == "--dir") { if (!next(stagingDir)) { Err("--dir 缺少值"); return 2; } }
+            else if (a == "--drive-letter-config") { if (!next(driveLetterConfig)) { Err("--drive-letter-config 缺少值"); return 2; } }
+            else if (a == "--update-input") { if (!next(updateInputPath)) { Err("--update-input 缺少值"); return 2; } }
+            else if (a == "--pool") { if (!next(poolName)) { Err("--pool 缺少值"); return 2; } }
+            else if (a == "--space") { std::string v; if (!next(v)) { Err("--space 缺少值"); return 2; } spaceOnly.push_back(v); }
+            else if (a == "--version")
+            {
+                std::string v;
+                if (!next(v)) { Err("--version 缺少值"); return 2; }
+                version = static_cast<unsigned int>(std::strtoul(v.c_str(), nullptr, 0));
+            }
+            else if (a == "--store-style") { if (!next(storeStyle)) { Err("--store-style 缺少值"); return 2; } }
+            else if (a == "--stage-only") stageOnly = true;
+            else if (a == "--dry") dry = true;
+            else if (WantsHelp(args)) { OutLn("apply 用法见 imagegen help"); return 0; }
+            else { Err("apply 未知选项：" + a); return 2; }
+        }
+
+        if (imagePath.empty() || layoutPath.empty() || packagesDir.empty() || actionList.empty())
+        {
+            Err("apply 需要 --vhd <虚拟磁盘> --layout <布局 XML> --packages <包目录> --action-list <ActionList.xml>");
+            return 2;
+        }
+        if (outDir.empty())
+        {
+            Err("apply 需要 --outdir <输出目录>（UpdateInput/UpdateOutput/UpdateHistory 写在这里）");
+            return 2;
+        }
+        if (stagingDir.empty()) stagingDir = outDir + "\\staging";
+        {
+            std::string mkError;
+            EnsureDirectory(Utf8ToWide(outDir), mkError);
+            EnsureDirectory(Utf8ToWide(stagingDir), mkError);
+        }
+
+        // 上一轮留下的永久挂载会让 OpenVirtualHardDisk 报 0x80070020（共享冲突）
+        {
+            std::string detachError;
+            (void)ocid::imaging::VhdDetach(Utf8ToWide(imagePath), detachError);
+        }
+
+        LayoutModel model;
+        std::string error;
+        if (!LoadLayout(layoutPath, model, error)) { Err("读布局失败：" + error); return 1; }
+
+        std::string poolError;
+        const LayoutPool* poolGroup = SelectLayoutPool(model, poolName, poolError);
+        if (poolGroup == nullptr && !poolError.empty()) { Err(poolError); return 1; }
+        const std::wstring widePool = LayoutPoolName(poolGroup);
+        const unsigned int poolVersion = LayoutPoolVersion(poolGroup, version);
+        const std::vector<LayoutStore>& spaceStores = poolGroup != nullptr ? poolGroup->stores : model.pools;
+        std::vector<std::wstring> spaceNames;
+        for (const LayoutStore& store : spaceStores)
+        {
+            if (store.storeType.empty()) continue;
+            bool wanted = spaceOnly.empty();
+            for (const std::string& only : spaceOnly)
+            {
+                if (EqualsNoCase(only, store.storeType)) wanted = true;
+            }
+            if (!wanted) continue;
+            spaceNames.push_back(Utf8ToWide(store.storeType));
+        }
+        if (spaceNames.empty()) { Err("布局里没有可用的 space（OSPool 下没有 Store）"); return 1; }
+
+        // UpdateInput：没给就按 plan 现场生成（包顺序 = imageapp 的展开顺序）。
+        if (updateInputPath.empty())
+        {
+            if (oemInputPath.empty() || fmDir.empty())
+            {
+                Err("没有 --update-input 时必须给 --oem-input 与 --fm-dir 以便生成包清单");
+                return 2;
+            }
+            PlanInput input;
+            input.oemInputPath = oemInputPath;
+            input.fmDir = fmDir;
+            input.arch = arch;
+            input.keepDuplicates = true;
+            PlanResult plan;
+            if (!BuildPlan(input, plan, error)) { Err("选包失败：" + error); return 1; }
+            updateInputPath = outDir + "\\UpdateInput.xml";
+            if (!WriteUpdateInputXml(plan, packagesDir, updateInputPath, error))
+            {
+                Err("写 UpdateInput 失败：" + error);
+                return 1;
+            }
+            OutLn("UpdateInput：" + std::to_string(plan.packages.size()) + " 个包 -> " + updateInputPath);
+        }
+
+        UpdateRequest request;
+        request.imagePath = Utf8ToWide(imagePath);
+        request.poolName = widePool;
+        request.poolVersion = poolVersion;
+        request.stagingDirectory = Utf8ToWide(stagingDir);
+        request.spaces = spaceNames;
+        request.deviceLayoutPaths.push_back(Utf8ToWide(layoutPath));
+        if (!driveLetterConfig.empty()) request.driveLetterConfigPath = Utf8ToWide(driveLetterConfig);
+        request.actionListFile = Utf8ToWide(actionList);
+        request.packagesRoot = Utf8ToWide(packagesRootOverride.empty() ? packagesDir : packagesRootOverride);
+        request.updateInputFile = Utf8ToWide(updateInputPath);
+        request.updateOutputFile = Utf8ToWide(outDir + "\\UpdateOutput.xml");
+        request.updateHistoryFile = Utf8ToWide(outDir + "\\UpdateHistory.xml");
+        request.logFile = Utf8ToWide(outDir + "\\imagegen-update.log");
+        request.stageOnly = stageOnly;
+        request.storeStyle = storeStyle;
+
+        OutLn("落包：" + std::to_string(spaceNames.size()) + " 个 space，池=" + WideToUtf8(widePool) +
+              "，版本=" + std::to_string(poolVersion) + (stageOnly ? "（只暂存）" : "（暂存+提交）"));
+        if (dry)
+        {
+            OutLn("（演练）将要挂载的 space：");
+            for (const std::wstring& name : spaceNames) OutLn("  - " + WideToUtf8(name));
+            OutLn("  UpdateInput = " + updateInputPath);
+            OutLn("  UpdateOutput = " + outDir + "\\UpdateOutput.xml");
+            OutLn("  staging = " + stagingDir);
+            return 0;
+        }
+
+        std::vector<std::string> report;
+        const bool applied = UpdateApply(request, report, error);
+        for (const std::string& line : report) OutLn("  " + line);
+        if (!applied)
+        {
+            Err("落包失败：" + error);
+            return 1;
+        }
+        OutLn("落包完成：UpdateOutput -> " + outDir + "\\UpdateOutput.xml");
+        return 0;
+    }
+
     int CmdPool(const std::vector<std::string>& args)
     {
         const std::string sub = args.size() > 2 ? args[2] : std::string();
@@ -3596,6 +3793,12 @@ int CmdLayout(const std::vector<std::string>& args)
             OutLn("                                写物理 GPT（只含 BS_EFIESP）→ 建池 → 按布局 <StoragePool>/<Stores> 逐 store 建 space");
             OutLn("  pool prepare --vhd <vhdx> --layout <xml> [--space <名>] [--format] [--dir <临时目录>] [--dry]");
         OutLn("  pool finalize --vhd <vhdx> --layout <xml> [--pool <名>] [--space <名>] [--dir <临时目录>] [--drive-letter-config <xml>] [--no-wof] [--dry]");
+    OutLn("");
+    OutLn("  apply --vhd <vhdx> --layout <xml> --packages <包目录> --action-list <ActionList.xml> --outdir <输出目录>");
+    OutLn("        [--oem-input <xml> --fm-dir <目录>] [--arch amd64|arm64] [--update-input <xml>] [--space <名>]");
+    OutLn("        [--drive-letter-config <xml>] [--dir <临时目录>] [--pool <名>] [--version <n>] [--stage-only] [--dry]");
+    OutLn("        [--packages-root <目录>]  ActionList 的 SourcePath 相对根（默认同 --packages）");
+    OutLn("        落包：调 UpdateDLL 先暂存（PrepareUpdate）再提交（ExecuteUpdate）；没给 --update-input 时用 plan 现场生成。");
             OutLn("  pool close --vhd <vhdx> [--dir <临时目录>] [--keep-spaces]");
             OutLn("                                打开已有池 → 每个 space 内写 GPT（按布局 ByteAlignment/DefaultPartitionByteAlignment）");
             OutLn("                                加 --format 才按布局 FileSystem/ClusterSize 格式化分区");
@@ -3835,6 +4038,7 @@ int wmain(int argc, wchar_t** wargv)
     if (command == "vhd") return CmdVhd(args);
     if (command == "disk") return CmdDisk(args);
     if (command == "pool") return CmdPool(args);
+    if (command == "apply") return CmdApply(args);
     if (command == "layout")
     {
         return CmdLayout(args);
