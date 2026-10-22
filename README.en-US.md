@@ -274,8 +274,11 @@ usable. See `Source/Native/OcidServicing/WSSM.md`.
 finalize) as project-owned code, split into DLLs so a failure points at one layer: `ocid_common.wcos.dll`
 (console, log, files, XML, MSXML6 XSD validation), `ocid_plan.wcos.dll` (selection from OEMInput +
 FeatureManifest), `ocid_cab.wcos.dll` (NONE/MSZIP decoders plus LZX/Quantum through the system `cabinet.dll`
-FDI), and the `ocid_imagegen.exe` console (`plan`, `packagelist`, `layout show|merge|plan|validate|check`,
-`cab list|entry|extract`, `schema validate|pick`).
+FDI), `ocid_vhd.wcos.dll` (create/attach/detach virtual disks, GPT/MBR writing and read-back, physical disks
+rejected by design), `ocid_pool.wcos.dll` (storage pools through `ImageStorageService.dll`: pool, spaces,
+per-space GPT and formatting), and the `ocid_imagegen.exe` console (`plan`, `packagelist`,
+`layout show|merge|plan|validate|check`, `disk plan|build`, `pool plan|build|prepare`,
+`vhd create|attach|detach|info`, `cab list|entry|extract`, `schema validate|pick`).
 
 Selection matches the reference runs entry-for-entry and in the same order: 10.0.20274 (amd64) 181/181, and
 10.0.20279 (arm64) 194/194. Inputs are validated against XSDs extracted from the ADK assemblies and shipped
@@ -306,8 +309,15 @@ and hex alignment text such as `0x200000` is preserved. Merging the 19541 templa
 half reproduces imageapp's `Flash.DeviceLayout.xml` reference artifact field for field. `layout plan`
 turns a merged layout into the disk plan (how many disks, their size, their partitions) used by M1.
 
-Still missing: disk creation, finalize, and the L0 orchestration that
-drives `UpdateDLL.dll` for the offline install; AppX is out of scope for now.
+Disk creation (`Vhd` + `Pool`) now runs end to end for all three layout shapes: a v2 storage-pool layout
+(20274 amd64, 42 GiB disk plus 7 spaces, all with GPT and NTFS), a v2 variable-sector layout (22621 SDM845
+arm64, four physical disks at 4096-byte sectors, same space-level GPT/NTFS), and a v1 flat MBR layout
+(22000 GenericGPT, six partitions). The directory passed via `--dir` is created automatically (a missing one
+makes `ImageStorageService` fail with the misleading `0x80070006`), and firmware partitions can be filled
+straight from package CABs via `--packages` (payloads of `binaryPartition="true"` packages).
+
+Still missing: finalize (drive letters and payload placement) and the L0 orchestration that drives
+`UpdateDLL.dll` for the offline install; AppX is out of scope for now.
 
 ## Repository layout
 

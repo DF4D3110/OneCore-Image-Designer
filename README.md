@@ -264,7 +264,9 @@ ocid_wssm pcm build a.manifest out.pcm
 | `ocid_common.wcos.dll` | 控制台与日志、文件与 XML、MSXML6 XSD 校验 |
 | `ocid_plan.wcos.dll` | 选包：OEMInput + FeatureManifest → 包计划（8 类 section，含架构/语言展开） |
 | `ocid_cab.wcos.dll` | CAB 读取：NONE/MSZIP 自研解码，LZX/Quantum 走系统 `cabinet.dll` 的 FDI |
-| `ocid_imagegen.exe` | 入口：`plan` / `packagelist` / `layout show|merge|plan|validate|check` / `cab list|entry|extract` / `schema validate|pick` / `version` / `help` |
+| `ocid_vhd.wcos.dll` | 虚拟磁盘：创建/挂载/卸载、GPT/MBR 写入与回读；物理盘一律拒绝（`BusType` 门禁） |
+| `ocid_pool.wcos.dll` | 存储池：调 `ImageStorageService.dll` 建池/建 space、space 内写 GPT 与格式化 |
+| `ocid_imagegen.exe` | 入口：`plan` / `packagelist` / `layout ...` / `disk plan|build` / `pool plan|build|prepare` / `vhd ...` / `cab ...` / `schema ...` / `version` / `help` |
 
 ```powershell
 Source\Native\build-imaging.ps1              # -> Source\Native\Output\Imaging\ocid_imagegen.exe
@@ -274,6 +276,11 @@ ocid_imagegen layout show DeviceLayout.xml    # 池 store / 分区 / 物理盘
 ocid_imagegen layout merge DeviceLayoutMS.xml --oem DeviceLayoutOEM.xml --out merged.xml
 ocid_imagegen layout plan merged.xml          # 造盘计划：几块盘、每块多大、几个分区
 ocid_imagegen layout check DeviceLayout.xml   # 结构与尺寸自检（造盘前先跑）
+ocid_imagegen disk plan DeviceLayout.xml            # 造盘计划：几块盘、扇区、分区
+ocid_imagegen disk build --layout DeviceLayout.xml --outdir disks [--store Default] [--pool OSPool] [--size 42G]                          [--firmware <目录>] [--packages <包目录>]   # 建盘 + 写 GPT/MBR + 固件 payload
+ocid_imagegen pool build --vhd disks\Default.vhdx --layout DeviceLayout.xml      # 物理盘上建池与 space
+ocid_imagegen pool prepare --vhd disks\Default.vhdx --layout DeviceLayout.xml --format   # space 内写 GPT + 格式化
+ocid_imagegen vhd create|attach|detach|info <file.vhdx>
 ocid_imagegen cab extract a.cab --out dir
 ocid_imagegen schema validate OEMInput.xml --schema Schemas\adk\OEMInput.V2.OEMInputV2.xsd
 ```
@@ -288,7 +295,12 @@ ocid_imagegen schema validate OEMInput.xml --schema Schemas\adk\OEMInput.V2.OEMI
 `<assemblyIdentity version>` 决定 `Version`（按真机行为取第 1/2/4 段）。与真机 `Falsh.PackageList.xml`
 对拍：187 个可比包的全部字段零差异；差集只有 6 个本机缺失的 QEMU BSP 包和 1 个被后续阶段过滤掉的包。
 
-未完成：造盘（`Vhd`）、收尾（`Finalize`）与 L0 编排（调 `UpdateDLL.dll` 做离线安装）；AppX 相关先不做。
+造盘（`Vhd` + `Pool`）已按**三种布局形态**跑通：v2 存储池（20274 amd64，42 GiB 盘 + 7 个 space 全 GPT/NTFS）、
+v2 可变扇区（22621 SDM845 arm64，4 块物理盘 + 4096 字节扇区，同样跑通 space 内 GPT/NTFS）、v1 平铺 MBR（22000
+GenericGPT，6 个分区）。`--dir` 指向的临时目录会被自动创建（不存在时 `ImageStorageService` 会返回误导性的
+`0x80070006`）；固件分区可直接从包 cab 里按 `binaryPartition="true"` 的 payload 写入（`--packages`）。
+
+未完成：收尾（`Finalize`：盘符与落包）与 L0 编排（调 `UpdateDLL.dll` 做离线安装）；AppX 相关先不做。
 
 设备布局（`layout`）用 WSK（Windows System Kit，10.0.22000 的 IoT Core 套件）里 12 个
 `*DeviceLayout*-Package` 与 20348 HoloLens 的布局作为语料：v1 是 MBR 平铺分区（`Type=0xNN`），v2 是

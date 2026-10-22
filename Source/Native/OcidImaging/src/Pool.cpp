@@ -294,6 +294,36 @@ namespace {
 const char* eol8() { return "\n"; }
 } // namespace
 
+
+namespace {
+
+// ImageStorageService uses the temp directory while staging spaces; if it does not
+// exist AttachStorageSpace fails with a misleading 0x80070006 (ERROR_INVALID_HANDLE).
+bool EnsurePoolTempDirectory(const std::wstring& dir, std::string& error)
+{
+    if (dir.empty()) return true;
+    std::wstring current;
+    for (std::size_t i = 0; i < dir.size(); ++i)
+    {
+        current.push_back(dir[i]);
+        const bool boundary = (dir[i] == L'\\' || dir[i] == L'/');
+        if (!boundary && i + 1 != dir.size()) continue;
+        if (current.size() <= 3 && current.size() >= 2 && current[1] == L':') continue;
+        if (::CreateDirectoryW(current.c_str(), nullptr) == 0)
+        {
+            const DWORD rc = ::GetLastError();
+            if (rc != ERROR_ALREADY_EXISTS)
+            {
+                error = "cannot create temp directory (win32=" + std::to_string(rc) + ")";
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+} // namespace
+
 bool PoolBuild(const std::wstring& devicePath, const std::wstring& poolName, unsigned int version,
                const std::wstring& directory, const std::vector<PoolSpaceSpec>& spaces,
                std::vector<std::string>& created, std::string& error)
@@ -301,6 +331,10 @@ bool PoolBuild(const std::wstring& devicePath, const std::wstring& poolName, uns
     created.clear();
     error.clear();
     g_poolLog.clear();
+    {
+        std::string dirError;
+        if (!EnsurePoolTempDirectory(directory, dirError)) { error = dirError; return false; }
+    }
     if (devicePath.empty())
     {
         error = "未指定虚拟磁盘设备路径";
@@ -472,6 +506,10 @@ bool PoolPrepareSpaces(const std::wstring& imagePath, const std::wstring& poolNa
     report.clear();
     error.clear();
     g_poolLog.clear();
+    {
+        std::string dirError;
+        if (!EnsurePoolTempDirectory(directory, dirError)) { error = dirError; return false; }
+    }
     if (imagePath.empty())
     {
         error = "未指定虚拟磁盘（VHD/VHDX）路径";
