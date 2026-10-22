@@ -1360,6 +1360,7 @@ struct LayoutStore
     unsigned long long sizeInBytes = 0;
     bool hasSize = false;
     bool hasSizeBytes = false;
+    bool onlyAllocateDefinedGptEntries = false;
     std::vector<LayoutPartition> partitions;
 };
 
@@ -1445,6 +1446,7 @@ LayoutStore ParseStore(const XmlNode* node)
     const std::string sizeBytes = NodeText(node, "SizeInBytes");
     store.hasSizeBytes = !sizeBytes.empty();
     store.sizeInBytes = ParseNum(sizeBytes);
+    store.onlyAllocateDefinedGptEntries = ReadFlag(node, "OnlyAllocateDefinedGptEntries");
     ParsePartitions(node, store);
     return store;
 }
@@ -2251,6 +2253,250 @@ int CmdLayout(const std::vector<std::string>& args)
         return false;
     }
 
+    // ── 多磁盘：QC(SDM845/QC8998)、HoloLens 这类“一个 FFU 里四块盘”的布局 ──
+    // 物理存储 = 顶层 <Stores> 中带 <DevicePath> 的 <Store>；每块对应一个独立磁盘
+    // （imageapp 的 InitializeVirtualHardDisk 逐块建 VHD，日志里出现 4 个 PhysicalDrive）。
+    // 其中带 <OSPool> 分区的是“池载体盘”：GPT 只写非池分区，OSPool 由
+    // ImageStorageService.CreateStoragePool 自己追加。
+    struct PhysicalDiskPlan
+    {
+        std::string storeType;
+        std::string devicePath;
+        std::string fileName;
+        std::uint64_t bytes = 0;
+        bool holdsPool = false;
+        bool onlyDefinedEntries = false;
+        std::vector<VhdPartition> parts;
+    };
+
+    static bool BuildPhysicalDiskParts(const LayoutModel& model, const LayoutStore& store,
+                                       std::uint64_t diskBytes, std::vector<VhdPartition>& parts,
+                                       bool& holdsPool, std::string& error)
+    {
+        const std::uint64_t sector = model.sectorSize != 0 ? model.sectorSize : 512;
+        const std::uint64_t defaultAlignment = model.defaultAlignment != 0 ? model.defaultAlignment : (1024ull * 1024);
+        auto align = [](std::uint64_t v, std::uint64_t a) { return a == 0 ? v : (v + a - 1) / a * a; };
+
+        for (const LayoutPartition& p : store.partitions)
+        {
+            if (LowerText(p.name) == "ospool") holdsPool = true;
+        }
+        // 尺寸紧的盘（OnlyAllocateDefinedGptEntries=true，如 XBL 只有 1024 个 4K 扇区）
+        // 不能按 1 MiB 起步，要紧接 MBR+GPT 头；其余按 1 MiB 起步。
+        std::uint64_t cursor = store.onlyAllocateDefinedGptEntries ? align(2 * sector, defaultAlignment)
+                                                                  : align(1024ull * 1024, defaultAlignment);
+        std::uint64_t declared = 0;
+        std::size_t flexible = 0;
+        for (const LayoutPartition& p : store.partitions)
+        {
+            if (LowerText(p.name) == "ospool") continue;
+            std::uint64_t size = 0;
+            if (p.hasTotalBytes && p.totalBytes != 0) size = p.totalBytes;
+            else if (p.totalSectors != 0) size = p.totalSectors * sector;
+            if (p.useAllSpace || size == 0) { ++flexible; continue; }
+            declared += align(size, sector);
+        }
+        // 尾部留备份 GPT：紧尺寸盘 33 个扇区，普通盘 1 MiB。
+        const std::uint64_t tailReserve = store.onlyAllocateDefinedGptEntries ? 33 * sector : (1024ull * 1024);
+        std::uint64_t available = diskBytes > declared + tailReserve ? diskBytes - declared - tailReserve : 0;
+        std::uint64_t flexibleBytes = 0;
+        if (flexible != 0 && available != 0)
+        {
+            flexibleBytes = available / flexible / sector * sector;
+            if (flexibleBytes == 0) flexibleBytes = sector;
+        }
+
+        for (const LayoutPartition& p : store.partitions)
+        {
+            if (LowerText(p.name) == "ospool") continue;
+            std::uint64_t size = 0;
+            if (p.hasTotalBytes && p.totalBytes != 0) size = p.totalBytes;
+            else if (p.totalSectors != 0) size = p.totalSectors * sector;
+            if (p.useAllSpace || size == 0) size = flexibleBytes;
+            if (size == 0) { error = "分区 " + p.name + " 没有可用尺寸"; return false; }
+            size = align(size, sector);
+
+            std::uint64_t alignment = defaultAlignment;
+            std::uint64_t custom = 0;
+            if (!p.byteAlignment.empty() && ParseHexOrDec(p.byteAlignment, custom) && custom != 0) alignment = custom;
+            if (p.singleSectorAlignment) alignment = sector;
+
+            VhdPartition vp;
+            vp.name = p.name;
+            vp.type = p.type;
+            vp.id = p.id;
+            vp.offsetBytes = align(cursor, alignment);
+            vp.sizeBytes = size;
+            parts.push_back(vp);
+            cursor = vp.offsetBytes + size;
+        }
+        if (parts.empty()) { error = "物理存储 " + store.storeType + " 没有可分区的分区项"; return false; }
+        if (cursor + tailReserve > diskBytes)
+        {
+            error = "物理存储 " + store.storeType + " 的分区总长超过磁盘容量（需要 " +
+                    FormatBytes(cursor + tailReserve) + "，磁盘 " + FormatBytes(diskBytes) + "）";
+            return false;
+        }
+        return true;
+    }
+
+    static bool PlanPhysicalDisks(const LayoutModel& model, const std::string& outDir,
+                                  std::vector<PhysicalDiskPlan>& plans, std::string& error)
+    {
+        const std::uint64_t sector = model.sectorSize != 0 ? model.sectorSize : 512;
+        std::size_t physical = 0;
+        for (const LayoutStore& store : model.stores)
+        {
+            if (store.devicePath.empty()) continue;
+            ++physical;
+            PhysicalDiskPlan plan;
+            plan.storeType = store.storeType;
+            plan.devicePath = store.devicePath;
+            plan.onlyDefinedEntries = store.onlyAllocateDefinedGptEntries;
+            plan.bytes = (store.hasSizeBytes && store.sizeInBytes != 0) ? store.sizeInBytes
+                                                                        : store.sizeInSectors * sector;
+            if (plan.bytes == 0) { error = "物理存储 " + store.storeType + " 没有尺寸"; return false; }
+            if (!BuildPhysicalDiskParts(model, store, plan.bytes, plan.parts, plan.holdsPool, error)) return false;
+            plan.fileName = outDir.empty() ? (store.storeType + ".vhdx") : (outDir + "\\" + store.storeType + ".vhdx");
+            plans.push_back(plan);
+        }
+        if (physical == 0)
+        {
+            error = "布局里没有带 <DevicePath> 的物理 <Store>；单盘布局请用 pool build";
+            return false;
+        }
+        return true;
+    }
+
+    int CmdDisk(const std::vector<std::string>& args)
+    {
+        if (args.size() < 3 || WantsHelp(args))
+        {
+            OutLn("用法：ocid_imagegen disk plan|build --layout <DeviceLayout.xml> [--outdir <目录>]");
+            OutLn("                              [--store <StoreType>] [--dry]");
+            OutLn("");
+            OutLn("  plan   只打印将要生成的物理磁盘（每个带 <DevicePath> 的 <Store> 一块）。");
+            OutLn("  build  逐块建 VHDX + 写 GPT；带 OSPool 分区的那块随后建池与 space。");
+            OutLn("");
+            OutLn("说明：QC（SDM845/QC8998）这类布局一个 FFU 里有四块盘：XBL / BACKUP_XBL /");
+            OutLn("      Protected_ReadOnly / Default。前三块是裸分区盘，Default 是池载体盘。");
+            OutLn("      虚拟容量按布局 <SectorSize>（QC 是 4096）换算。");
+            return args.size() < 3 ? 2 : 0;
+        }
+        const std::string sub = args[2];
+        std::string layoutPath, outDir, onlyStore;
+        bool dry = false;
+        for (std::size_t i = 3; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            auto next = [&](std::string& out) -> bool { if (i + 1 >= args.size()) return false; out = args[++i]; return true; };
+            if (a == "--layout") { if (!next(layoutPath)) { Err("--layout 缺少值"); return 2; } }
+            else if (a == "--outdir") { if (!next(outDir)) { Err("--outdir 缺少值"); return 2; } }
+            else if (a == "--store") { if (!next(onlyStore)) { Err("--store 缺少值"); return 2; } }
+            else if (a == "--dry") dry = true;
+            else if (!a.empty() && a[0] == '-') { Err("未知参数：" + a); return 2; }
+            else { Err("多余的位置参数：" + a); return 2; }
+        }
+        if (layoutPath.empty()) { Err("disk " + sub + " 需要 --layout <布局 XML>"); return 2; }
+        LayoutModel model;
+        std::string error;
+        if (!LoadLayout(layoutPath, model, error)) { Err("读布局失败：" + error); return 1; }
+
+        std::vector<PhysicalDiskPlan> plans;
+        if (!PlanPhysicalDisks(model, outDir, plans, error)) { Err(error); return 1; }
+
+        const std::uint64_t sectorSize = model.sectorSize != 0 ? model.sectorSize : 512;
+        std::vector<PoolSpaceSpec> spaces;
+        for (const LayoutStore& store : model.pools)
+        {
+            unsigned long long spaceSize = (store.hasSizeBytes && store.sizeInBytes != 0)
+                                               ? store.sizeInBytes
+                                               : store.sizeInSectors * sectorSize;
+            if (spaceSize == 0 || store.storeType.empty()) continue;
+            PoolSpaceSpec spec;
+            spec.name = Utf8ToWide(store.storeType);
+            spec.sizeBytes = spaceSize;
+            spaces.push_back(spec);
+        }
+
+        bool any = false;
+        for (const PhysicalDiskPlan& plan : plans)
+        {
+            if (!onlyStore.empty() && !EqualsNoCase(plan.storeType, onlyStore)) continue;
+            any = true;
+            OutLn("磁盘 " + plan.storeType + "  " + plan.devicePath);
+            OutLn("  文件：" + plan.fileName);
+            OutLn("  容量：" + FormatBytes(plan.bytes));
+            for (const VhdPartition& vp : plan.parts)
+            {
+                OutLn("  分区 " + vp.name + "  type=" + vp.type + "  offset=" + FormatBytes(vp.offsetBytes) +
+                      "  size=" + FormatBytes(vp.sizeBytes));
+            }
+            OutLn(plan.holdsPool ? "  角色：池载体（GPT 只写非池分区，OSPool 由服务追加）"
+                                 : "  角色：裸分区盘（RequiredToFlash）");
+        }
+        if (!any) { Err("没有匹配 --store 的物理磁盘"); return 1; }
+        if (!EqualsNoCase(sub, "build"))
+        {
+            if (!EqualsNoCase(sub, "plan")) { Err("未知子命令：" + sub); return 2; }
+            OutLn("（plan 不碰磁盘；要落盘用 disk build）");
+            return 0;
+        }
+        if (dry)
+        {
+            OutLn("（演练）未碰磁盘；去掉 --dry 执行。");
+            return 0;
+        }
+
+        if (!outDir.empty())
+        {
+            if (!EnsureDirectory(Utf8ToWide(outDir), error))
+            {
+                Err("创建输出目录失败：" + error);
+                return 1;
+            }
+        }
+
+        const std::uint32_t sector32 = static_cast<std::uint32_t>(sectorSize);
+        for (const PhysicalDiskPlan& plan : plans)
+        {
+            if (!onlyStore.empty() && !EqualsNoCase(plan.storeType, onlyStore)) continue;
+            const std::wstring path = Utf8ToWide(plan.fileName);
+            if (!VhdCreate(path, plan.bytes, VhdKind::Dynamic, 0, sector32, error))
+            {
+                Err("创建 " + plan.fileName + " 失败：" + error);
+                return 1;
+            }
+            std::string devicePath;
+            if (!VhdAttach(path, false, devicePath, error))
+            {
+                Err("挂载 " + plan.fileName + " 失败：" + error);
+                return 1;
+            }
+            OutLn(plan.storeType + " 已挂载：" + devicePath);
+            if (!VhdWriteGpt(devicePath, std::string(), plan.parts, sector32, error))
+            {
+                std::string ignored;
+                VhdDetach(path, ignored);
+                Err("写 GPT 失败：" + error);
+                return 1;
+            }
+            if (plan.holdsPool)
+            {
+                std::vector<std::string> created;
+                if (!PoolBuild(Utf8ToWide(devicePath), L"OSPool", 24, Utf8ToWide(outDir), spaces, created, error))
+                {
+                    Err("建池失败：" + error);
+                    return 1;
+                }
+                OutLn("  池已建：space " + NumText(created.size()) + " 个");
+            }
+            if (!VhdDetach(path, error)) { Err("卸载 " + plan.fileName + " 失败：" + error); return 1; }
+        }
+        OutLn("完成：物理磁盘 " + NumText(plans.size()) + " 块。");
+        return 0;
+    }
+
     int CmdVhd(const std::vector<std::string>& args)
     {
         if (args.size() < 3 || WantsHelp(args))
@@ -2837,6 +3083,7 @@ int wmain(int argc, wchar_t** wargv)
         return CmdDeviceDb(args);
     }
     if (command == "vhd") return CmdVhd(args);
+    if (command == "disk") return CmdDisk(args);
     if (command == "pool") return CmdPool(args);
     if (command == "layout")
     {
