@@ -89,5 +89,18 @@ namespace imaging
                                  std::vector<VhdPartition>& parts,
                                  std::uint32_t& sectorSize,
                                  std::string& error);
+
+    // 裸按字节读写设备：固件分区灌镜像 / 回读校验用（不做文件系统解释）。
+    OCID_VHD_API bool VhdWriteBytes(const std::string& devicePath,
+                                    std::uint64_t offset,
+                                    const void* data,
+                                    std::size_t size,
+                                    std::string& error);
+
+    OCID_VHD_API bool VhdReadBytes(const std::string& devicePath,
+                                   std::uint64_t offset,
+                                   void* data,
+                                   std::size_t size,
+                                   std::string& error);
 }
 }

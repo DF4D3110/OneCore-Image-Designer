@@ -491,5 +491,121 @@ namespace imaging
         }
         return true;
     }
+
+    namespace
+    {
+        // 刚改过 GPT 的盘会被内核重新枚举，紧跟其后的裸读写可能短暂报
+        // ERROR_NO_SUCH_DEVICE（433）/ ERROR_DEVICE_NOT_CONNECTED（1167）。
+        // 这里统一做「重开句柄 + 退避重试」。
+        bool TransientDeviceError(DWORD code)
+        {
+            return code == ERROR_NO_SUCH_DEVICE || code == ERROR_DEVICE_NOT_CONNECTED ||
+                   code == ERROR_NOT_READY || code == ERROR_BUSY;
+        }
+
+        bool WriteBytesOnce(const std::wstring& wide, std::uint64_t offset, const std::uint8_t* bytes,
+                            std::size_t size, std::string& error, DWORD& code)
+        {
+            HANDLE device = CreateFileW(wide.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (device == INVALID_HANDLE_VALUE)
+            {
+                code = GetLastError();
+                error = LastErrorText("open physical disk");
+                return false;
+            }
+            LARGE_INTEGER pos{};
+            pos.QuadPart = static_cast<LONGLONG>(offset);
+            if (!SetFilePointerEx(device, pos, nullptr, FILE_BEGIN))
+            {
+                code = GetLastError();
+                error = LastErrorText("seek");
+                CloseHandle(device);
+                return false;
+            }
+            std::size_t done = 0;
+            while (done < size)
+            {
+                const std::size_t left = size - done;
+                const DWORD chunk = static_cast<DWORD>(left > (1u << 20) ? (1u << 20) : left);
+                DWORD written = 0;
+                if (!WriteFile(device, bytes + done, chunk, &written, nullptr) || written == 0)
+                {
+                    code = GetLastError();
+                    error = LastErrorText("write");
+                    CloseHandle(device);
+                    return false;
+                }
+                done += written;
+            }
+            code = ERROR_SUCCESS;
+            CloseHandle(device);
+            return true;
+        }
+    }
+
+    bool VhdWriteBytes(const std::string& devicePath,
+                       std::uint64_t offset,
+                       const void* data,
+                       std::size_t size,
+                       std::string& error)
+    {
+        if (size == 0) return true;
+        if (!VhdEnsureVirtualDisk(devicePath, error))
+            return false;
+        const std::wstring wide(devicePath.begin(), devicePath.end());
+        const std::uint8_t* bytes = static_cast<const std::uint8_t*>(data);
+        DWORD code = ERROR_SUCCESS;
+        for (int attempt = 0; attempt < 25; ++attempt)
+        {
+            if (WriteBytesOnce(wide, offset, bytes, size, error, code))
+                return true;
+            if (!TransientDeviceError(code)) return false;
+            Sleep(100);
+        }
+        return false;
+    }
+
+    bool VhdReadBytes(const std::string& devicePath,
+                      std::uint64_t offset,
+                      void* data,
+                      std::size_t size,
+                      std::string& error)
+    {
+        if (size == 0) return true;
+        const std::wstring wide(devicePath.begin(), devicePath.end());
+        HANDLE device = CreateFileW(wide.c_str(), GENERIC_READ,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (device == INVALID_HANDLE_VALUE)
+        {
+            error = LastErrorText("open physical disk");
+            return false;
+        }
+        LARGE_INTEGER pos{};
+        pos.QuadPart = static_cast<LONGLONG>(offset);
+        if (!SetFilePointerEx(device, pos, nullptr, FILE_BEGIN))
+        {
+            error = LastErrorText("seek");
+            CloseHandle(device);
+            return false;
+        }
+        std::uint8_t* bytes = static_cast<std::uint8_t*>(data);
+        std::size_t done = 0;
+        while (done < size)
+        {
+            const std::size_t left = size - done;
+            const DWORD chunk = static_cast<DWORD>(left > (1u << 20) ? (1u << 20) : left);
+            DWORD got = 0;
+            if (!ReadFile(device, bytes + done, chunk, &got, nullptr) || got == 0)
+            {
+                error = LastErrorText("read");
+                CloseHandle(device);
+                return false;
+            }
+            done += got;
+        }
+        CloseHandle(device);
+        return true;
+    }
 }
 }

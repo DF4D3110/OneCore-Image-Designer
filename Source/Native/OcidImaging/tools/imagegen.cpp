@@ -22,6 +22,7 @@
 #include <memory>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <set>
 #include <string>
 #include <vector>
@@ -2368,12 +2369,40 @@ int CmdLayout(const std::vector<std::string>& args)
         return true;
     }
 
+    // 固件分区内容：按分区名在目录里找 <Name>.bin/.img/.raw（大小写不敏感）。
+    static bool LoadFirmwareBlob(const std::string& dir, const std::string& name, std::vector<std::uint8_t>& blob)
+    {
+        if (dir.empty() || name.empty()) return false;
+        std::error_code ec;
+        const std::filesystem::path root = std::filesystem::u8path(dir);
+        if (!std::filesystem::is_directory(root, ec)) return false;
+        const std::string want = LowerText(name);
+        for (const auto& entry : std::filesystem::directory_iterator(root, ec))
+        {
+            if (!entry.is_regular_file(ec)) continue;
+            const std::string whole = LowerText(entry.path().filename().u8string());
+            std::string stem = whole;
+            std::string ext;
+            const std::size_t dot = whole.find_last_of('.');
+            if (dot != std::string::npos) { stem = whole.substr(0, dot); ext = whole.substr(dot); }
+            if (stem != want && whole != want) continue;
+            if (!ext.empty() && ext != ".bin" && ext != ".img" && ext != ".raw" && ext != ".fw") continue;
+            std::ifstream in(entry.path(), std::ios::binary);
+            if (!in) continue;
+            blob.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            return !blob.empty();
+        }
+        return false;
+    }
+
     int CmdDisk(const std::vector<std::string>& args)
     {
         if (args.size() < 3 || WantsHelp(args))
         {
             OutLn("用法：ocid_imagegen disk plan|build --layout <DeviceLayout.xml> [--outdir <目录>]");
-            OutLn("                              [--store <StoreType>] [--dry]");
+            OutLn("                              [--store <StoreType>] [--dry] [--firmware <目录>]");
+        OutLn("");
+        OutLn("  --firmware <目录>  固件分区灌内容：目录里 <分区名>.bin/.img/.raw 原样写入该分区");
             OutLn("");
             OutLn("  plan   只打印将要生成的物理磁盘（每个带 <DevicePath> 的 <Store> 一块）。");
             OutLn("  build  逐块建 VHDX + 写 GPT；带 OSPool 分区的那块随后建池与 space。");
@@ -2384,7 +2413,7 @@ int CmdLayout(const std::vector<std::string>& args)
             return args.size() < 3 ? 2 : 0;
         }
         const std::string sub = args[2];
-        std::string layoutPath, outDir, onlyStore;
+        std::string layoutPath, outDir, onlyStore, firmwareDir;
         bool dry = false;
         for (std::size_t i = 3; i < args.size(); ++i)
         {
@@ -2393,6 +2422,7 @@ int CmdLayout(const std::vector<std::string>& args)
             if (a == "--layout") { if (!next(layoutPath)) { Err("--layout 缺少值"); return 2; } }
             else if (a == "--outdir") { if (!next(outDir)) { Err("--outdir 缺少值"); return 2; } }
             else if (a == "--store") { if (!next(onlyStore)) { Err("--store 缺少值"); return 2; } }
+            else if (a == "--firmware") { if (!next(firmwareDir)) { Err("--firmware 缺少值"); return 2; } }
             else if (a == "--dry") dry = true;
             else if (!a.empty() && a[0] == '-') { Err("未知参数：" + a); return 2; }
             else { Err("多余的位置参数：" + a); return 2; }
@@ -2420,6 +2450,7 @@ int CmdLayout(const std::vector<std::string>& args)
         }
 
         bool any = false;
+        std::size_t built = 0;
         for (const PhysicalDiskPlan& plan : plans)
         {
             if (!onlyStore.empty() && !EqualsNoCase(plan.storeType, onlyStore)) continue;
@@ -2481,6 +2512,48 @@ int CmdLayout(const std::vector<std::string>& args)
                 Err("写 GPT 失败：" + error);
                 return 1;
             }
+            if (!firmwareDir.empty())
+            {
+                std::size_t wrote = 0;
+                std::string skipped;
+                for (const VhdPartition& vp : plan.parts)
+                {
+                    std::vector<std::uint8_t> blob;
+                    if (!LoadFirmwareBlob(firmwareDir, vp.name, blob))
+                    {
+                        if (!skipped.empty()) skipped += " ";
+                        skipped += vp.name;
+                        continue;
+                    }
+                    if (blob.size() > vp.sizeBytes)
+                    {
+                        std::string ignored;
+                        VhdDetach(path, ignored);
+                        Err("固件镜像 " + vp.name + " 有 " + FormatBytes(blob.size()) +
+                            "，超过分区容量 " + FormatBytes(vp.sizeBytes));
+                        return 1;
+                    }
+                    if (!VhdWriteBytes(devicePath, vp.offsetBytes, blob.data(), blob.size(), error))
+                    {
+                        std::string ignored;
+                        VhdDetach(path, ignored);
+                        Err("写固件分区 " + vp.name + " 失败：" + error);
+                        return 1;
+                    }
+                    std::vector<std::uint8_t> check(blob.size(), 0);
+                    if (!VhdReadBytes(devicePath, vp.offsetBytes, check.data(), check.size(), error) || check != blob)
+                    {
+                        std::string ignored;
+                        VhdDetach(path, ignored);
+                        Err("回读校验失败：" + vp.name);
+                        return 1;
+                    }
+                    OutLn("  固件 " + vp.name + " <- " + FormatBytes(blob.size()) + "（已回读校验）");
+                    ++wrote;
+                }
+                OutLn("  固件分区：写入 " + NumText(wrote) + " 个" +
+                      (skipped.empty() ? std::string() : (std::string("；仅几何（无内容）：") + skipped)));
+            }
             if (plan.holdsPool)
             {
                 std::vector<std::string> created;
@@ -2492,8 +2565,9 @@ int CmdLayout(const std::vector<std::string>& args)
                 OutLn("  池已建：space " + NumText(created.size()) + " 个");
             }
             if (!VhdDetach(path, error)) { Err("卸载 " + plan.fileName + " 失败：" + error); return 1; }
+            ++built;
         }
-        OutLn("完成：物理磁盘 " + NumText(plans.size()) + " 块。");
+        OutLn("完成：物理磁盘 " + NumText(built) + " 块。");
         return 0;
     }
 
