@@ -567,7 +567,7 @@ bool PoolPrepareSpaces(const std::wstring& imagePath, const std::wstring& poolNa
         {
             ok = false;
             failures += "space " + std::string(spec.name.begin(), spec.name.end()) + " 挂载失败（hr=" +
-                        std::to_string(static_cast<long long>(attachRc)) + "）；";
+                        std::to_string(static_cast<long long>(attachRc)) + "）；" + eol8() + g_poolLog;
             continue;
         }
         wchar_t spaceName[512] = {};

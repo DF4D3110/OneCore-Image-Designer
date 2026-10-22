@@ -2919,6 +2919,10 @@ int CmdLayout(const std::vector<std::string>& args)
                     return 1;
                 }
                 OutLn("  池已建：space " + NumText(created.size()) + " 个");
+                if (plan.sector > 512)
+                    OutLn("  注意：该布局为 " + NumText(plan.sector) +
+                          " 字节扇区；服务在跨进程重开池时挂载 space 会失败"
+                          "（0x80070006），目前已知限制。");
             }
             if (!VhdDetach(path, error)) { Err("卸载 " + plan.fileName + " 失败：" + error); return 1; }
             ++built;
