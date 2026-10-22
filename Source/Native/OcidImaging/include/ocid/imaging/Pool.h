@@ -104,6 +104,16 @@ OCID_POOL_API bool PoolClose(const std::wstring& imagePath,
                              std::vector<std::string>& report,
                              std::string& error);
 
+OCID_POOL_API bool PoolFinalize(const std::wstring& imagePath,
+                             const std::wstring& poolName,
+                             unsigned int version,
+                             const std::wstring& directory,
+                             const std::vector<SpacePrepareSpec>& spaces,
+                             const std::wstring& driveLetterConfigPath,
+                             bool attachWof,
+                             std::vector<std::string>& report,
+                             std::string& error);
+
 OCID_POOL_API bool PoolPrepareSpaces(const std::wstring& devicePath,
                                      const std::wstring& poolName,
                                      unsigned int version,

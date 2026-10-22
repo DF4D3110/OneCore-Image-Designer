@@ -16,6 +16,7 @@
 #include <winioctl.h>
 
 #include <string>
+#include <algorithm>
 #include <vector>
 
 namespace ocid::imaging {
@@ -772,6 +773,269 @@ bool PoolClose(const std::wstring& imagePath, const std::wstring& directory, boo
     }
     report.push_back(detachSpaces ? "池已关闭，space 已卸下" : "池已关闭（space 保留）");
     return true;
+}
+
+namespace {
+
+typedef long(__stdcall* GetStoreIdFn)(void* service, void* disk, unsigned char* storeId);
+typedef long(__stdcall* AttachWofFn)(void* service, void* disk, const wchar_t* partitionName);
+typedef void(__cdecl* WriteMountManagerFn)(void* service, const unsigned char* storeId, int useWellKnownGuids,
+                                           const unsigned char* storeIds, unsigned int storeIdsCount,
+                                           const wchar_t* driveLetterConfigPath, int ramboot);
+
+std::wstring LocateAdkDll(const wchar_t* fileName, const char* requiredExport)
+{
+    std::vector<std::wstring> candidates;
+    if (const char* env = std::getenv("OCID_UPDATEDLL"))
+    {
+        const std::string text(env);
+        candidates.emplace_back(text.begin(), text.end());
+    }
+    if (const char* adkRoot = std::getenv("OCID_ADK_ROOT"))
+    {
+        const std::string base(adkRoot);
+        candidates.emplace_back(std::wstring(base.begin(), base.end()) + L"\\Windows Kits\\10\\Tools\\bin\\i386\\" + fileName);
+        candidates.emplace_back(std::wstring(base.begin(), base.end()) + L"\\Tools\\bin\\i386\\" + fileName);
+    }
+    {
+        wchar_t kits[MAX_PATH] = { 0 };
+        DWORD size = static_cast<DWORD>(sizeof(kits));
+        if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\Microsoft\\Windows Kits\\Installed Roots",
+                         L"KitsRoot10", RRF_RT_REG_SZ, nullptr, kits, &size) == ERROR_SUCCESS)
+        {
+            std::wstring kitRoot(kits);
+            if (!kitRoot.empty() && kitRoot.back() != L'\\') kitRoot.push_back(L'\\');
+            candidates.push_back(kitRoot + L"Tools\\bin\\i386\\" + fileName);
+        }
+    }
+    {
+        wchar_t module[MAX_PATH] = { 0 };
+        if (GetModuleFileNameW(nullptr, module, MAX_PATH) != 0)
+        {
+            const std::wstring exe(module);
+            const std::size_t slash = exe.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) candidates.push_back(exe.substr(0, slash + 1) + fileName);
+        }
+    }
+    {
+        const wchar_t* roots[] = { L"ProgramFiles(x86)", L"ProgramFiles" };
+        for (const wchar_t* rootName : roots)
+        {
+            wchar_t envRoot[MAX_PATH] = { 0 };
+            if (GetEnvironmentVariableW(rootName, envRoot, MAX_PATH) == 0) continue;
+            candidates.push_back(std::wstring(envRoot) + L"\\Windows Kits\\10\\Tools\\bin\\i386\\" + fileName);
+        }
+    }
+    {
+        wchar_t drives[512] = { 0 };
+        if (GetLogicalDriveStringsW(511, drives) != 0)
+        {
+            const wchar_t* cursor = drives;
+            while (*cursor != 0)
+            {
+                const std::wstring driveRoot(cursor);
+                cursor += driveRoot.size() + 1;
+                const UINT type = GetDriveTypeW(driveRoot.c_str());
+                if (type != DRIVE_FIXED && type != DRIVE_REMOVABLE) continue;
+                const std::wstring pattern = driveRoot + L"*";
+                WIN32_FIND_DATAW data{};
+                HANDLE find = FindFirstFileW(pattern.c_str(), &data);
+                if (find == INVALID_HANDLE_VALUE) continue;
+                do
+                {
+                    if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) continue;
+                    if (data.cFileName[0] == L'.') continue;
+                    const std::wstring candidate = driveRoot + data.cFileName + L"\\Windows Kits\\10\\Tools\\bin\\i386\\" + fileName;
+                    if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) candidates.push_back(candidate);
+                } while (FindNextFileW(find, &data));
+                FindClose(find);
+            }
+        }
+    }
+    std::wstring fallback;
+    const std::wstring wideName(fileName);
+    for (const std::wstring& candidate : candidates)
+    {
+        if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+        if (fallback.empty()) fallback = candidate;
+        // Prefer a copy that really exports what we need: an older kit on the same machine may
+        // ship an UpdateDLL.dll without IU_WriteMountManagerRegistry.
+        HMODULE probe = LoadLibraryExW(candidate.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (probe != nullptr)
+        {
+            const bool hasEntry = GetProcAddress(probe, requiredExport) != nullptr;
+            if (std::getenv("OCID_DEBUG_ADK") != nullptr)
+            {
+                std::fprintf(stderr, "[adk] load=%p has=%d %s\n", (void*)probe, hasEntry ? 1 : 0,
+                             std::string(candidate.begin(), candidate.end()).c_str());
+            }
+            FreeLibrary(probe);
+            if (hasEntry) return candidate;
+        }
+        else if (std::getenv("OCID_DEBUG_ADK") != nullptr)
+        {
+            std::fprintf(stderr, "[adk] load failed err=%lu %s\n", GetLastError(),
+                         std::string(candidate.begin(), candidate.end()).c_str());
+        }
+    }
+    return fallback;
+}
+
+} // namespace
+
+bool PoolFinalize(const std::wstring& imagePath, const std::wstring& poolName, unsigned int version,
+                  const std::wstring& directory, const std::vector<SpacePrepareSpec>& spaces,
+                  const std::wstring& driveLetterConfigPath, bool attachWof,
+                  std::vector<std::string>& report, std::string& error)
+{
+    (void)poolName;
+    (void)version;
+    report.clear();
+    error.clear();
+    g_poolLog.clear();
+    {
+        std::string dirError;
+        if (!EnsurePoolTempDirectory(directory, dirError)) { error = dirError; return false; }
+    }
+    if (imagePath.empty())
+    {
+        error = "no virtual disk path";
+        return false;
+    }
+
+    std::string dllPath;
+    std::vector<std::string> found;
+    std::vector<std::string> missing;
+    if (!PoolProbe(dllPath, found, missing, error)) return false;
+    const std::wstring wideDll(dllPath.begin(), dllPath.end());
+    HMODULE imageStorage = LoadLibraryW(wideDll.c_str());
+    if (imageStorage == nullptr)
+    {
+        error = "LoadLibraryW(ImageStorageService) failed (win32=" + std::to_string(GetLastError()) + ").";
+        return false;
+    }
+    const std::wstring updatePath = LocateAdkDll(L"UpdateDLL.dll", "IU_WriteMountManagerRegistry");
+    if (updatePath.empty())
+    {
+        FreeLibrary(imageStorage);
+        error = "UpdateDLL.dll not found (set OCID_ADK_ROOT or OCID_UPDATEDLL).";
+        return false;
+    }
+    HMODULE updateDll = LoadLibraryW(updatePath.c_str());
+    if (updateDll == nullptr)
+    {
+        FreeLibrary(imageStorage);
+        error = "LoadLibraryW(UpdateDLL) failed (win32=" + std::to_string(GetLastError()) + ").";
+        return false;
+    }
+
+    CreateServiceFn createService = reinterpret_cast<CreateServiceFn>(GetProcAddress(imageStorage, "CreateStorageService"));
+    CloseServiceFn closeService = reinterpret_cast<CloseServiceFn>(GetProcAddress(imageStorage, "CloseImageStorageService"));
+    OpenVhdFn openVhd = reinterpret_cast<OpenVhdFn>(GetProcAddress(imageStorage, "OpenVirtualHardDisk"));
+    GetDiskNameFn getDiskName = reinterpret_cast<GetDiskNameFn>(GetProcAddress(imageStorage, "GetDiskName"));
+    OpenPoolFn openPool = reinterpret_cast<OpenPoolFn>(GetProcAddress(imageStorage, "OpenStoragePool"));
+    ClosePoolFn closePool = reinterpret_cast<ClosePoolFn>(GetProcAddress(imageStorage, "CloseStoragePool"));
+    AttachSpaceFn attachSpace = reinterpret_cast<AttachSpaceFn>(GetProcAddress(imageStorage, "AttachStorageSpace"));
+    DetachSpaceFn detachSpace = reinterpret_cast<DetachSpaceFn>(GetProcAddress(imageStorage, "DetachStorageSpace"));
+    GetStoreIdFn getStoreId = reinterpret_cast<GetStoreIdFn>(GetProcAddress(imageStorage, "GetStoreId"));
+    AttachWofFn attachWofFn = reinterpret_cast<AttachWofFn>(GetProcAddress(imageStorage, "AttachWOFToVolume"));
+    WriteMountManagerFn writeMountManager = reinterpret_cast<WriteMountManagerFn>(GetProcAddress(updateDll, "IU_WriteMountManagerRegistry"));
+    if (createService == nullptr || closeService == nullptr || openVhd == nullptr || getDiskName == nullptr ||
+        openPool == nullptr || closePool == nullptr || attachSpace == nullptr || detachSpace == nullptr ||
+        getStoreId == nullptr || attachWofFn == nullptr || writeMountManager == nullptr)
+    {
+        FreeLibrary(updateDll);
+        FreeLibrary(imageStorage);
+        std::string detail = "required export missing:";
+        if (getStoreId == nullptr) detail += " GetStoreId";
+        if (attachWofFn == nullptr) detail += " AttachWOFToVolume";
+        if (writeMountManager == nullptr) detail += " IU_WriteMountManagerRegistry";
+        detail += " (UpdateDLL=" + std::string(updatePath.begin(), updatePath.end()) + ")";
+        error = detail;
+        return false;
+    }
+
+    void* service = nullptr;
+    void* pool = nullptr;
+    void* baseDisk = nullptr;
+    bool ok = false;
+    long rc = createService(&service, PoolLogCallback, 0, nullptr, 1);
+    if (rc < 0 || service == nullptr)
+    {
+        FreeLibrary(updateDll);
+        FreeLibrary(imageStorage);
+        error = "CreateStorageService failed (hr=" + std::to_string(static_cast<long long>(rc)) + ")." + eol8() + g_poolLog;
+        return false;
+    }
+
+    do
+    {
+        unsigned char baseStore[20] = { 0 };
+        rc = openVhd(service, imagePath.c_str(), 0, baseStore, &baseDisk);
+        if (rc < 0) { error = "OpenVirtualHardDisk failed (hr=" + std::to_string(static_cast<long long>(rc)) + ")." + eol8() + g_poolLog; break; }
+
+        wchar_t diskName[512] = { 0 };
+        rc = getDiskName(baseDisk, diskName, 511);
+        if (rc < 0) { error = "GetDiskName failed (hr=" + std::to_string(static_cast<long long>(rc)) + ")." + eol8() + g_poolLog; break; }
+
+        rc = openPool(service, diskName, directory.c_str(), 1, &pool);
+        if (rc < 0) { error = "OpenStoragePool failed (hr=" + std::to_string(static_cast<long long>(rc)) + ")." + eol8() + g_poolLog; break; }
+
+        std::vector<unsigned char> storeIds;
+        for (const SpacePrepareSpec& space : spaces)
+        {
+            void* spaceDisk = nullptr;
+            const long attachRc = attachSpace(service, pool, space.name.c_str(), 0, &spaceDisk);
+            if (attachRc < 0)
+            {
+                error = "AttachStorageSpace failed (hr=" + std::to_string(static_cast<long long>(attachRc)) + ")." + eol8() + g_poolLog;
+                break;
+            }
+            unsigned char storeId[20] = { 0 };
+            const long idRc = getStoreId(service, spaceDisk, storeId);
+            if (idRc < 0)
+            {
+                detachSpace(service, pool, space.name.c_str(), 0);
+                error = "GetStoreId failed (hr=" + std::to_string(static_cast<long long>(idRc)) + ").";
+                break;
+            }
+            storeIds.insert(storeIds.end(), storeId, storeId + 20);
+            unsigned int wofCount = 0;
+            unsigned int wofFailed = 0;
+            if (attachWof)
+            {
+                for (const SpacePartitionSpec& part : space.partitions)
+                {
+                    const long wofRc = attachWofFn(service, spaceDisk, part.name.c_str());
+                    if (wofRc < 0) ++wofFailed; else ++wofCount;
+                }
+            }
+            detachSpace(service, pool, space.name.c_str(), 0);
+            report.push_back("space " + WideToUtf8Local(space.name.c_str()) + ": storeId captured, WOF attached=" + std::to_string(wofCount) +
+                             (wofFailed != 0 ? (", WOF skipped=" + std::to_string(wofFailed)) : std::string()));
+        }
+        if (!error.empty()) break;
+
+        if (!driveLetterConfigPath.empty() && !storeIds.empty())
+        {
+            // One call for the whole image: the first argument is the image's own store id,
+            // the array carries every space's store id (matches ImageStorage.WriteMountManagerRegistry).
+            const unsigned int count = static_cast<unsigned int>(storeIds.size() / 20);
+            writeMountManager(service, baseStore, 1, storeIds.data(), count, driveLetterConfigPath.c_str(), 0);
+            report.push_back("MountManager registry entries written: base + " + std::to_string(count) + " space store(s)");
+        }
+        else
+        {
+            report.push_back("MountManager registry skipped (no drive letter config)");
+        }
+        ok = true;
+    } while (false);
+
+    if (pool != nullptr) closePool(service, pool, 0);
+    closeService(service);
+    FreeLibrary(updateDll);
+    FreeLibrary(imageStorage);
+    return ok;
 }
 
 } // namespace ocid::imaging

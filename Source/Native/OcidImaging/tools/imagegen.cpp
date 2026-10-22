@@ -3330,6 +3330,122 @@ int CmdLayout(const std::vector<std::string>& args)
         return 0;
     }
 
+    static int CmdPoolFinalize(const std::vector<std::string>& args)
+    {
+        std::string file;
+        std::string layoutPath;
+        std::string poolName;
+        std::string onlySpace;
+        std::string directory;
+        std::string versionText;
+        std::string driveLetterConfig;
+        unsigned int version = 24;
+        bool attachWof = true;
+        bool dry = false;
+        for (std::size_t i = 3; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            if (a == "--vhd") { if (i + 1 >= args.size()) { Err("--vhd 缺少值"); return 2; } file = args[++i]; }
+            else if (a == "--layout") { if (i + 1 >= args.size()) { Err("--layout 缺少值"); return 2; } layoutPath = args[++i]; }
+            else if (a == "--pool") { if (i + 1 >= args.size()) { Err("--pool 缺少值"); return 2; } poolName = args[++i]; }
+            else if (a == "--space") { if (i + 1 >= args.size()) { Err("--space 缺少值"); return 2; } onlySpace = args[++i]; }
+            else if (a == "--dir") { if (i + 1 >= args.size()) { Err("--dir 缺少值"); return 2; } directory = args[++i]; }
+            else if (a == "--version") { if (i + 1 >= args.size()) { Err("--version 缺少值"); return 2; } versionText = args[++i]; }
+            else if (a == "--drive-letter-config") { if (i + 1 >= args.size()) { Err("--drive-letter-config 缺少值"); return 2; } driveLetterConfig = args[++i]; }
+            else if (a == "--no-wof") attachWof = false;
+            else if (a == "--dry") dry = true;
+            else if (WantsHelp(args)) { OutLn("pool finalize --vhd <vhdx> --layout <xml> [--pool <名>] [--space <名>] [--dir <临时目录>] [--version <n>] [--drive-letter-config <xml>] [--no-wof] [--dry]"); return 0; }
+            else { Err("pool finalize 未知选项：" + a); return 2; }
+        }
+        if (!versionText.empty()) version = static_cast<unsigned int>(std::strtoul(versionText.c_str(), nullptr, 10));
+        if (file.empty() || layoutPath.empty()) { Err("pool finalize 需要 --vhd <虚拟磁盘> --layout <布局 XML>"); return 2; }
+        LayoutModel model;
+        std::string error;
+        if (!LoadLayout(layoutPath, model, error)) { Err("读布局失败：" + error); return 1; }
+        const std::uint64_t sector = model.sectorSize != 0 ? model.sectorSize : 512;
+        const std::uint64_t defaultAlignment = model.defaultAlignment != 0 ? model.defaultAlignment : (1024ull * 1024);
+        auto align = [](std::uint64_t v, std::uint64_t a) { return a == 0 ? v : (v + a - 1) / a * a; };
+        std::string poolError;
+        const LayoutPool* poolGroup = SelectLayoutPool(model, poolName, poolError);
+        if (poolGroup == nullptr && !poolError.empty()) { Err(poolError); return 1; }
+        const std::wstring widePool = LayoutPoolName(poolGroup);
+        const unsigned int poolVersion = LayoutPoolVersion(poolGroup, version);
+        const std::vector<LayoutStore>& spaceStores = poolGroup != nullptr ? poolGroup->stores : model.pools;
+        std::vector<SpacePrepareSpec> spaces;
+        for (const LayoutStore& store : spaceStores)
+        {
+            if (store.storeType.empty()) continue;
+            if (!onlySpace.empty() && !EqualsNoCase(store.storeType, onlySpace)) continue;
+            const std::uint64_t storeSector = StoreSectorBytes(model, store);
+            unsigned long long spaceSize = 0;
+            if (store.hasSizeBytes && store.sizeInBytes != 0) spaceSize = store.sizeInBytes;
+            else if (store.sizeInSectors != 0) spaceSize = store.sizeInSectors * storeSector;
+            if (spaceSize == 0) continue;
+            SpacePrepareSpec spec;
+            spec.name = Utf8ToWide(store.storeType);
+            spec.sectorSize = static_cast<unsigned int>(storeSector);
+            std::uint64_t cursor = align(1024ull * 1024, defaultAlignment);
+            for (const LayoutPartition& p : store.partitions)
+            {
+                std::uint64_t alignment = defaultAlignment;
+                std::uint64_t custom = 0;
+                if (!p.byteAlignment.empty() && ParseHexOrDec(p.byteAlignment, custom) && custom != 0) alignment = custom;
+                const std::uint64_t offset = align(cursor, alignment);
+                std::uint64_t size = 0;
+                if (p.useAllSpace)
+                {
+                    const std::uint64_t tailReserve = 1024ull * 1024;
+                    size = spaceSize > offset + tailReserve ? spaceSize - offset - tailReserve : 0;
+                }
+                else if (p.hasTotalBytes && p.totalBytes != 0) size = p.totalBytes;
+                else if (p.totalSectors != 0) size = p.totalSectors * sector;
+                if (size == 0) continue;
+                size = align(size, sector);
+                SpacePartitionSpec part;
+                part.name = Utf8ToWide(p.name);
+                part.typeGuid = Utf8ToWide(p.type);
+                part.partitionGuid = Utf8ToWide(p.id);
+                part.offsetBytes = offset;
+                part.sizeBytes = size;
+                part.fileSystem = Utf8ToWide(p.fileSystem);
+                unsigned long long cluster = 0;
+                if (!p.clusterSize.empty() && ParseHexOrDec(p.clusterSize, cluster)) part.clusterSize = static_cast<unsigned int>(cluster);
+                spec.partitions.push_back(part);
+                cursor = offset + size;
+            }
+            spaces.push_back(spec);
+        }
+        if (spaces.empty()) { Err("布局的 <StoragePool> 里没有可处理的 space"); return 1; }
+        if (directory.empty()) directory = "ocid_pool";
+        std::vector<std::string> report;
+        for (const SpacePrepareSpec& s : spaces)
+        {
+            OutLn("  space " + WideToUtf8(s.name) + "（扇区 " + std::to_string(s.sectorSize) + "）：");
+            for (const SpacePartitionSpec& p : s.partitions)
+            {
+                OutLn("    " + WideToUtf8(p.name) + " offset=" + std::to_string(p.offsetBytes) + " size=" +
+                      std::to_string(p.sizeBytes) + (p.fileSystem.empty() ? std::string() : " fs=" + WideToUtf8(p.fileSystem)));
+            }
+        }
+        OutLn(std::string("池：") + WideToUtf8(widePool) + "，版本 " + std::to_string(poolVersion) + "，space " +
+              std::to_string(spaces.size()) + " 个");
+        if (dry)
+        {
+            OutLn("（演练）未碰磁盘；去掉 --dry 执行。");
+            return 0;
+        }
+        VhdInfo info;
+        if (!PoolFinalize(Utf8ToWide(file), widePool, poolVersion, Utf8ToWide(directory), spaces,
+                          Utf8ToWide(driveLetterConfig), attachWof, report, error))
+        {
+            Err("池内收尾失败：" + error);
+            return 1;
+        }
+        for (const std::string& line : report) OutLn("  " + line);
+        OutLn("池内收尾完成。");
+        return 0;
+    }
+
     int CmdPoolPrepare(const std::vector<std::string>& args)
     {
         std::string file, layoutPath, directory, onlySpace, poolName;
@@ -3479,6 +3595,7 @@ int CmdLayout(const std::vector<std::string>& args)
             OutLn("  pool build --vhd <vhdx> --layout <xml> [--version 24|26] [--disk-id <guid>] [--dir <临时目录>] [--dry]");
             OutLn("                                写物理 GPT（只含 BS_EFIESP）→ 建池 → 按布局 <StoragePool>/<Stores> 逐 store 建 space");
             OutLn("  pool prepare --vhd <vhdx> --layout <xml> [--space <名>] [--format] [--dir <临时目录>] [--dry]");
+        OutLn("  pool finalize --vhd <vhdx> --layout <xml> [--pool <名>] [--space <名>] [--dir <临时目录>] [--drive-letter-config <xml>] [--no-wof] [--dry]");
             OutLn("  pool close --vhd <vhdx> [--dir <临时目录>] [--keep-spaces]");
             OutLn("                                打开已有池 → 每个 space 内写 GPT（按布局 ByteAlignment/DefaultPartitionByteAlignment）");
             OutLn("                                加 --format 才按布局 FileSystem/ClusterSize 格式化分区");
@@ -3486,6 +3603,7 @@ int CmdLayout(const std::vector<std::string>& args)
         }
         if (sub == "build") return CmdPoolBuild(args);
         if (sub == "prepare") return CmdPoolPrepare(args);
+        if (sub == "finalize") return CmdPoolFinalize(args);
         if (sub == "close") return CmdPoolClose(args);
         if (sub == "probe")
         {
