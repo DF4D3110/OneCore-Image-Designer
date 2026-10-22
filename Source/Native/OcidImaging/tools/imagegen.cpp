@@ -2395,14 +2395,110 @@ int CmdLayout(const std::vector<std::string>& args)
         return false;
     }
 
+    // A firmware package declares <package binaryPartition="true" targetPartition="X">
+    // and a payload <file name="$(runtime.bootdrive)\Y" cabpath="...">. The payload is
+    // written as a raw image at the start of partition X.
+    struct FirmwarePayload
+    {
+        std::string cabPath;
+        std::string entryName;
+        std::string fileName;
+    };
+
+    static std::string TagAttr(const std::string& tag, const std::string& attr)
+    {
+        const std::string key = " " + attr + "=\"";
+        const std::size_t at = tag.find(key);
+        if (at == std::string::npos) return std::string();
+        const std::size_t from = at + key.size();
+        const std::size_t to = tag.find('"', from);
+        if (to == std::string::npos) return std::string();
+        return tag.substr(from, to - from);
+    }
+
+    static bool LoadFirmwarePackages(const std::string& cabDir,
+                                     std::vector<std::pair<std::string, FirmwarePayload>>& payloads,
+                                     std::string& error)
+    {
+        payloads.clear();
+        std::error_code ec;
+        const std::filesystem::path root = std::filesystem::u8path(cabDir);
+        if (!std::filesystem::is_directory(root, ec))
+        {
+            error = "not a directory: " + cabDir;
+            return false;
+        }
+        for (const auto& entry : std::filesystem::directory_iterator(root, ec))
+        {
+            if (!entry.is_regular_file(ec)) continue;
+            if (LowerText(entry.path().extension().u8string()) != ".cab") continue;
+            std::string mum;
+            std::string ignored;
+            if (!CabExtractText(entry.path().wstring(), "update.mum", mum, ignored)) continue;
+            const std::size_t pkg = mum.find("<package ");
+            if (pkg == std::string::npos) continue;
+            const std::size_t pkgEnd = mum.find('>', pkg);
+            if (pkgEnd == std::string::npos) continue;
+            const std::string pkgTag = mum.substr(pkg, pkgEnd - pkg + 1);
+            if (pkgTag.find("binaryPartition=\"true\"") == std::string::npos) continue;
+            const std::string partition = TagAttr(pkgTag, "targetPartition");
+            if (partition.empty()) continue;
+            const std::string bootPrefix = "$(runtime.bootdrive)\\";
+            std::size_t pos = pkgEnd + 1;
+            while (true)
+            {
+                const std::size_t f = mum.find("<file ", pos);
+                if (f == std::string::npos) break;
+                const std::size_t fe = mum.find('>', f);
+                if (fe == std::string::npos) break;
+                const std::string fileTag = mum.substr(f, fe - f + 1);
+                pos = fe + 1;
+                std::string name = TagAttr(fileTag, "name");
+                const std::string cabpath = TagAttr(fileTag, "cabpath");
+                if (name.empty() || cabpath.empty()) continue;
+                if (name.compare(0, bootPrefix.size(), bootPrefix) == 0)
+                {
+                    name = name.substr(bootPrefix.size());
+                }
+                while (!name.empty() && (name.front() == '\\' || name.front() == '/'))
+                {
+                    name = name.substr(1);
+                }
+                if (name.empty() || name.find('\\') != std::string::npos || name.find('/') != std::string::npos)
+                {
+                    continue;
+                }
+                FirmwarePayload payload;
+                payload.cabPath = entry.path().u8string();
+                payload.entryName = cabpath;
+                payload.fileName = name;
+                payloads.push_back(std::make_pair(LowerText(partition), payload));
+                break;
+            }
+        }
+        return true;
+    }
+
+    static const FirmwarePayload* FindFirmwarePayload(
+        const std::vector<std::pair<std::string, FirmwarePayload>>& payloads, const std::string& partition)
+    {
+        const std::string key = LowerText(partition);
+        for (const auto& item : payloads)
+        {
+            if (item.first == key) return &item.second;
+        }
+        return nullptr;
+    }
+
     int CmdDisk(const std::vector<std::string>& args)
     {
         if (args.size() < 3 || WantsHelp(args))
         {
             OutLn("用法：ocid_imagegen disk plan|build --layout <DeviceLayout.xml> [--outdir <目录>]");
-            OutLn("                              [--store <StoreType>] [--dry] [--firmware <目录>]");
+            OutLn("                              [--store <StoreType>] [--dry] [--packages <dir>] [--firmware <目录>]");
         OutLn("");
         OutLn("  --firmware <目录>  固件分区灌内容：目录里 <分区名>.bin/.img/.raw 原样写入该分区");
+            OutLn("  --packages <dir>  firmware payloads from package cabs (update.mum binaryPartition/targetPartition)");
             OutLn("");
             OutLn("  plan   只打印将要生成的物理磁盘（每个带 <DevicePath> 的 <Store> 一块）。");
             OutLn("  build  逐块建 VHDX + 写 GPT；带 OSPool 分区的那块随后建池与 space。");
@@ -2413,7 +2509,7 @@ int CmdLayout(const std::vector<std::string>& args)
             return args.size() < 3 ? 2 : 0;
         }
         const std::string sub = args[2];
-        std::string layoutPath, outDir, onlyStore, firmwareDir;
+        std::string layoutPath, outDir, onlyStore, firmwareDir, packagesDir;
         bool dry = false;
         for (std::size_t i = 3; i < args.size(); ++i)
         {
@@ -2422,6 +2518,7 @@ int CmdLayout(const std::vector<std::string>& args)
             if (a == "--layout") { if (!next(layoutPath)) { Err("--layout 缺少值"); return 2; } }
             else if (a == "--outdir") { if (!next(outDir)) { Err("--outdir 缺少值"); return 2; } }
             else if (a == "--store") { if (!next(onlyStore)) { Err("--store 缺少值"); return 2; } }
+            else if (a == "--packages") { if (!next(packagesDir)) { Err("--packages missing value"); return 2; } }
             else if (a == "--firmware") { if (!next(firmwareDir)) { Err("--firmware 缺少值"); return 2; } }
             else if (a == "--dry") dry = true;
             else if (!a.empty() && a[0] == '-') { Err("未知参数：" + a); return 2; }
@@ -2473,6 +2570,16 @@ int CmdLayout(const std::vector<std::string>& args)
             OutLn("（plan 不碰磁盘；要落盘用 disk build）");
             return 0;
         }
+        std::vector<std::pair<std::string, FirmwarePayload>> fwPayloads;
+        if (!packagesDir.empty())
+        {
+            if (!LoadFirmwarePackages(packagesDir, fwPayloads, error))
+            {
+                Err("--packages failed: " + error);
+                return 2;
+            }
+            OutLn("package payloads: " + NumText(fwPayloads.size()));
+        }
         if (dry)
         {
             OutLn("（演练）未碰磁盘；去掉 --dry 执行。");
@@ -2512,14 +2619,29 @@ int CmdLayout(const std::vector<std::string>& args)
                 Err("写 GPT 失败：" + error);
                 return 1;
             }
-            if (!firmwareDir.empty())
+            if (!firmwareDir.empty() || !packagesDir.empty())
             {
                 std::size_t wrote = 0;
                 std::string skipped;
                 for (const VhdPartition& vp : plan.parts)
                 {
                     std::vector<std::uint8_t> blob;
-                    if (!LoadFirmwareBlob(firmwareDir, vp.name, blob))
+                    if (!LoadFirmwareBlob(firmwareDir, vp.name, blob) && !packagesDir.empty())
+                    {
+                        const FirmwarePayload* fp = FindFirmwarePayload(fwPayloads, vp.name);
+                        if (fp != nullptr)
+                        {
+                            std::string cabError;
+                            if (!CabExtractEntry(std::filesystem::u8path(fp->cabPath).wstring(), fp->entryName, blob, cabError))
+                            {
+                                std::string ignored;
+                                VhdDetach(path, ignored);
+                                Err("cab payload extract failed: " + fp->entryName + " (" + cabError + ")");
+                                return 1;
+                            }
+                        }
+                    }
+                    if (blob.empty())
                     {
                         if (!skipped.empty()) skipped += " ";
                         skipped += vp.name;
@@ -2533,15 +2655,27 @@ int CmdLayout(const std::vector<std::string>& args)
                             "，超过分区容量 " + FormatBytes(vp.sizeBytes));
                         return 1;
                     }
-                    if (!VhdWriteBytes(devicePath, vp.offsetBytes, blob.data(), blob.size(), error))
+                    std::vector<std::uint8_t> padded = blob;
+                    const std::size_t sector = static_cast<std::size_t>(sectorSize > 512 ? sectorSize : 512);
+                    const std::size_t aligned = ((padded.size() + sector - 1) / sector) * sector;
+                    if (aligned > vp.sizeBytes)
+                    {
+                        std::string ignored;
+                        VhdDetach(path, ignored);
+                        Err("固件镜像 " + vp.name + " 按扇区对齐后超过分区容量");
+                        return 1;
+                    }
+                    padded.resize(aligned, 0);
+                    if (!VhdWriteBytes(devicePath, vp.offsetBytes, padded.data(), padded.size(), error))
                     {
                         std::string ignored;
                         VhdDetach(path, ignored);
                         Err("写固件分区 " + vp.name + " 失败：" + error);
                         return 1;
                     }
-                    std::vector<std::uint8_t> check(blob.size(), 0);
-                    if (!VhdReadBytes(devicePath, vp.offsetBytes, check.data(), check.size(), error) || check != blob)
+                    std::vector<std::uint8_t> check(padded.size(), 0);
+                    if (!VhdReadBytes(devicePath, vp.offsetBytes, check.data(), check.size(), error) ||
+                        !std::equal(padded.begin(), padded.end(), check.begin()))
                     {
                         std::string ignored;
                         VhdDetach(path, ignored);

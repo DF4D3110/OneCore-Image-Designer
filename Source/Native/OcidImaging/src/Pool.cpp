@@ -68,6 +68,28 @@ bool PoolProbe(std::string& dllPath,
     const char* env = std::getenv("OCID_IMAGESTORAGE_DLL");
     if (env != nullptr && env[0] != 0) candidates.push_back(env);
 
+    // OCID_ADK_ROOT (ADK root) or registry KitsRoot10 also supply the DLL.
+    {
+        const char* adkRoot = std::getenv("OCID_ADK_ROOT");
+        if (adkRoot != nullptr && adkRoot[0] != 0)
+        {
+            const std::string base(adkRoot);
+            candidates.push_back(base + "\\Windows Kits\\10\\Tools\\bin\\i386\\ImageStorageService.dll");
+            candidates.push_back(base + "\\Tools\\bin\\i386\\ImageStorageService.dll");
+        }
+    }
+    {
+        wchar_t kits[MAX_PATH] = { 0 };
+        DWORD size = static_cast<DWORD>(sizeof(kits));
+        if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\Microsoft\\Windows Kits\\Installed Roots",
+                         L"KitsRoot10", RRF_RT_REG_SZ, nullptr, kits, &size) == ERROR_SUCCESS)
+        {
+            std::wstring root(kits);
+            if (!root.empty() && root.back() != L'\\') root.push_back(L'\\');
+            root += L"Tools\\bin\\i386\\ImageStorageService.dll";
+            candidates.emplace_back(root.begin(), root.end());
+        }
+    }
     char module[MAX_PATH] = { 0 };
     if (GetModuleFileNameW(nullptr, reinterpret_cast<LPWSTR>(module), MAX_PATH) != 0)
     {
@@ -85,6 +107,25 @@ bool PoolProbe(std::string& dllPath,
         }
     }
 
+    {
+        const wchar_t* roots[] = { L"ProgramFiles(x86)", L"ProgramFiles" };
+        for (const wchar_t* rootName : roots)
+        {
+            wchar_t root[MAX_PATH] = { 0 };
+            if (GetEnvironmentVariableW(rootName, root, MAX_PATH) == 0) continue;
+            const std::wstring base(root);
+            const wchar_t* rels[] = {
+                L"\\Windows Kits\\10\\Tools\\bin\\i386\\ImageStorageService.dll",
+                L"\\Windows Kits\\10\\Tools\\bin\\x86\\ImageStorageService.dll",
+                L"\\Windows Kits\\10\\Tools\\bin\\desktop\\ImageStorageService.dll"
+            };
+            for (const wchar_t* rel : rels)
+            {
+                const std::wstring full = base + rel;
+                candidates.emplace_back(full.begin(), full.end());
+            }
+        }
+    }
     bool exists = false;
     for (const std::string& candidate : candidates)
     {
