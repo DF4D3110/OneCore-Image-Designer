@@ -2600,6 +2600,19 @@ int CmdLayout(const std::vector<std::string>& args)
         {
             if (!onlyStore.empty() && !EqualsNoCase(plan.storeType, onlyStore)) continue;
             const std::wstring path = Utf8ToWide(plan.fileName);
+            // 同名文件可能还挂着（上次运行永久挂载），先卸载并删除。
+            if (std::filesystem::exists(path))
+            {
+                std::string ignored;
+                VhdDetach(path, ignored);
+                std::error_code ec;
+                std::filesystem::remove(path, ec);
+                if (ec)
+                {
+                    Err("删除旧文件失败：" + plan.fileName + "（" + ec.message() + "）");
+                    return 1;
+                }
+            }
             if (!VhdCreate(path, plan.bytes, VhdKind::Dynamic, 0, sector32, error))
             {
                 Err("创建 " + plan.fileName + " 失败：" + error);
@@ -3067,6 +3080,134 @@ int CmdLayout(const std::vector<std::string>& args)
         return 0;
     }
 
+    int CmdPoolPrepare(const std::vector<std::string>& args)
+    {
+        std::string file, layoutPath, directory, onlySpace;
+        unsigned int version = 24;
+        bool dry = false;
+        bool doFormat = false;
+        for (std::size_t i = 3; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            auto next = [&](std::string& out) -> bool
+            {
+                if (i + 1 >= args.size()) return false;
+                out = args[++i];
+                return true;
+            };
+            if (a == "--vhd") { if (!next(file)) { Err("--vhd 缺少值"); return 2; } }
+            else if (a == "--layout") { if (!next(layoutPath)) { Err("--layout 缺少值"); return 2; } }
+            else if (a == "--dir") { if (!next(directory)) { Err("--dir 缺少值"); return 2; } }
+            else if (a == "--space") { if (!next(onlySpace)) { Err("--space 缺少值"); return 2; } }
+            else if (a == "--version")
+            {
+                std::string v;
+                if (!next(v)) { Err("--version 缺少值"); return 2; }
+                version = static_cast<unsigned int>(std::strtoul(v.c_str(), nullptr, 0));
+            }
+            else if (a == "--format") doFormat = true;
+            else if (a == "--dry") dry = true;
+            else if (!a.empty() && a[0] == '-') { Err("未知参数：" + a); return 2; }
+            else { Err("多余的位置参数：" + a); return 2; }
+        }
+        if ((file.empty() && !dry) || layoutPath.empty())
+        {
+            Err("pool prepare 需要 --vhd <虚拟磁盘> --layout <布局 XML>");
+            return 2;
+        }
+        LayoutModel model;
+        std::string error;
+        if (!LoadLayout(layoutPath, model, error)) { Err("读布局失败：" + error); return 1; }
+        const std::uint64_t sector = model.sectorSize != 0 ? model.sectorSize : 512;
+        const std::uint64_t defaultAlignment = model.defaultAlignment != 0 ? model.defaultAlignment : (1024ull * 1024);
+        auto align = [](std::uint64_t v, std::uint64_t a) { return a == 0 ? v : (v + a - 1) / a * a; };
+
+        std::vector<SpacePrepareSpec> spaces;
+        for (const LayoutStore& store : model.pools)
+        {
+            if (store.storeType.empty()) continue;
+            if (!onlySpace.empty() && !EqualsNoCase(store.storeType, onlySpace)) continue;
+            unsigned long long spaceSize = 0;
+            if (store.hasSizeBytes && store.sizeInBytes != 0) spaceSize = store.sizeInBytes;
+            else if (store.sizeInSectors != 0) spaceSize = store.sizeInSectors * sector;
+            if (spaceSize == 0) continue;
+            SpacePrepareSpec spec;
+            spec.name = Utf8ToWide(store.storeType);
+            spec.sectorSize = static_cast<unsigned int>(sector);
+            std::uint64_t cursor = align(1024ull * 1024, defaultAlignment);
+            for (const LayoutPartition& p : store.partitions)
+            {
+                std::uint64_t alignment = defaultAlignment;
+                std::uint64_t custom = 0;
+                if (!p.byteAlignment.empty() && ParseHexOrDec(p.byteAlignment, custom) && custom != 0) alignment = custom;
+                const std::uint64_t offset = align(cursor, alignment);
+                std::uint64_t size = 0;
+                if (p.useAllSpace)
+                {
+                    // space 内部署 GPT 时末尾要给备份 GPT 留位，否则 SET_DRIVE_LAYOUT 返回 87
+                    const std::uint64_t tailReserve = 1024ull * 1024;
+                    size = spaceSize > offset + tailReserve ? spaceSize - offset - tailReserve : 0;
+                }
+                else if (p.hasTotalBytes && p.totalBytes != 0)
+                {
+                    size = p.totalBytes;
+                }
+                else if (p.totalSectors != 0)
+                {
+                    size = p.totalSectors * sector;
+                }
+                if (size == 0) continue;
+                size = align(size, sector);
+                SpacePartitionSpec part;
+                part.name = Utf8ToWide(p.name);
+                part.typeGuid = Utf8ToWide(p.type);
+                part.partitionGuid = Utf8ToWide(p.id);
+                part.offsetBytes = offset;
+                part.sizeBytes = size;
+                part.fileSystem = Utf8ToWide(p.fileSystem);
+                unsigned long long cluster = 0;
+                if (!p.clusterSize.empty() && ParseHexOrDec(p.clusterSize, cluster)) part.clusterSize = static_cast<unsigned int>(cluster);
+                spec.partitions.push_back(part);
+                cursor = offset + size;
+            }
+            spaces.push_back(spec);
+        }
+        if (spaces.empty()) { Err("布局的 <StoragePool> 里没有可处理的 space"); return 1; }
+
+        OutLn("池内分区计划：" + NumText(spaces.size()) + " 个 space");
+        for (const SpacePrepareSpec& spec : spaces)
+        {
+            OutLn("  space " + std::string(spec.name.begin(), spec.name.end()));
+            for (const SpacePartitionSpec& p : spec.partitions)
+            {
+                OutLn("    " + std::string(p.name.begin(), p.name.end()) + "  type=" +
+                      std::string(p.typeGuid.begin(), p.typeGuid.end()) + "  offset=" + FormatBytes(p.offsetBytes) +
+                      "  size=" + FormatBytes(p.sizeBytes) + "  fs=" + std::string(p.fileSystem.begin(), p.fileSystem.end()));
+            }
+        }
+        if (dry)
+        {
+            OutLn("（演练）未碰磁盘；确认后去掉 --dry。");
+            return 0;
+        }
+
+        const std::wstring wideFile = Utf8ToWide(file);
+        VhdInfo vhdInfo;
+        if (!VhdQuery(wideFile, vhdInfo, error))
+        {
+            Err("拒绝操作：不是可识别的虚拟磁盘（" + file + "）：" + error);
+            return 1;
+        }
+        std::vector<std::string> report;
+        const bool prepared = PoolPrepareSpaces(wideFile, L"OSPool", version, Utf8ToWide(directory), spaces,
+                                                doFormat, report, error);
+        for (const std::string& line : report) OutLn("  " + line);
+        if (!prepared) { Err("池内分区/格式化失败：" + error); return 1; }
+        OutLn("池内准备完成：" + file);
+        return 0;
+    }
+
+
     int CmdPool(const std::vector<std::string>& args)
     {
         const std::string sub = args.size() > 2 ? args[2] : std::string();
@@ -3079,9 +3220,13 @@ int CmdLayout(const std::vector<std::string>& args)
             OutLn("                                在虚拟磁盘上真建池（服务句柄 → 池 → 可选 space），仅限虚拟盘");
             OutLn("  pool build --vhd <vhdx> --layout <xml> [--version 24|26] [--disk-id <guid>] [--dir <临时目录>] [--dry]");
             OutLn("                                写物理 GPT（只含 BS_EFIESP）→ 建池 → 按布局 <StoragePool>/<Stores> 逐 store 建 space");
+            OutLn("  pool prepare --vhd <vhdx> --layout <xml> [--space <名>] [--format] [--dir <临时目录>] [--dry]");
+            OutLn("                                打开已有池 → 每个 space 内写 GPT（按布局 ByteAlignment/DefaultPartitionByteAlignment）");
+            OutLn("                                加 --format 才按布局 FileSystem/ClusterSize 格式化分区");
             return sub.empty() ? 2 : 0;
         }
         if (sub == "build") return CmdPoolBuild(args);
+        if (sub == "prepare") return CmdPoolPrepare(args);
         if (sub == "probe")
         {
             std::string dll, error;

@@ -317,7 +317,10 @@ namespace imaging
             error = "无法查询设备总线类型（Win32=" + std::to_string(code) + "）";
             return false;
         }
-        if (descriptor.BusType != BusTypeVirtual && descriptor.BusType != BusTypeFileBackedVirtual)
+        // Storage Spaces 的 space（BusType=Spaces）也是本工具自己造出来的软件磁盘，
+        // 池内分区的 GPT 就要写到它上面；真正的物理盘（SATA/NVMe/USB…）一律拒绝。
+        if (descriptor.BusType != BusTypeVirtual && descriptor.BusType != BusTypeFileBackedVirtual &&
+            descriptor.BusType != BusTypeSpaces)
         {
             error = "拒绝操作：" + devicePath + " 不是虚拟磁盘（BusType=" +
                     std::to_string(static_cast<int>(descriptor.BusType)) +

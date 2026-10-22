@@ -4,6 +4,7 @@
 // 那一步留到 pool create 里接；这里先把“ADK 带的这份 DLL 到底导出什么”摸清，
 // 免得后面照着反编译签名盲猜。
 #include "ocid/imaging/Pool.h"
+#include "ocid/imaging/Vhd.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -12,6 +13,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <winioctl.h>
 
 #include <string>
 #include <vector>
@@ -126,31 +128,73 @@ bool PoolProbe(std::string& dllPath,
             }
         }
     }
-    bool exists = false;
+    // Portable ADK installs may skip the registry; scan fixed drives one level deep.
+    {
+        const DWORD drives = GetLogicalDrives();
+        for (int letter = 0; letter < 26; ++letter)
+        {
+            if ((drives & (1u << letter)) == 0) continue;
+            wchar_t driveRoot[4] = { static_cast<wchar_t>(L'A' + letter), L':', L'\\', 0 };
+            if (GetDriveTypeW(driveRoot) != DRIVE_FIXED) continue;
+            std::wstring pattern = driveRoot;
+            pattern += L"*";
+            WIN32_FIND_DATAW data;
+            HANDLE find = FindFirstFileW(pattern.c_str(), &data);
+            if (find == INVALID_HANDLE_VALUE) continue;
+            do
+            {
+                if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) continue;
+                if (data.cFileName[0] == L'.' || data.cFileName[0] == L'$') continue;
+                std::wstring base = driveRoot;
+                base += data.cFileName;
+                base += L"\\Windows Kits\\10\\Tools\\bin\\i386\\ImageStorageService.dll";
+                if (FileExists(std::string(base.begin(), base.end()))) candidates.emplace_back(base.begin(), base.end());
+            } while (FindNextFileW(find, &data));
+            FindClose(find);
+        }
+    }
+    std::string best;
+    std::vector<std::string> bestFound;
+    std::vector<std::string> bestMissing;
+    std::size_t tried = 0;
     for (const std::string& candidate : candidates)
     {
-        if (FileExists(candidate)) { dllPath = candidate; exists = true; break; }
+        if (!FileExists(candidate)) continue;
+        ++tried;
+        const std::wstring wide(candidate.begin(), candidate.end());
+        HMODULE moduleHandle = LoadLibraryW(wide.c_str());
+        if (moduleHandle == nullptr) continue;
+        std::vector<std::string> hit;
+        std::vector<std::string> miss;
+        for (const char* name : kExpected)
+        {
+            if (GetProcAddress(moduleHandle, name) != nullptr) hit.emplace_back(name);
+            else miss.emplace_back(name);
+        }
+        FreeLibrary(moduleHandle);
+        if (miss.empty())
+        {
+            dllPath = candidate;
+            found = hit;
+            missing.clear();
+            return true;
+        }
+        if (hit.size() > bestFound.size())
+        {
+            best = candidate;
+            bestFound = hit;
+            bestMissing = miss;
+        }
     }
-    if (!exists)
+    if (best.empty())
     {
-        error = "未找到 ImageStorageService.dll（可用 OCID_IMAGESTORAGE_DLL 指定路径；"
-                "ADK 里它在 Windows Kits\\10\\Tools\\bin\\<arch>\\ 或 Imaging 目录）";
+        error = "no usable ImageStorageService.dll among " + std::to_string(tried) +
+                " candidate(s); set OCID_IMAGESTORAGE_DLL or OCID_ADK_ROOT";
         return false;
     }
-
-    const std::wstring wide(dllPath.begin(), dllPath.end());
-    HMODULE moduleHandle = LoadLibraryW(wide.c_str());
-    if (moduleHandle == nullptr)
-    {
-        error = "LoadLibraryW 失败（win32=" + std::to_string(GetLastError()) + "）：" + dllPath;
-        return false;
-    }
-    for (const char* name : kExpected)
-    {
-        if (GetProcAddress(moduleHandle, name) != nullptr) found.emplace_back(name);
-        else missing.emplace_back(name);
-    }
-    FreeLibrary(moduleHandle);
+    dllPath = best;
+    found = bestFound;
+    missing = bestMissing;
     return true;
 }
 
@@ -218,6 +262,20 @@ void __stdcall PoolLogCallback(const wchar_t* message)
     if (message == nullptr) return;
     g_poolLog += WideToUtf8Local(message);
     g_poolLog += "\n";
+}
+
+bool EqualsNoCaseLocal(const std::string& left, const std::string& right)
+{
+    if (left.size() != right.size()) return false;
+    for (std::size_t i = 0; i < left.size(); ++i)
+    {
+        const unsigned char a = static_cast<unsigned char>(left[i]);
+        const unsigned char b = static_cast<unsigned char>(right[i]);
+        const unsigned char la = (a >= 'A' && a <= 'Z') ? static_cast<unsigned char>(a - 'A' + 'a') : a;
+        const unsigned char lb = (b >= 'A' && b <= 'Z') ? static_cast<unsigned char>(b - 'A' + 'a') : b;
+        if (la != lb) return false;
+    }
+    return true;
 }
 
 typedef long(__stdcall* CreateServiceFn)(void** service, void(__stdcall* log)(const wchar_t*), unsigned int count,
@@ -362,5 +420,225 @@ bool PoolCreateSandbox(const PoolCreateOptions& options, std::string& detail, st
     for (const std::string& name : created) detail += "space " + name + " 已创建" + eol8();
     return true;
 }
+
+namespace {
+
+typedef long(__stdcall* OpenVhdFn)(void* service, const wchar_t* fileName, int readOnly,
+                                   void* storeId, void** disk);
+typedef long(__stdcall* GetDiskNameFn)(void* disk, wchar_t* name, unsigned int chars);
+typedef long(__stdcall* OpenVhdFn)(void* service, const wchar_t* fileName, int readOnly,
+                                   void* storeId, void** disk);
+typedef long(__stdcall* GetDiskNameFn)(void* disk, wchar_t* name, unsigned int chars);
+typedef long(__stdcall* OpenVhdFn)(void* service, const wchar_t* fileName, int readOnly,
+                                   void* storeId, void** disk);
+typedef long(__stdcall* GetDiskNameFn)(void* disk, wchar_t* name, unsigned int chars);
+typedef long(__stdcall* OpenVhdFn)(void* service, const wchar_t* fileName, int readOnly,
+                                   void* storeId, void** disk);
+typedef long(__stdcall* GetDiskNameFn)(void* disk, wchar_t* name, unsigned int chars);
+typedef long(__stdcall* OpenVhdFn)(void* service, const wchar_t* fileName, int readOnly,
+                                   void* storeId, void** disk);
+typedef long(__stdcall* GetDiskNameFn)(void* disk, wchar_t* name, unsigned int chars);
+typedef long(__stdcall* OpenPoolFn)(void* service, const wchar_t* diskPath, const wchar_t* directory, int autoStage,
+                                    void** pool);
+typedef long(__stdcall* AttachSpaceFn)(void* service, void* pool, const wchar_t* spaceName, int temporary,
+                                       void** disk);
+typedef long(__stdcall* DetachSpaceFn)(void* service, void* pool, const wchar_t* spaceName, int discardChanges);
+typedef long(__stdcall* FormatPartitionFn)(void* service, void* disk, const wchar_t* partitionName,
+                                           const wchar_t* fileSystem, unsigned int clusterSize);
+
+// 从 space 的存储句柄反查它暴露出来的设备名（\\.\PhysicalDriveN）。
+// Storage Spaces 的分区表要写到 space 这块“磁盘”上，而写 GPT 的接口只认设备路径。
+bool DevicePathFromHandle(HANDLE disk, std::wstring& path, std::string& error)
+{
+    STORAGE_DEVICE_NUMBER number = {};
+    DWORD returned = 0;
+    if (!DeviceIoControl(disk, IOCTL_STORAGE_GET_DEVICE_NUMBER, nullptr, 0, &number, sizeof(number), &returned,
+                         nullptr))
+    {
+        error = "IOCTL_STORAGE_GET_DEVICE_NUMBER 失败（win32=" + std::to_string(GetLastError()) + "）";
+        return false;
+    }
+    path = L"\\\\.\\PhysicalDrive" + std::to_wstring(number.DeviceNumber);
+    return true;
+}
+
+} // namespace
+
+bool PoolPrepareSpaces(const std::wstring& imagePath, const std::wstring& poolName, unsigned int version,
+                       const std::wstring& directory, const std::vector<SpacePrepareSpec>& spaces,
+                       bool formatPartitions, std::vector<std::string>& report, std::string& error)
+{
+    (void)version;
+    report.clear();
+    error.clear();
+    g_poolLog.clear();
+    if (imagePath.empty())
+    {
+        error = "未指定虚拟磁盘（VHD/VHDX）路径";
+        return false;
+    }
+    std::string dllPath;
+    std::vector<std::string> found;
+    std::vector<std::string> missing;
+    if (!PoolProbe(dllPath, found, missing, error)) return false;
+    if (!missing.empty())
+    {
+        error = "ImageStorageService 缺少导出：" + missing[0];
+        return false;
+    }
+    const std::wstring wideDll(dllPath.begin(), dllPath.end());
+    HMODULE module = LoadLibraryW(wideDll.c_str());
+    if (module == nullptr)
+    {
+        error = "LoadLibraryW 失败（win32=" + std::to_string(GetLastError()) + "）。";
+        return false;
+    }
+    CreateServiceFn createService = reinterpret_cast<CreateServiceFn>(GetProcAddress(module, "CreateStorageService"));
+    CloseServiceFn closeService = reinterpret_cast<CloseServiceFn>(GetProcAddress(module, "CloseImageStorageService"));
+    OpenVhdFn openVhd = reinterpret_cast<OpenVhdFn>(GetProcAddress(module, "OpenVirtualHardDisk"));
+    GetDiskNameFn getDiskName = reinterpret_cast<GetDiskNameFn>(GetProcAddress(module, "GetDiskName"));
+    OpenPoolFn openPool = reinterpret_cast<OpenPoolFn>(GetProcAddress(module, "OpenStoragePool"));
+    ClosePoolFn closePool = reinterpret_cast<ClosePoolFn>(GetProcAddress(module, "CloseStoragePool"));
+    AttachSpaceFn attachSpace = reinterpret_cast<AttachSpaceFn>(GetProcAddress(module, "AttachStorageSpace"));
+    DetachSpaceFn detachSpace = reinterpret_cast<DetachSpaceFn>(GetProcAddress(module, "DetachStorageSpace"));
+    FormatPartitionFn formatPartition = reinterpret_cast<FormatPartitionFn>(GetProcAddress(module, "FormatPartition"));
+    if (createService == nullptr || closeService == nullptr || openVhd == nullptr || getDiskName == nullptr ||
+        openPool == nullptr || closePool == nullptr || attachSpace == nullptr || detachSpace == nullptr ||
+        formatPartition == nullptr)
+    {
+        FreeLibrary(module);
+        error = "GetProcAddress 失败（OpenVirtualHardDisk/GetDiskName/OpenStoragePool/FormatPartition）。";
+        return false;
+    }
+
+    void* service = nullptr;
+    long rc = createService(&service, PoolLogCallback, 0, nullptr, 1);
+    if (rc < 0 || service == nullptr)
+    {
+        FreeLibrary(module);
+        error = "CreateStorageService 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "）。" + eol8() + g_poolLog;
+        return false;
+    }
+
+    // 由服务自己打开虚拟磁盘再向它要磁盘名；直接把 \\.\PhysicalDriveN 传进去会被拒（0x8007007b = ERROR_INVALID_NAME）。
+    unsigned char storeId[32] = {};
+    void* baseDisk = nullptr;
+    rc = openVhd(service, imagePath.c_str(), 0, storeId, &baseDisk);
+    if (rc < 0 || baseDisk == nullptr)
+    {
+        closeService(service);
+        FreeLibrary(module);
+        error = "OpenVirtualHardDisk 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "）。" + eol8() + g_poolLog;
+        return false;
+    }
+    wchar_t diskName[512] = {};
+    rc = getDiskName(baseDisk, diskName, 512);
+    if (rc < 0 || diskName[0] == 0)
+    {
+        CloseHandle(baseDisk);
+        closeService(service);
+        FreeLibrary(module);
+        error = "GetDiskName 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "）。" + eol8() + g_poolLog;
+        return false;
+    }
+    std::string baseDiskName;
+    for (std::size_t k = 0; diskName[k] != 0; ++k) baseDiskName.push_back(static_cast<char>(diskName[k]));
+
+    void* pool = nullptr;
+    rc = openPool(service, diskName, directory.c_str(), 1, &pool);
+    if (rc < 0 || pool == nullptr)
+    {
+        CloseHandle(baseDisk);
+        closeService(service);
+        FreeLibrary(module);
+        error = "OpenStoragePool 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "，disk=" + baseDiskName +
+                "）。" + eol8() + g_poolLog;
+        return false;
+    }
+    report.push_back("池已打开：" + baseDiskName);
+
+    bool ok = true;
+    std::string failures;
+    for (const SpacePrepareSpec& spec : spaces)
+    {
+        void* spaceDisk = nullptr;
+        const long attachRc = attachSpace(service, pool, spec.name.c_str(), 0, &spaceDisk);
+        if (attachRc < 0 || spaceDisk == nullptr)
+        {
+            ok = false;
+            failures += "space " + std::string(spec.name.begin(), spec.name.end()) + " 挂载失败（hr=" +
+                        std::to_string(static_cast<long long>(attachRc)) + "）；";
+            continue;
+        }
+        wchar_t spaceName[512] = {};
+        const long nameRc = getDiskName(spaceDisk, spaceName, 512);
+        std::string device;
+        for (std::size_t k = 0; nameRc >= 0 && spaceName[k] != 0; ++k) device.push_back(static_cast<char>(spaceName[k]));
+        if (device.empty())
+        {
+            ok = false;
+            failures += "space " + std::string(spec.name.begin(), spec.name.end()) + " 取磁盘名失败；";
+            detachSpace(service, pool, spec.name.c_str(), 0);
+            CloseHandle(spaceDisk);
+            continue;
+        }
+        std::vector<VhdPartition> parts;
+        for (const SpacePartitionSpec& p : spec.partitions)
+        {
+            VhdPartition vp;
+            vp.name = std::string(p.name.begin(), p.name.end());
+            vp.type = std::string(p.typeGuid.begin(), p.typeGuid.end());
+            vp.id = std::string(p.partitionGuid.begin(), p.partitionGuid.end());
+            vp.offsetBytes = p.offsetBytes;
+            vp.sizeBytes = p.sizeBytes;
+            vp.attributes = 0;
+            parts.push_back(vp);
+        }
+        std::string gptError;
+        if (!VhdWriteGpt(device, std::string(), parts, spec.sectorSize == 0 ? 512u : spec.sectorSize, gptError))
+        {
+            ok = false;
+            failures += "space " + std::string(spec.name.begin(), spec.name.end()) + " 写 GPT 失败（" + gptError + "）；";
+        }
+        else
+        {
+            report.push_back("space " + std::string(spec.name.begin(), spec.name.end()) + "：" + device + " 已写 GPT（" +
+                             std::to_string(parts.size()) + " 个分区）");
+            if (formatPartitions)
+            {
+                for (const SpacePartitionSpec& p : spec.partitions)
+                {
+                    if (p.fileSystem.empty()) continue;
+                    const long fmtRc = formatPartition(service, spaceDisk, p.name.c_str(), p.fileSystem.c_str(),
+                                                       p.clusterSize);
+                    if (fmtRc < 0)
+                    {
+                        ok = false;
+                        failures += "space " + std::string(spec.name.begin(), spec.name.end()) + " 的分区 " +
+                                    std::string(p.name.begin(), p.name.end()) + " 格式化失败（hr=" +
+                                    std::to_string(static_cast<long long>(fmtRc)) + "）；";
+                        break;
+                    }
+                    report.push_back("  已格式化 " + std::string(p.name.begin(), p.name.end()) + "（" +
+                                     std::string(p.fileSystem.begin(), p.fileSystem.end()) + "）");
+                }
+            }
+        }
+        detachSpace(service, pool, spec.name.c_str(), 0);
+        CloseHandle(spaceDisk);
+    }
+
+    closePool(service, pool, 1);
+    CloseHandle(baseDisk);
+    closeService(service);
+    FreeLibrary(module);
+    if (!failures.empty()) error = failures;
+    return ok;
+}
+
+
+
+
+
 
 } // namespace ocid::imaging

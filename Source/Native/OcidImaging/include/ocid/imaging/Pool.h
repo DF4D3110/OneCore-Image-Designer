@@ -68,4 +68,39 @@ OCID_POOL_API bool PoolBuild(const std::wstring& devicePath,
                              std::vector<std::string>& created,
                              std::string& error);
 
+// 池内“space 里的分区表 + 格式化”：真机镜像建完池后，每个 space 还要再分一次区
+// （space 自己是一块磁盘），并按布局里的 FileSystem/ClusterSize 格式化。
+// 参照证据：20279 QEMU-Stage 成品里 EFIESPDisk 的 EFIESP 分区在 2 MiB、MainOSDisk 的
+// MainOS 分区在 8 MiB（布局的 DefaultPartitionByteAlignment=0x200000、该分区
+// ByteAlignment=0x800000），分区类型 GUID 与布局 <Type> 完全一致。
+struct SpacePartitionSpec
+{
+    std::wstring name;
+    std::wstring typeGuid;       // 布局 <Type>，{'57434f53-...'} 形式
+    std::wstring partitionGuid;  // 布局 <Id>，空则由写 GPT 的实现自动生成
+    unsigned long long offsetBytes = 0;
+    unsigned long long sizeBytes = 0;
+    std::wstring fileSystem;     // NTFS / FAT / FAT16 / FAT32；空或 RAW = 不格式化
+    unsigned int clusterSize = 0; // 0 = 由服务决定
+};
+
+struct SpacePrepareSpec
+{
+    std::wstring name;           // space 名（布局里的 <StoreType>）
+    unsigned int sectorSize = 512;
+    std::vector<SpacePartitionSpec> partitions;
+};
+
+// 打开已有池（OpenStoragePool）→ 逐个 space 挂上（AttachStorageSpace）→ 在 space 内写 GPT
+// → 按需 FormatPartition → 卸下（DetachStorageSpace）→ 关池。
+// 调用方负责先把虚拟磁盘挂上并过 VhdEnsureVirtualDisk。
+OCID_POOL_API bool PoolPrepareSpaces(const std::wstring& devicePath,
+                                     const std::wstring& poolName,
+                                     unsigned int version,
+                                     const std::wstring& directory,
+                                     const std::vector<SpacePrepareSpec>& spaces,
+                                     bool formatPartitions,
+                                     std::vector<std::string>& report,
+                                     std::string& error);
+
 } // namespace ocid::imaging

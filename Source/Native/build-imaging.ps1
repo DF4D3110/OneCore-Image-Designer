@@ -115,7 +115,7 @@ Build-Dll 'vhd' 'ocid_vhd' $vhdObjs @("`"$commonLib`"", 'virtdisk.lib', 'ole32.l
 $poolObjs = @()
 $poolObjs += Build-Object 'pool' 'src\Pool.cpp' @('/DOCID_POOL_BUILD')
 $poolLib = Join-Path $out 'ocid_pool.wcos.lib'
-Build-Dll 'pool' 'ocid_pool' $poolObjs @("`"$commonLib`"", 'advapi32.lib')
+Build-Dll 'pool' 'ocid_pool' $poolObjs @("`"$commonLib`"", 'advapi32.lib', "`"$vhdLib`"", 'advapi32.lib')
 
 
 
