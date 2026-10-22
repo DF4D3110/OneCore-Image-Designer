@@ -4,6 +4,7 @@
 // 那一步留到 pool create 里接；这里先把“ADK 带的这份 DLL 到底导出什么”摸清，
 // 免得后面照着反编译签名盲猜。
 #include "ocid/imaging/Pool.h"
+#include <cstring>
 #include "ocid/imaging/Vhd.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -478,6 +479,14 @@ typedef long(__stdcall* OpenPoolFn)(void* service, const wchar_t* diskPath, cons
 typedef long(__stdcall* AttachSpaceFn)(void* service, void* pool, const wchar_t* spaceName, int temporary,
                                        void** disk);
 typedef long(__stdcall* DetachSpaceFn)(void* service, void* pool, const wchar_t* spaceName, int discardChanges);
+// STORE_ID（20 字节）在 x86 上按值压栈；这里用它给 space 的 GPT 磁盘 GUID 设成布局里的 <Id>。
+struct StoreId20
+{
+    unsigned int type;
+    unsigned char guid[16];
+};
+typedef long(__stdcall* SetDiskIdFn)(void* disk, StoreId20 storeId);
+
 typedef long(__stdcall* FormatPartitionFn)(void* service, void* disk, const wchar_t* partitionName,
                                            const wchar_t* fileSystem, unsigned int clusterSize);
 
@@ -504,6 +513,40 @@ bool IsDevicePathW(const std::wstring& path)
 }
 
 } // namespace
+
+
+// 解析 "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}" / "xxxxxxxx-xxxx-..." 形式的 GUID 文本，
+// 按 GUID 的内存布局（Data1/2/3 小端）写进 16 字节。
+static bool ParseGuidTextCpp(const std::wstring& text, unsigned char out[16])
+{
+    unsigned int d[32] = {0};
+    int n = 0;
+    for (std::size_t i = 0; i < text.size() && n < 32; ++i)
+    {
+        const wchar_t c = text[i];
+        if (c >= L'0' && c <= L'9') d[n++] = static_cast<unsigned int>(c - L'0');
+        else if (c >= L'a' && c <= L'f') d[n++] = static_cast<unsigned int>(c - L'a' + 10);
+        else if (c >= L'A' && c <= L'F') d[n++] = static_cast<unsigned int>(c - L'A' + 10);
+    }
+    if (n != 32) return false;
+    const unsigned int d1 = (d[0] << 28) | (d[1] << 24) | (d[2] << 20) | (d[3] << 16) |
+                            (d[4] << 12) | (d[5] << 8) | (d[6] << 4) | d[7];
+    const unsigned int d2 = (d[8] << 12) | (d[9] << 8) | (d[10] << 4) | d[11];
+    const unsigned int d3 = (d[12] << 12) | (d[13] << 8) | (d[14] << 4) | d[15];
+    out[0] = static_cast<unsigned char>(d1 & 0xFF);
+    out[1] = static_cast<unsigned char>((d1 >> 8) & 0xFF);
+    out[2] = static_cast<unsigned char>((d1 >> 16) & 0xFF);
+    out[3] = static_cast<unsigned char>((d1 >> 24) & 0xFF);
+    out[4] = static_cast<unsigned char>(d2 & 0xFF);
+    out[5] = static_cast<unsigned char>((d2 >> 8) & 0xFF);
+    out[6] = static_cast<unsigned char>(d3 & 0xFF);
+    out[7] = static_cast<unsigned char>((d3 >> 8) & 0xFF);
+    for (int i = 0; i < 8; ++i)
+    {
+        out[8 + i] = static_cast<unsigned char>(((d[16 + i * 2] << 4) | d[17 + i * 2]) & 0xFF);
+    }
+    return true;
+}
 
 bool PoolPrepareSpaces(const std::wstring& imagePath, const std::wstring& poolName, unsigned int version,
                        const std::wstring& directory, const std::vector<SpacePrepareSpec>& spaces,
@@ -547,6 +590,7 @@ bool PoolPrepareSpaces(const std::wstring& imagePath, const std::wstring& poolNa
     AttachSpaceFn attachSpace = reinterpret_cast<AttachSpaceFn>(GetProcAddress(module, "AttachStorageSpace"));
     DetachSpaceFn detachSpace = reinterpret_cast<DetachSpaceFn>(GetProcAddress(module, "DetachStorageSpace"));
     FormatPartitionFn formatPartition = reinterpret_cast<FormatPartitionFn>(GetProcAddress(module, "FormatPartition"));
+    SetDiskIdFn setDiskId = reinterpret_cast<SetDiskIdFn>(GetProcAddress(module, "SetDiskId"));
     if (createService == nullptr || closeService == nullptr || openVhd == nullptr || getDiskName == nullptr ||
         openPool == nullptr || closePool == nullptr || attachSpace == nullptr || detachSpace == nullptr ||
         formatPartition == nullptr)
@@ -666,6 +710,35 @@ bool PoolPrepareSpaces(const std::wstring& imagePath, const std::wstring& poolNa
         {
             report.push_back("space " + std::string(spec.name.begin(), spec.name.end()) + "：" + device + " 已写 GPT（" +
                              std::to_string(parts.size()) + " 个分区）");
+            // store id = GPT 磁盘 GUID。ImageApp 把 MainOS 的磁盘 GUID 固定成 MAINOS_STORE_GUID
+            // （AE420040-13DD-41F2-AE7F-0DC35854C8D7），其余 store 用布局 <Id> 的 GUID；
+            // UpdateDLL 就是按这个 GUID 找 store 的，缺失会直接 E_UNEXPECTED/NOT_FOUND。
+            if (spec.diskId.empty() || setDiskId == nullptr)
+            {
+                report.push_back(std::string("  (diskId 未设置：") +
+                                 (spec.diskId.empty() ? "布局无 Id" : "DLL 无 SetDiskId 导出") + "）");
+            }
+            if (!spec.diskId.empty() && setDiskId != nullptr)
+            {
+                unsigned char diskGuid[16] = {0};
+                if (ParseGuidTextCpp(spec.diskId, diskGuid))
+                {
+                    StoreId20 sid{};
+                    sid.type = 1; // ImageConstants.PartitionTypeGpt
+                    std::memcpy(sid.guid, diskGuid, 16);
+                    const long idRc = setDiskId(spaceDisk, sid);
+                    if (idRc < 0)
+                    {
+                        ok = false;
+                        failures += "space " + std::string(spec.name.begin(), spec.name.end()) +
+                                    " SetDiskId 失败（hr=" + std::to_string(static_cast<long long>(idRc)) + "）；";
+                    }
+                    else
+                    {
+                        report.push_back("  diskId = " + std::string(spec.diskId.begin(), spec.diskId.end()));
+                    }
+                }
+            }
             if (formatPartitions)
             {
                 for (const SpacePartitionSpec& p : spec.partitions)

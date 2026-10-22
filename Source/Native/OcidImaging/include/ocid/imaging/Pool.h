@@ -88,6 +88,7 @@ struct SpacePartitionSpec
 struct SpacePrepareSpec
 {
     std::wstring name;           // space 名（布局里的 <StoreType>）
+    std::wstring diskId;         // 写进 GPT 的磁盘 GUID（= store id；MainOS 必须是 MAINOS_STORE_GUID）
     unsigned int sectorSize = 512;
     std::vector<SpacePartitionSpec> partitions;
 };

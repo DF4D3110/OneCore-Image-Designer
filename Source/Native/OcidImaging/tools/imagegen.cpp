@@ -3218,7 +3218,8 @@ int CmdLayout(const std::vector<std::string>& args)
                 }
                 for (const std::string& line : detachReport) OutLn("  " + line);
             }
-            if (!VhdDetach(path, error)) { Err("卸载 " + plan.fileName + " 失败：" + error); return 1; }
+            // 非永久挂载：进程退出后系统自动卸载；池载体盘显式 DetachVirtualDisk 会挂死。
+            if (plan.holdsPool) OutLn("  池载体磁盘由进程退出自动卸载（非永久挂载）");
             ++built;
         }
         OutLn("完成：物理磁盘 " + NumText(built) + " 块。");
@@ -3296,7 +3297,7 @@ int CmdLayout(const std::vector<std::string>& args)
         if (sub == "attach")
         {
             std::string devicePath;
-            if (!VhdAttach(wideFile, readOnly, devicePath, error))
+            if (!VhdAttach(wideFile, readOnly, devicePath, error, true))
             {
                 Err("挂载失败：" + error);
                 return 1;
@@ -3714,6 +3715,16 @@ int CmdLayout(const std::vector<std::string>& args)
             SpacePrepareSpec spec;
             spec.name = Utf8ToWide(store.storeType);
             spec.sectorSize = static_cast<unsigned int>(storeSector);
+            // UpdateDLL 按 GPT 磁盘 GUID 找 store：MainOS 固定为 MAINOS_STORE_GUID，
+            // 其余 store 用布局里的 <Id>（ImageConstants.MAINOS_STORE_GUID = AE420040-13DD-41F2-AE7F-0DC35854C8D7）。
+            {
+                bool mainOsSpace = false;
+                for (const LayoutPartition& lp : store.partitions)
+                {
+                    if (EqualsNoCase(lp.name, "MainOS")) { mainOsSpace = true; break; }
+                }
+                spec.diskId = Utf8ToWide(mainOsSpace ? std::string("{AE420040-13DD-41F2-AE7F-0DC35854C8D7}") : store.id);
+            }
             std::uint64_t cursor = align(1024ull * 1024, defaultAlignment);
             for (const LayoutPartition& p : store.partitions)
             {
@@ -3838,6 +3849,16 @@ int CmdLayout(const std::vector<std::string>& args)
             SpacePrepareSpec spec;
             spec.name = Utf8ToWide(store.storeType);
             spec.sectorSize = static_cast<unsigned int>(storeSector);
+            // UpdateDLL 按 GPT 磁盘 GUID 找 store：MainOS 固定为 MAINOS_STORE_GUID，
+            // 其余 store 用布局里的 <Id>（ImageConstants.MAINOS_STORE_GUID = AE420040-13DD-41F2-AE7F-0DC35854C8D7）。
+            {
+                bool mainOsSpace = false;
+                for (const LayoutPartition& lp : store.partitions)
+                {
+                    if (EqualsNoCase(lp.name, "MainOS")) { mainOsSpace = true; break; }
+                }
+                spec.diskId = Utf8ToWide(mainOsSpace ? std::string("{AE420040-13DD-41F2-AE7F-0DC35854C8D7}") : store.id);
+            }
             std::uint64_t cursor = align(1024ull * 1024, defaultAlignment);
             for (const LayoutPartition& p : store.partitions)
             {
@@ -3909,12 +3930,7 @@ int CmdLayout(const std::vector<std::string>& args)
         for (const std::string& line : report) OutLn("  " + line);
         if (!prepared) { Err("池内分区/格式化失败：" + error); return 1; }
         OutLn("池内准备完成：" + file);
-        if (!isDevice)
-        {
-            std::string detachBaseError;
-            if (VhdDetach(wideFile, detachBaseError)) OutLn("  基座磁盘已卸载");
-            else Err("基座磁盘卸载失败：" + detachBaseError);
-        }
+        if (!isDevice) OutLn("  基座磁盘非永久挂载，进程退出后自动卸载");
         return 0;
     }
 
@@ -4517,7 +4533,7 @@ int CmdLayout(const std::vector<std::string>& args)
             if (!VhdEnsureVirtualDisk(device, error))
             {
                 std::string detachError;
-                if (!fromDisk) VhdDetach(vhdPath, detachError);
+                if (!fromDisk) OutLn("  基座磁盘非永久挂载，进程退出后自动卸载");
                 Err("拒绝操作：" + error);
                 return 1;
             }
@@ -4531,7 +4547,7 @@ int CmdLayout(const std::vector<std::string>& args)
             std::string detail;
             const bool ok = PoolCreateSandbox(options, detail, error);
             std::string detachError;
-            const bool detached = fromDisk ? true : VhdDetach(vhdPath, detachError);
+            const bool detached = true;
             if (!detail.empty()) Out(detail);
             if (!detached) Err("卸载虚拟磁盘失败：" + detachError);
             if (!ok) { Err("建池失败：" + error); return 1; }
@@ -4549,7 +4565,7 @@ int CmdLayout(const std::vector<std::string>& args)
 // 用 wmain 取宽字符命令行：
 // 清单/镜像路径经常带中文（例如 ...\成品\ProcessedFiles），ANSI 的 main 会按当前代码页
 // 折成本地编码，再转回 UTF-8 时字符就丢了。宽字符直接保真。
-int wmain(int argc, wchar_t** wargv)
+static int RunMain(int argc, wchar_t** wargv)
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::setvbuf(stderr, nullptr, _IONBF, 0);
@@ -4607,4 +4623,13 @@ int wmain(int argc, wchar_t** wargv)
     Err("未知命令：" + command);
     PrintUsage();
     return 2;
+}
+
+int wmain(int argc, wchar_t** wargv)
+{
+    // 无论成功、失败还是提前 return，收尾统一释放本进程挂上的虚拟磁盘
+    // （非永久挂载，进程被杀时也由系统自动卸载）。
+    const int rc = RunMain(argc, wargv);
+    VhdReleaseAll();
+    return rc;
 }

@@ -66,10 +66,16 @@ namespace imaging
                                 std::string& error);
 
     // 挂载（读写），成功后 devicePath 形如 \\.\PhysicalDriveN。
+    // 进程退出时释放所有非永久挂载（wmain 收尾调用）。
+    OCID_VHD_API void VhdReleaseAll();
+
+    // permanent=false（默认）：挂载生命周期绑定本进程，进程退出（含被杀）时由系统自动卸载。
+    // permanent=true：跨进程挂载（vhd attach/detach 两条独立命令）时才用。
     OCID_VHD_API bool VhdAttach(const std::wstring& path,
                                 bool readOnly,
                                 std::string& devicePath,
-                                std::string& error);
+                                std::string& error,
+                                bool permanent = false);
 
     OCID_VHD_API bool VhdDetach(const std::wstring& path, std::string& error);
 

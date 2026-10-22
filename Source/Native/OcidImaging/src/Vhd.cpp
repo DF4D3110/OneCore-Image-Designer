@@ -208,17 +208,43 @@ namespace imaging
         return true;
     }
 
-    bool VhdAttach(const std::wstring& path, bool readOnly, std::string& devicePath, std::string& error)
+    namespace
+    {
+        // 非永久挂载的盘靠“保持 OpenVirtualDisk 句柄”存活：句柄一关盘就卸载。
+        // 进程正常退出时 VhdReleaseAll() 逐个 detach + close；被杀时系统自动回收。
+        std::vector<HANDLE>& AttachHandles()
+        {
+            static std::vector<HANDLE> handles;
+            return handles;
+        }
+    }
+
+    void VhdReleaseAll()
+    {
+        std::vector<HANDLE>& handles = AttachHandles();
+        for (std::size_t i = 0; i < handles.size(); ++i)
+        {
+            if (handles[i] != INVALID_HANDLE_VALUE)
+            {
+                (void)DetachVirtualDisk(handles[i], DETACH_VIRTUAL_DISK_FLAG_NONE, 0);
+                CloseHandle(handles[i]);
+            }
+        }
+        handles.clear();
+    }
+
+    bool VhdAttach(const std::wstring& path, bool readOnly, std::string& devicePath, std::string& error,
+                    bool permanent)
     {
         HANDLE handle = INVALID_HANDLE_VALUE;
         if (!OpenVirtual(path, VIRTUAL_DISK_ACCESS_ALL, handle, error)) return false;
 
         ATTACH_VIRTUAL_DISK_PARAMETERS params{};
         params.Version = ATTACH_VIRTUAL_DISK_VERSION_1;
-        // 用 PERMANENT 挂载：CLI 的 attach / detach 是两条独立命令，非永久挂载会在
-        // 进程退出时自动消失。
+        // 默认非永久挂载：生命周期绑定本进程，进程正常退出或被杀时由系统自动卸载。
+        // 只有 CLI 的 vhd attach（跨命令）才用 PERMANENT_LIFETIME。
         const ATTACH_VIRTUAL_DISK_FLAG attachFlags = static_cast<ATTACH_VIRTUAL_DISK_FLAG>(
-            ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME |
+            (permanent ? ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME : ATTACH_VIRTUAL_DISK_FLAG_NONE) |
             (readOnly ? ATTACH_VIRTUAL_DISK_FLAG_READ_ONLY : ATTACH_VIRTUAL_DISK_FLAG_NONE));
         const DWORD rc = AttachVirtualDisk(handle, nullptr, attachFlags, 0, &params, nullptr);
         if (rc != ERROR_SUCCESS)
@@ -241,7 +267,9 @@ namespace imaging
             return false;
         }
         devicePath = NormalizeDevicePath(physical);
-        CloseHandle(handle);
+        // permanent：跨进程挂载，关句柄不影响；否则必须保持句柄，句柄关=盘卸载。
+        if (permanent) CloseHandle(handle);
+        else AttachHandles().push_back(handle);
         return true;
     }
 
@@ -334,12 +362,17 @@ namespace imaging
         return true;
     }
 
-    bool VhdWriteGpt(const std::string& devicePath,
-                     const std::string& diskId,
-                     const std::vector<VhdPartition>& parts,
-                     std::uint32_t sectorSize,
-                     std::string& error)
+    // 真写一次 GPT。刚 attach 的盘会被内核重新枚举，紧跟的 IOCTL 常返回
+    // 433 ERROR_NO_SUCH_DEVICE / 1167 ERROR_DEVICE_NOT_CONNECTED / 21 ERROR_NOT_READY，
+    // 这里把当时的 win32 码带出去，由 VhdWriteGpt 退避重试。
+    static bool WriteGptOnce(const std::string& devicePath,
+                             const std::string& diskId,
+                             const std::vector<VhdPartition>& parts,
+                             std::uint32_t sectorSize,
+                             std::string& error,
+                             std::uint32_t& win32)
     {
+        win32 = 0;
         if (parts.empty())
         {
             error = "分区表为空";
@@ -347,14 +380,12 @@ namespace imaging
         }
         if (sectorSize == 0) sectorSize = 512;
 
-        if (!VhdEnsureVirtualDisk(devicePath, error))
-            return false;
-
         const std::wstring wide(devicePath.begin(), devicePath.end());
         HANDLE disk = CreateFileW(wide.c_str(), GENERIC_READ | GENERIC_WRITE,
                                   FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
         if (disk == INVALID_HANDLE_VALUE)
         {
+            win32 = GetLastError();
             error = LastErrorText("打开物理盘");
             return false;
         }
@@ -425,13 +456,46 @@ namespace imaging
         DWORD returned = 0;
         const BOOL ok = DeviceIoControl(disk, IOCTL_DISK_SET_DRIVE_LAYOUT_EX,
                                         layout, static_cast<DWORD>(bytes), nullptr, 0, &returned, nullptr);
-        CloseHandle(disk);
         if (!ok)
         {
+            win32 = GetLastError();
             error = LastErrorText("IOCTL_DISK_SET_DRIVE_LAYOUT_EX");
+            CloseHandle(disk);
             return false;
         }
+        CloseHandle(disk);
         return true;
+    }
+
+    bool VhdWriteGpt(const std::string& devicePath,
+                     const std::string& diskId,
+                     const std::vector<VhdPartition>& parts,
+                     std::uint32_t sectorSize,
+                     std::string& error)
+    {
+        if (!VhdEnsureVirtualDisk(devicePath, error))
+            return false;
+
+        const std::uint32_t transient[] = {2u, 433u, 1167u, 21u, 31u, 1117u, 5u};
+        std::string lastError;
+        for (int attempt = 0; attempt < 15; ++attempt)
+        {
+            std::uint32_t win32 = 0;
+            std::string attemptError;
+            if (WriteGptOnce(devicePath, diskId, parts, sectorSize, attemptError, win32))
+            {
+                error.clear();
+                return true;
+            }
+            lastError = attemptError;
+            bool retry = false;
+            for (std::size_t i = 0; i < sizeof(transient) / sizeof(transient[0]); ++i)
+                if (win32 == transient[i]) retry = true;
+            if (!retry) break;
+            Sleep(static_cast<DWORD>(200 + attempt * 100));
+        }
+        error = lastError;
+        return false;
     }
 
     bool VhdReadGpt(const std::string& devicePath,
