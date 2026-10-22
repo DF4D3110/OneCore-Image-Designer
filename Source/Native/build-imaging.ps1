@@ -114,6 +114,7 @@ Build-Dll 'vhd' 'ocid_vhd' $vhdObjs @("`"$commonLib`"", 'virtdisk.lib', 'ole32.l
 # ---- 3c) pool (ImageStorageService.dll wrapper: pool/space) ----
 $poolObjs = @()
 $poolObjs += Build-Object 'pool' 'src\Pool.cpp' @('/DOCID_POOL_BUILD')
+$poolObjs += Build-Object 'pool' 'src\PoolMount.cpp' @('/DOCID_POOL_BUILD')
 $poolLib = Join-Path $out 'ocid_pool.wcos.lib'
 Build-Dll 'pool' 'ocid_pool' $poolObjs @("`"$commonLib`"", 'advapi32.lib', "`"$vhdLib`"", 'advapi32.lib')
 
@@ -123,7 +124,7 @@ Build-Dll 'pool' 'ocid_pool' $poolObjs @("`"$commonLib`"", 'advapi32.lib', "`"$v
 $updateObjs = @()
 $updateObjs += Build-Object 'update' 'src\Update.cpp' @('/DOCID_UPDATE_BUILD')
 $updateLib = Join-Path $out 'ocid_update.wcos.lib'
-Build-Dll 'update' 'ocid_update' $updateObjs @("`"$commonLib`"", "`"$poolLib`"")
+Build-Dll 'update' 'ocid_update' $updateObjs @("`"$commonLib`"", "`"$poolLib`"", 'advapi32.lib', 'user32.lib')
 # ---- 4) exe ----
 $exeObjs = @()
 $exeObjs += Build-Object 'imagegen' 'tools\imagegen.cpp'

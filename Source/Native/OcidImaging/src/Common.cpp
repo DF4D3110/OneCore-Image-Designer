@@ -297,6 +297,7 @@ void Out(const std::string& utf8) {
 void OutLn(const std::string& utf8) {
     Out(utf8);
     std::fputc('\n', stdout);
+    std::fflush(stdout);
 }
 
 void Err(const std::string& utf8) {

@@ -132,6 +132,27 @@ OCID_POOL_API bool PoolAttachForUpdate(const std::wstring& imagePath,
                                        std::vector<std::vector<unsigned char> >& storeIds,
                                        std::vector<std::string>& report,
                                        std::string& error);
+// 将池内 space 挂到宿主盘符，返回 MainOS 分区路径（用于现场造 UpdateOS.wim）。
+OCID_POOL_API bool PoolMountForUpdate(const std::wstring& imagePath,
+                                      const std::wstring& poolName,
+                                      unsigned int version,
+                                      const std::wstring& directory,
+                                      const std::vector<std::wstring>& spaceNames,
+                                      std::vector<std::vector<unsigned char> >& storeIds,
+                                      std::wstring& mainOsPath,
+                                      std::vector<std::string>& report,
+                                      std::string& error);
+
+
+// 卸载池内所有 space 并关闭池；若 imagePath 是文件路径再顺手卸载基座盘。
+// 用于不论成功/失败都把环境收干净；spaceNames 传空时尝试服务自建的两个 SERVICING_* space。
+OCID_POOL_API bool PoolDetachSpaces(const std::wstring& imagePath,
+                                    const std::wstring& poolName,
+                                    unsigned int version,
+                                    const std::wstring& directory,
+                                    const std::vector<std::wstring>& spaceNames,
+                                    std::vector<std::string>& report,
+                                    std::string& error);
 
 OCID_POOL_API bool PoolPrepareSpaces(const std::wstring& devicePath,
                                      const std::wstring& poolName,

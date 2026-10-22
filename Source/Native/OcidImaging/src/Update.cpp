@@ -93,6 +93,112 @@ const char* UpdateVersion()
     return "0.1.0";
 }
 
+namespace
+{
+typedef HANDLE(__stdcall* WimCreateFileFn)(const wchar_t*, unsigned long, unsigned long, unsigned long,
+                                           unsigned long, unsigned long*);
+typedef int(__stdcall* WimCaptureImageFn)(HANDLE, const wchar_t*, unsigned long);
+typedef int(__stdcall* WimSetBootImageFn)(HANDLE, unsigned long);
+typedef int(__stdcall* WimCloseHandleFn)(HANDLE);
+
+std::string NarrowPath(const std::wstring& text)
+{
+    if (text.empty()) return std::string();
+    const int need = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (need <= 1) return std::string();
+    std::string out(static_cast<std::size_t>(need - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, &out[0], need - 1, nullptr, nullptr);
+    return out;
+}
+
+bool EnsureDirTreeLocal(const std::wstring& path, std::string& error)
+{
+    if (path.empty()) { error = "empty directory path"; return false; }
+    std::wstring current;
+    for (std::size_t i = 0; i < path.size(); ++i)
+    {
+        current.push_back(path[i]);
+        const bool slash = (path[i] == L'\\' || path[i] == L'/');
+        if (!slash || i + 1 == path.size()) continue;
+        if (current.size() <= 1 || (current.size() == 3 && current[1] == L':')) continue;
+        if (!CreateDirectoryW(current.c_str(), nullptr))
+        {
+            const DWORD code = GetLastError();
+            if (code != ERROR_ALREADY_EXISTS)
+            {
+                error = "CreateDirectoryW failed (win32=" + std::to_string(code) + ")";
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// ImageApp 在 Initialize 之前先往 MainOS 的 PROGRAMS\UpdateOS\UpdateOS.wim 里捕一个空 WIM；
+// 提交阶段 UpdateDLL 再用它替换成真正的 UpdateOS 内容。
+bool CreateEmptyUpdateOsWim(const std::wstring& mainOsPath, const std::wstring& tempRoot, std::string& error)
+{
+    std::wstring base = mainOsPath;
+    if (!base.empty() && base.back() != L'\\' && base.back() != L'/') base.push_back(L'\\');
+    const std::wstring wimPath = base + L"PROGRAMS\\UpdateOS\\UpdateOS.wim";
+    std::wstring dir = wimPath;
+    const std::size_t cut = dir.find_last_of(L"\\/");
+    if (cut != std::wstring::npos) dir.erase(cut);
+    std::string dirError;
+    if (!EnsureDirTreeLocal(dir, dirError)) { error = "create UpdateOS directory failed: " + dirError; return false; }
+
+    std::wstring captureDir = tempRoot;
+    if (!captureDir.empty() && captureDir.back() != L'\\') captureDir.push_back(L'\\');
+    captureDir += L"UpdateOSWim";
+    if (!EnsureDirTreeLocal(captureDir, dirError)) { error = "create empty WIM capture dir failed: " + dirError; return false; }
+
+    std::wstring wimDll;
+    std::string findError;
+    if (!PoolFindAdkDll(L"wimgapi.dll", "WIMCreateFile", wimDll, findError))
+    {
+        error = "wimgapi.dll not found: " + findError;
+        return false;
+    }
+    HMODULE module = LoadLibraryExW(wimDll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (module == nullptr)
+    {
+        error = "LoadLibraryExW(wimgapi) failed (win32=" + std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    WimCreateFileFn createWim = reinterpret_cast<WimCreateFileFn>(GetProcAddress(module, "WIMCreateFile"));
+    WimCaptureImageFn captureImage = reinterpret_cast<WimCaptureImageFn>(GetProcAddress(module, "WIMCaptureImage"));
+    WimSetBootImageFn setBootImage = reinterpret_cast<WimSetBootImageFn>(GetProcAddress(module, "WIMSetBootImage"));
+    WimCloseHandleFn closeWim = reinterpret_cast<WimCloseHandleFn>(GetProcAddress(module, "WIMCloseHandle"));
+    if (createWim == nullptr || captureImage == nullptr || closeWim == nullptr)
+    {
+        FreeLibrary(module);
+        error = "wimgapi.dll missing WIMCreateFile/WIMCaptureImage/WIMCloseHandle";
+        return false;
+    }
+    unsigned long creationResult = 0;
+    HANDLE handle = createWim(wimPath.c_str(), 0x40000000ul, 2ul, 2ul | 0x20000000ul, 2ul, &creationResult);
+    if (handle == INVALID_HANDLE_VALUE || handle == nullptr)
+    {
+        const DWORD code = GetLastError();
+        FreeLibrary(module);
+        error = "WIMCreateFile failed (win32=" + std::to_string(code) + "): " + NarrowPath(wimPath);
+        return false;
+    }
+    if (captureImage(handle, captureDir.c_str(), 0) == 0)
+    {
+        const DWORD code = GetLastError();
+        closeWim(handle);
+        FreeLibrary(module);
+        error = "WIMCaptureImage failed (win32=" + std::to_string(code) + ")";
+        return false;
+    }
+    if (setBootImage != nullptr) setBootImage(handle, 1);
+    closeWim(handle);
+    FreeLibrary(module);
+    return true;
+}
+} // namespace
+
 bool UpdateApply(const UpdateRequest& request, std::vector<std::string>& report, std::string& error)
 {
     report.clear();
@@ -143,8 +249,11 @@ bool UpdateApply(const UpdateRequest& request, std::vector<std::string>& report,
     // 1) 挂盘、开池、逐 space 取 store id（随后交给 UpdateDLL）。
     std::vector<std::vector<unsigned char> > storeIds;
     std::vector<std::string> attachReport;
-    if (!PoolAttachForUpdate(request.imagePath, request.poolName, request.poolVersion,
-                             request.stagingDirectory, request.spaces, storeIds, attachReport, error))
+    OutLn("[apply] mounting pool spaces ...");
+    std::wstring mainOsPath;
+    if (!PoolMountForUpdate(request.imagePath, request.poolName, request.poolVersion,
+                            request.stagingDirectory, request.spaces, storeIds, mainOsPath,
+                            attachReport, error))
     {
         FreeLibrary(module);
         return false;
@@ -156,6 +265,15 @@ bool UpdateApply(const UpdateRequest& request, std::vector<std::string>& report,
         error = "没有取到任何 store id";
         return false;
     }
+
+    OutLn("[apply] creating empty UpdateOS.wim ...");
+    // MainOS 上现场造空 UpdateOS.wim：ImageApp 在 Initialize 之前就这么做。
+    if (!CreateEmptyUpdateOsWim(mainOsPath, request.stagingDirectory, error))
+    {
+        FreeLibrary(module);
+        return false;
+    }
+    report.push_back("MainOS 空 UpdateOS.wim 已建");
 
     // UpdateDLL 期望 STORE_ID[] 连续 20 字节一块，这里拼成一块缓冲。
     std::vector<unsigned char> flat;
@@ -198,6 +316,7 @@ bool UpdateApply(const UpdateRequest& request, std::vector<std::string>& report,
         {
             setLayouts(context, layoutPointers.data(), static_cast<int>(layoutPointers.size()));
         }
+        OutLn("[apply] Initialize(InitForInput) ...");
         int rc = initialize(context, storeCount, flat.data(), request.actionListFile.c_str(),
                             request.packagesRoot.c_str(), request.updateInputFile.c_str(),
                             request.updateOutputFile.c_str(), request.stagingDirectory.c_str(),

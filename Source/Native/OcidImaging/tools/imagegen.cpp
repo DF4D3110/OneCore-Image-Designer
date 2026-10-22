@@ -2921,6 +2921,19 @@ int CmdLayout(const std::vector<std::string>& args)
                 }
                 OutLn("  池已建：space " + NumText(created.size()) + " 个");
             }
+            if (plan.holdsPool)
+            {
+                std::vector<std::wstring> names;
+                for (const PoolSpaceSpec& spec : spaces) names.push_back(spec.name);
+                std::vector<std::string> detachReport;
+                std::string detachError;
+                if (!PoolDetachSpaces(Utf8ToWide(devicePath), widePool, poolVersion, Utf8ToWide(outDir), names, detachReport, detachError))
+                {
+                    Err("释放池失败：" + detachError);
+                    return 1;
+                }
+                for (const std::string& line : detachReport) OutLn("  " + line);
+            }
             if (!VhdDetach(path, error)) { Err("卸载 " + plan.fileName + " 失败：" + error); return 1; }
             ++built;
         }
@@ -3567,8 +3580,9 @@ int CmdLayout(const std::vector<std::string>& args)
         }
 
         const std::wstring wideFile = Utf8ToWide(file);
+        const bool isDevice = file.size() > 4 && file.compare(0, 4, "\\\\.\\") == 0;
         VhdInfo vhdInfo;
-        if (!VhdQuery(wideFile, vhdInfo, error))
+        if (!isDevice && !VhdQuery(wideFile, vhdInfo, error))
         {
             Err("拒绝操作：不是可识别的虚拟磁盘（" + file + "）：" + error);
             return 1;
@@ -3579,6 +3593,12 @@ int CmdLayout(const std::vector<std::string>& args)
         for (const std::string& line : report) OutLn("  " + line);
         if (!prepared) { Err("池内分区/格式化失败：" + error); return 1; }
         OutLn("池内准备完成：" + file);
+        if (!isDevice)
+        {
+            std::string detachBaseError;
+            if (VhdDetach(wideFile, detachBaseError)) OutLn("  基座磁盘已卸载");
+            else Err("基座磁盘卸载失败：" + detachBaseError);
+        }
         return 0;
     }
 
@@ -3630,6 +3650,7 @@ int CmdLayout(const std::vector<std::string>& args)
         std::vector<std::string> spaceOnly;
         unsigned int version = 0;
         bool stageOnly = false;
+        bool keepOpen = false;
         bool dry = false;
 
         for (std::size_t i = 2; i < args.size(); ++i)
@@ -3641,6 +3662,7 @@ int CmdLayout(const std::vector<std::string>& args)
                 return true;
             };
             if (a == "--vhd") { if (!next(imagePath)) { Err("--vhd 缺少值"); return 2; } }
+            else if (a == "--device") { if (!next(imagePath)) { Err("--device 缺少值"); return 2; } }
             else if (a == "--layout") { if (!next(layoutPath)) { Err("--layout 缺少值"); return 2; } }
             else if (a == "--packages") { if (!next(packagesDir)) { Err("--packages 缺少值"); return 2; } }
             else if (a == "--packages-root") { if (!next(packagesRootOverride)) { Err("--packages-root 缺少值"); return 2; } }
@@ -3662,6 +3684,7 @@ int CmdLayout(const std::vector<std::string>& args)
             }
             else if (a == "--store-style") { if (!next(storeStyle)) { Err("--store-style 缺少值"); return 2; } }
             else if (a == "--stage-only") stageOnly = true;
+            else if (a == "--keep-open") keepOpen = true;
             else if (a == "--dry") dry = true;
             else if (WantsHelp(args)) { OutLn("apply 用法见 imagegen help"); return 0; }
             else { Err("apply 未知选项：" + a); return 2; }
@@ -3684,11 +3707,8 @@ int CmdLayout(const std::vector<std::string>& args)
             EnsureDirectory(Utf8ToWide(stagingDir), mkError);
         }
 
-        // 上一轮留下的永久挂载会让 OpenVirtualHardDisk 报 0x80070020（共享冲突）
-        {
-            std::string detachError;
-            (void)ocid::imaging::VhdDetach(Utf8ToWide(imagePath), detachError);
-        }
+        // 池载体磁盘在流水线内不得卸载：有 SPACEDB 时 DetachVirtualDisk 会挂住；
+        // 需要冷却残留挂载时请重启，或先 pool finalize 释放 space。本命令不主动卸载。
 
         LayoutModel model;
         std::string error;
@@ -3767,15 +3787,95 @@ int CmdLayout(const std::vector<std::string>& args)
             return 0;
         }
 
+        std::string devicePath = imagePath;
+        std::string vhdFile;
+        if (!(imagePath.size() > 4 && imagePath.compare(0, 4, "\\\\.\\") == 0))
+        {
+            if (!VhdAttach(Utf8ToWide(imagePath), false, devicePath, error))
+            {
+                Err("挂载虚拟磁盘失败：" + error);
+                return 1;
+            }
+            vhdFile = imagePath;
+            OutLn("已挂载：" + devicePath);
+        }
+        request.imagePath = Utf8ToWide(devicePath);
+
         std::vector<std::string> report;
         const bool applied = UpdateApply(request, report, error);
         for (const std::string& line : report) OutLn("  " + line);
+        if (!keepOpen)
+        {
+            std::vector<std::string> detachReport;
+            std::string detachError;
+            if (ocid::imaging::PoolDetachSpaces(Utf8ToWide(devicePath), widePool, poolVersion, Utf8ToWide(stagingDir),
+                                                 spaceNames, detachReport, detachError))
+            {
+                for (const std::string& line : detachReport) OutLn("  " + line);
+            }
+            else
+            {
+                Err("收尾卸载失败：" + detachError);
+            }
+            if (!vhdFile.empty())
+            {
+                std::string detachBaseError;
+                if (VhdDetach(Utf8ToWide(vhdFile), detachBaseError)) OutLn("  基座磁盘已卸载");
+                else Err("基座磁盘卸载失败：" + detachBaseError);
+            }
+        }
         if (!applied)
         {
             Err("落包失败：" + error);
             return 1;
         }
         OutLn("落包完成：UpdateOutput -> " + outDir + "\\UpdateOutput.xml");
+        return 0;
+    }
+
+    int CmdPoolDetach(const std::vector<std::string>& args)
+    {
+        std::string file;
+        std::string layoutPath;
+        std::string directory = "ocid_pool";
+        std::string poolName;
+        std::string onlySpace;
+        for (std::size_t i = 3; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            auto next = [&](std::string& out) { if (i + 1 >= args.size()) return false; out = args[++i]; return true; };
+            if (a == "--vhd" || a == "--device") { if (!next(file)) { Err("--vhd/--device 缺少值"); return 2; } }
+            else if (a == "--layout") { if (!next(layoutPath)) { Err("--layout 缺少值"); return 2; } }
+            else if (a == "--dir") { if (!next(directory)) { Err("--dir 缺少值"); return 2; } }
+            else if (a == "--pool") { if (!next(poolName)) { Err("--pool 缺少值"); return 2; } }
+            else if (a == "--space") { if (!next(onlySpace)) { Err("--space 缺少值"); return 2; } }
+            else if (a == "--help" || a == "-h" || a == "?") { OutLn("用法：pool detach --vhd <vhdx>|--device <\\\\.\\PhysicalDriveN> --layout <xml> [--dir <临时目录>] [--space <名>]"); return 0; }
+            else { Err("未知参数：" + a); return 2; }
+        }
+        if (file.empty() || layoutPath.empty()) { Err("pool detach 需要 --vhd/--device <虚拟磁盘> --layout <布局 XML>"); return 2; }
+        LayoutModel model;
+        std::string error;
+        if (!LoadLayout(layoutPath, model, error)) { Err("读布局失败：" + error); return 1; }
+        std::string poolError;
+        const LayoutPool* poolGroup = SelectLayoutPool(model, poolName, poolError);
+        if (poolGroup == nullptr && !poolError.empty()) { Err(poolError); return 1; }
+        const std::vector<LayoutStore>& stores = poolGroup != nullptr ? poolGroup->stores : model.pools;
+        std::vector<std::wstring> names;
+        for (const LayoutStore& store : stores)
+        {
+            if (store.storeType.empty()) continue;
+            if (!onlySpace.empty() && !EqualsNoCase(onlySpace, store.storeType)) continue;
+            names.push_back(Utf8ToWide(store.storeType));
+        }
+        std::vector<std::string> report;
+        if (!ocid::imaging::PoolDetachSpaces(Utf8ToWide(file), LayoutPoolName(poolGroup), LayoutPoolVersion(poolGroup, 24),
+                                             Utf8ToWide(directory), names, report, error))
+        {
+            Err("卸载 space 失败：" + error);
+            return 1;
+        }
+        for (const std::string& line : report) OutLn("  " + line);
+        OutLn("池已释放：" + file);
         return 0;
     }
 
@@ -3792,9 +3892,10 @@ int CmdLayout(const std::vector<std::string>& args)
             OutLn("  pool build --vhd <vhdx> --layout <xml> [--version 24|26] [--disk-id <guid>] [--dir <临时目录>] [--dry]");
             OutLn("                                写物理 GPT（只含 BS_EFIESP）→ 建池 → 按布局 <StoragePool>/<Stores> 逐 store 建 space");
             OutLn("  pool prepare --vhd <vhdx> --layout <xml> [--space <名>] [--format] [--dir <临时目录>] [--dry]");
+        OutLn("  pool detach --vhd <vhdx>|--device <\\\\.\\PhysicalDriveN> --layout <xml> [--dir <临时目录>] [--space <名>]");
         OutLn("  pool finalize --vhd <vhdx> --layout <xml> [--pool <名>] [--space <名>] [--dir <临时目录>] [--drive-letter-config <xml>] [--no-wof] [--dry]");
     OutLn("");
-    OutLn("  apply --vhd <vhdx> --layout <xml> --packages <包目录> --action-list <ActionList.xml> --outdir <输出目录>");
+    OutLn("  apply --vhd <vhdx>|--device <\\\\.\\PhysicalDriveN> --layout <xml> --packages <包目录> --action-list <ActionList.xml> --outdir <输出目录>");
     OutLn("        [--oem-input <xml> --fm-dir <目录>] [--arch amd64|arm64] [--update-input <xml>] [--space <名>]");
     OutLn("        [--drive-letter-config <xml>] [--dir <临时目录>] [--pool <名>] [--version <n>] [--stage-only] [--dry]");
     OutLn("        [--packages-root <目录>]  ActionList 的 SourcePath 相对根（默认同 --packages）");
@@ -3806,6 +3907,7 @@ int CmdLayout(const std::vector<std::string>& args)
         }
         if (sub == "build") return CmdPoolBuild(args);
         if (sub == "prepare") return CmdPoolPrepare(args);
+        if (sub == "detach") return CmdPoolDetach(args);
         if (sub == "finalize") return CmdPoolFinalize(args);
         if (sub == "close") return CmdPoolClose(args);
         if (sub == "probe")
@@ -3993,6 +4095,8 @@ int CmdLayout(const std::vector<std::string>& args)
 // 折成本地编码，再转回 UTF-8 时字符就丢了。宽字符直接保真。
 int wmain(int argc, wchar_t** wargv)
 {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
     ConsoleInit();
     std::vector<std::string> args;
     for (int i = 0; i < argc; ++i)

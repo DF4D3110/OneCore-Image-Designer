@@ -497,6 +497,12 @@ bool DevicePathFromHandle(HANDLE disk, std::wstring& path, std::string& error)
     return true;
 }
 
+// 设备路径（\\\\.\\PhysicalDriveN）与 VHD/VHDX 文件路径区分
+bool IsDevicePathW(const std::wstring& path)
+{
+    return path.size() > 4 && path.compare(0, 4, L"\\\\.\\") == 0;
+}
+
 } // namespace
 
 bool PoolPrepareSpaces(const std::wstring& imagePath, const std::wstring& poolName, unsigned int version,
@@ -562,23 +568,40 @@ bool PoolPrepareSpaces(const std::wstring& imagePath, const std::wstring& poolNa
     // 由服务自己打开虚拟磁盘再向它要磁盘名；直接把 \\.\PhysicalDriveN 传进去会被拒（0x8007007b = ERROR_INVALID_NAME）。
     unsigned char storeId[32] = {};
     void* baseDisk = nullptr;
-    rc = openVhd(service, imagePath.c_str(), 0, storeId, &baseDisk);
-    if (rc < 0 || baseDisk == nullptr)
-    {
-        closeService(service);
-        FreeLibrary(module);
-        error = "OpenVirtualHardDisk 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "）。" + eol8() + g_poolLog;
-        return false;
-    }
     wchar_t diskName[512] = {};
-    rc = getDiskName(baseDisk, diskName, 512);
-    if (rc < 0 || diskName[0] == 0)
+    if (IsDevicePathW(imagePath))
     {
-        CloseHandle(baseDisk);
-        closeService(service);
-        FreeLibrary(module);
-        error = "GetDiskName 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "）。" + eol8() + g_poolLog;
-        return false;
+        baseDisk = CreateFileW(imagePath.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               nullptr, OPEN_EXISTING, 0, nullptr);
+        if (baseDisk == INVALID_HANDLE_VALUE)
+        {
+            baseDisk = nullptr;
+            closeService(service);
+            FreeLibrary(module);
+            error = "OpenDevice failed (win32=" + std::to_string(GetLastError()) + ")";
+            return false;
+        }
+        wcsncpy_s(diskName, 512, imagePath.c_str(), 511);
+    }
+    else
+    {
+        rc = openVhd(service, imagePath.c_str(), 0, storeId, &baseDisk);
+        if (rc < 0 || baseDisk == nullptr)
+        {
+            closeService(service);
+            FreeLibrary(module);
+            error = "OpenVirtualHardDisk 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "）。" + eol8() + g_poolLog;
+            return false;
+        }
+        rc = getDiskName(baseDisk, diskName, 512);
+        if (rc < 0 || diskName[0] == 0)
+        {
+            CloseHandle(baseDisk);
+            closeService(service);
+            FreeLibrary(module);
+            error = "GetDiskName 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "）。" + eol8() + g_poolLog;
+            return false;
+        }
     }
     std::string baseDiskName;
     for (std::size_t k = 0; diskName[k] != 0; ++k) baseDiskName.push_back(static_cast<char>(diskName[k]));
@@ -974,12 +997,24 @@ bool PoolFinalize(const std::wstring& imagePath, const std::wstring& poolName, u
     do
     {
         unsigned char baseStore[20] = { 0 };
-        rc = openVhd(service, imagePath.c_str(), 0, baseStore, &baseDisk);
-        if (rc < 0) { error = "OpenVirtualHardDisk failed (hr=" + std::to_string(static_cast<long long>(rc)) + ")." + eol8() + g_poolLog; break; }
-
         wchar_t diskName[512] = { 0 };
-        rc = getDiskName(baseDisk, diskName, 511);
-        if (rc < 0) { error = "GetDiskName failed (hr=" + std::to_string(static_cast<long long>(rc)) + ")." + eol8() + g_poolLog; break; }
+        if (IsDevicePathW(imagePath))
+        {
+            HANDLE rawDisk = CreateFileW(imagePath.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                         FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (rawDisk == INVALID_HANDLE_VALUE) { error = "OpenDevice failed (win32=" + std::to_string(GetLastError()) + ")."; break; }
+            rc = getStoreId(service, rawDisk, baseStore);
+            CloseHandle(rawDisk);
+            if (rc < 0) { error = "GetStoreId failed (hr=" + std::to_string(static_cast<long long>(rc)) + ")." + eol8() + g_poolLog; break; }
+            wcsncpy_s(diskName, 512, imagePath.c_str(), 511);
+        }
+        else
+        {
+            rc = openVhd(service, imagePath.c_str(), 0, baseStore, &baseDisk);
+            if (rc < 0) { error = "OpenVirtualHardDisk failed (hr=" + std::to_string(static_cast<long long>(rc)) + ")." + eol8() + g_poolLog; break; }
+            rc = getDiskName(baseDisk, diskName, 511);
+            if (rc < 0) { error = "GetDiskName failed (hr=" + std::to_string(static_cast<long long>(rc)) + ")." + eol8() + g_poolLog; break; }
+        }
 
         rc = openPool(service, diskName, directory.c_str(), 1, &pool);
         if (rc < 0) { error = "OpenStoragePool failed (hr=" + std::to_string(static_cast<long long>(rc)) + ")." + eol8() + g_poolLog; break; }
@@ -1056,7 +1091,7 @@ bool PoolFindAdkDll(const std::wstring& fileName, const std::string& requiredExp
             return false;
         }
         outPath = found;
-        return true;
+    return true;
     }
     std::vector<std::wstring> candidates;
     if (const char* adkRoot = std::getenv("OCID_ADK_ROOT"))
@@ -1187,18 +1222,41 @@ bool PoolAttachForUpdate(const std::wstring& imagePath, const std::wstring& pool
         return false;
     }
     unsigned char baseStore[20] = { 0 };
-    rc = openVhd(service, imagePath.c_str(), 0, baseStore, &baseDisk);
-    if (rc < 0)
-    {
-        error = "OpenVirtualHardDisk failed (hr=" + std::to_string(static_cast<long long>(rc)) + ")." + eol8() + g_poolLog;
-        return false;
-    }
     wchar_t diskName[512] = { 0 };
-    rc = getDiskName(baseDisk, diskName, 511);
-    if (rc < 0)
+    const bool fromDevice = imagePath.size() > 4 && imagePath.compare(0, 4, L"\\\\.\\") == 0;
+    if (fromDevice)
     {
-        error = "GetDiskName failed (hr=" + std::to_string(static_cast<long long>(rc)) + ")." + eol8() + g_poolLog;
-        return false;
+        HANDLE disk = CreateFileW(imagePath.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (disk == INVALID_HANDLE_VALUE)
+        {
+            error = "Open device failed (win32=" + std::to_string(GetLastError()) + ")." + eol8() + g_poolLog;
+            return false;
+        }
+        rc = getStoreId(service, disk, baseStore);
+        CloseHandle(disk);
+        if (rc < 0)
+        {
+            error = "GetStoreId failed (hr=" + std::to_string(static_cast<long long>(rc)) + ")." + eol8() + g_poolLog;
+            return false;
+        }
+        wcsncpy_s(diskName, 511, imagePath.c_str(), 510);
+        report.push_back("base store id captured (device path)");
+    }
+    else
+    {
+        rc = openVhd(service, imagePath.c_str(), 0, baseStore, &baseDisk);
+        if (rc < 0)
+        {
+            error = "OpenVirtualHardDisk failed (hr=" + std::to_string(static_cast<long long>(rc)) + ")." + eol8() + g_poolLog;
+            return false;
+        }
+        rc = getDiskName(baseDisk, diskName, 511);
+        if (rc < 0)
+        {
+            error = "GetDiskName failed (hr=" + std::to_string(static_cast<long long>(rc)) + ")." + eol8() + g_poolLog;
+            return false;
+        }
     }
     rc = openPool(service, diskName, directory.c_str(), 1, &pool);
     if (rc < 0)
@@ -1207,7 +1265,6 @@ bool PoolAttachForUpdate(const std::wstring& imagePath, const std::wstring& pool
         return false;
     }
     storeIds.push_back(std::vector<unsigned char>(baseStore, baseStore + 20));
-    report.push_back("base store id captured (physical store)");
     for (const std::wstring& spaceName : spaceNames)
     {
         void* spaceDisk = nullptr;
@@ -1243,7 +1300,114 @@ bool PoolAttachForUpdate(const std::wstring& imagePath, const std::wstring& pool
         report.push_back("spaces detached; pool/service closed before UpdateDLL");
     }
     return true;
-    return true;
 }
 
+bool PoolDetachSpaces(const std::wstring& imagePath, const std::wstring& poolName, unsigned int version,
+                      const std::wstring& directory, const std::vector<std::wstring>& spaceNames,
+                      std::vector<std::string>& report, std::string& error)
+{
+    (void)poolName;
+    (void)version;
+    report.clear();
+    error.clear();
+    g_poolLog.clear();
+    {
+        std::string dirError;
+        if (!EnsurePoolTempDirectory(directory, dirError)) { error = dirError; return false; }
+    }
+    std::string dllPath;
+    std::vector<std::string> found;
+    std::vector<std::string> missing;
+    if (!PoolProbe(dllPath, found, missing, error)) return false;
+    const std::wstring wideDll(dllPath.begin(), dllPath.end());
+    HMODULE module = LoadLibraryW(wideDll.c_str());
+    if (module == nullptr)
+    {
+        error = "LoadLibraryW failed (win32=" + std::to_string(GetLastError()) + ").";
+        return false;
+    }
+    CreateServiceFn createService = reinterpret_cast<CreateServiceFn>(GetProcAddress(module, "CreateStorageService"));
+    CloseServiceFn closeService = reinterpret_cast<CloseServiceFn>(GetProcAddress(module, "CloseImageStorageService"));
+    OpenVhdFn openVhd = reinterpret_cast<OpenVhdFn>(GetProcAddress(module, "OpenVirtualHardDisk"));
+    GetDiskNameFn getDiskName = reinterpret_cast<GetDiskNameFn>(GetProcAddress(module, "GetDiskName"));
+    OpenPoolFn openPool = reinterpret_cast<OpenPoolFn>(GetProcAddress(module, "OpenStoragePool"));
+    ClosePoolFn closePool = reinterpret_cast<ClosePoolFn>(GetProcAddress(module, "CloseStoragePool"));
+    DetachSpaceFn detachSpace = reinterpret_cast<DetachSpaceFn>(GetProcAddress(module, "DetachStorageSpace"));
+    if (createService == nullptr || closeService == nullptr || openVhd == nullptr || getDiskName == nullptr ||
+        openPool == nullptr || closePool == nullptr || detachSpace == nullptr)
+    {
+        FreeLibrary(module);
+        error = "ImageStorageService exports missing (PoolDetachSpaces).";
+        return false;
+    }
+    void* service = nullptr;
+    long rc = createService(&service, PoolLogCallback, 0, nullptr, 1);
+    if (rc < 0 || service == nullptr)
+    {
+        FreeLibrary(module);
+        error = "CreateStorageService failed (hr=" + std::to_string(static_cast<long long>(rc)) + ").";
+        return false;
+    }
+    wchar_t diskName[512] = { 0 };
+    void* baseDisk = nullptr;
+    if (IsDevicePathW(imagePath))
+    {
+        wcsncpy_s(diskName, 512, imagePath.c_str(), 511);
+    }
+    else
+    {
+        unsigned char storeId[20] = { 0 };
+        rc = openVhd(service, imagePath.c_str(), 0, storeId, &baseDisk);
+        if (rc < 0)
+        {
+            closeService(service);
+            FreeLibrary(module);
+            error = "OpenVirtualHardDisk failed (hr=" + std::to_string(static_cast<long long>(rc)) + ").";
+            return false;
+        }
+        rc = getDiskName(baseDisk, diskName, 511);
+        if (rc < 0)
+        {
+            CloseHandle(baseDisk);
+            closeService(service);
+            FreeLibrary(module);
+            error = "GetDiskName failed (hr=" + std::to_string(static_cast<long long>(rc)) + ").";
+            return false;
+        }
+    }
+    void* pool = nullptr;
+    rc = openPool(service, diskName, directory.c_str(), 1, &pool);
+    if (rc < 0)
+    {
+        if (baseDisk != nullptr) CloseHandle(baseDisk);
+        closeService(service);
+        FreeLibrary(module);
+        error = "OpenStoragePool failed (hr=" + std::to_string(static_cast<long long>(rc)) + ")." + eol8() + g_poolLog;
+        return false;
+    }
+    std::vector<std::wstring> names = spaceNames;
+    names.push_back(L"SERVICING_METADATADISK");
+    names.push_back(L"SERVICING_FILESDISK");
+    int detached = 0;
+    for (const std::wstring& name : names)
+    {
+        const long detachRc = detachSpace(service, pool, name.c_str(), 0);
+        if (detachRc >= 0)
+        {
+            ++detached;
+            report.push_back("space detached: " + std::string(name.begin(), name.end()));
+        }
+    }
+    (void)closePool(service, pool, 0);
+    closeService(service);
+    if (baseDisk != nullptr) CloseHandle(baseDisk);
+    report.push_back("spaces detached: " + std::to_string(detached));
+    if (!IsDevicePathW(imagePath))
+    {
+        std::string detachError;
+        if (VhdDetach(imagePath, detachError)) report.push_back("base vhdx detached");
+        else report.push_back("base vhdx detach failed: " + detachError);
+    }
+    return true;
+}
 } // namespace ocid::imaging
