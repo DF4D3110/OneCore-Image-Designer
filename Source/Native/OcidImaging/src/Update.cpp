@@ -418,6 +418,29 @@ bool UpdateApply(const UpdateRequest& request, std::vector<std::string>& report,
         return false;
     }
 
+    // ImageApp copies the original OEMInput.xml into <MainOS>\Windows\ImageUpdate before staging
+    // (Imaging.CreateImage) and the commit phase reads it back from the image.
+    if (!request.oemInputFile.empty())
+    {
+        std::wstring imageUpdateDir = mainOsPath;
+        if (!imageUpdateDir.empty() && imageUpdateDir.back() != L'\\') imageUpdateDir.push_back(L'\\');
+        imageUpdateDir += L"Windows\\ImageUpdate";
+        if (!EnsureDirTreeLocal(imageUpdateDir, error))
+        {
+            FreeLibrary(module);
+            return false;
+        }
+        const std::wstring imageOemInput = imageUpdateDir + L"\\OEMInput.xml";
+        OutLn("[apply] copying OEMInput.xml into the image ...");
+        if (!CopyFileW(request.oemInputFile.c_str(), imageOemInput.c_str(), FALSE))
+        {
+            error = "把 OEMInput.xml 写入镜像失败（win32=" + std::to_string(GetLastError()) + "）";
+            FreeLibrary(module);
+            return false;
+        }
+        report.push_back("OEMInput.xml 已写入镜像 Windows\\ImageUpdate");
+    }
+
     OutLn("[apply] creating empty UpdateOS.wim ...");
     // MainOS 上现场造空 UpdateOS.wim：ImageApp 在 Initialize 之前就这么做。
     if (!CreateWimViaChildProcess(mainOsPath, request.stagingDirectory, error))

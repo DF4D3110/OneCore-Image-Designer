@@ -156,6 +156,18 @@ OCID_POOL_API bool PoolDetachSpaces(const std::wstring& imagePath,
                                     std::vector<std::string>& report,
                                     std::string& error);
 
+struct PhysicalFormatSpec
+{
+    std::wstring name;
+    std::wstring fileSystem;
+    unsigned int clusterSize = 0;
+};
+
+OCID_POOL_API bool PoolFormatPartitions(const std::wstring& imagePath,
+                                        const std::vector<PhysicalFormatSpec>& partitions,
+                                        std::vector<std::string>& report,
+                                        std::string& error);
+
 OCID_POOL_API bool PoolPrepareSpaces(const std::wstring& devicePath,
                                      const std::wstring& poolName,
                                      unsigned int version,

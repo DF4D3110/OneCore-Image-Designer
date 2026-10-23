@@ -43,6 +43,7 @@ struct UpdateRequest
     std::wstring actionListFile;
     std::wstring packagesRoot;
     std::wstring updateInputFile;
+    std::wstring oemInputFile;            // original OEMInput.xml copied into <MainOS>\Windows\ImageUpdate
     std::wstring updateOutputFile;
     std::wstring updateHistoryFile;
     std::string storeStyle;            // onecore / state-separated / desktop (env var for UpdateDLL)

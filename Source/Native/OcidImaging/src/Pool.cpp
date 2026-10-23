@@ -1496,4 +1496,90 @@ bool PoolDetachSpaces(const std::wstring& imagePath, const std::wstring& poolNam
     }
     return true;
 }
+
+bool PoolFormatPartitions(const std::wstring& imagePath,
+                          const std::vector<PhysicalFormatSpec>& partitions,
+                          std::vector<std::string>& report,
+                          std::string& error)
+{
+    report.clear();
+    error.clear();
+    if (imagePath.empty()) { error = "未指定虚拟磁盘"; return false; }
+    if (partitions.empty()) { error = "没有要格式化的物理分区"; return false; }
+    std::string dllPath;
+    std::vector<std::string> found;
+    std::vector<std::string> missing;
+    if (!PoolProbe(dllPath, found, missing, error)) return false;
+    if (!missing.empty()) { error = "ImageStorageService 缺少导出：" + missing[0]; return false; }
+    const std::wstring wideDll(dllPath.begin(), dllPath.end());
+    HMODULE module = LoadLibraryW(wideDll.c_str());
+    if (module == nullptr) { error = "LoadLibraryW 失败（win32=" + std::to_string(GetLastError()) + "）"; return false; }
+    CreateServiceFn createService = reinterpret_cast<CreateServiceFn>(GetProcAddress(module, "CreateStorageService"));
+    CloseServiceFn closeService = reinterpret_cast<CloseServiceFn>(GetProcAddress(module, "CloseImageStorageService"));
+    OpenVhdFn openVhd = reinterpret_cast<OpenVhdFn>(GetProcAddress(module, "OpenVirtualHardDisk"));
+    FormatPartitionFn formatPartition = reinterpret_cast<FormatPartitionFn>(GetProcAddress(module, "FormatPartition"));
+    if (createService == nullptr || closeService == nullptr || openVhd == nullptr || formatPartition == nullptr)
+    {
+        FreeLibrary(module);
+        error = "GetProcAddress 失败（FormatPartition）。";
+        return false;
+    }
+    g_poolLog.clear();
+    void* service = nullptr;
+    long rc = createService(&service, PoolLogCallback, 0, nullptr, 1);
+    if (rc < 0 || service == nullptr)
+    {
+        FreeLibrary(module);
+        error = "CreateStorageService 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "）。" + eol8() + g_poolLog;
+        return false;
+    }
+    unsigned char storeId[32] = {};
+    void* baseDisk = nullptr;
+    if (IsDevicePathW(imagePath))
+    {
+        baseDisk = CreateFileW(imagePath.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               nullptr, OPEN_EXISTING, 0, nullptr);
+        if (baseDisk == INVALID_HANDLE_VALUE)
+        {
+            baseDisk = nullptr;
+            closeService(service);
+            FreeLibrary(module);
+            error = "OpenDevice failed (win32=" + std::to_string(GetLastError()) + ")";
+            return false;
+        }
+    }
+    else
+    {
+        rc = openVhd(service, imagePath.c_str(), 0, storeId, &baseDisk);
+        if (rc < 0 || baseDisk == nullptr)
+        {
+            closeService(service);
+            FreeLibrary(module);
+            error = "OpenVirtualHardDisk 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "）。" + eol8() + g_poolLog;
+            return false;
+        }
+    }
+    bool ok = true;
+    for (const PhysicalFormatSpec& spec : partitions)
+    {
+        g_poolLog.clear();
+        rc = formatPartition(service, baseDisk, spec.name.c_str(), spec.fileSystem.c_str(), spec.clusterSize);
+        const std::string name = WideToUtf8Local(spec.name.c_str());
+        const std::string fs = WideToUtf8Local(spec.fileSystem.c_str());
+        if (rc < 0)
+        {
+            ok = false;
+            report.push_back("物理分区格式化失败：" + name + "（hr=" + std::to_string(static_cast<long long>(rc)) + "）");
+            if (!g_poolLog.empty()) report.push_back(g_poolLog);
+        }
+        else
+        {
+            report.push_back("物理分区已格式化：" + name + " " + fs);
+        }
+    }
+    closeService(service);
+    if (baseDisk != nullptr) CloseHandle(baseDisk);
+    FreeLibrary(module);
+    return ok;
+}
 } // namespace ocid::imaging

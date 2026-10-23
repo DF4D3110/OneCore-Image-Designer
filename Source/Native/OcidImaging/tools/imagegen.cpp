@@ -3945,6 +3945,34 @@ int CmdLayout(const std::vector<std::string>& args)
         std::string detachError;
         PoolDetachSpaces(wideDevice, widePool, poolVersion, Utf8ToWide(directory), spaceNames, detachReport, detachError);
         for (const std::string& line : detachReport) OutLn("  " + line);
+        if (prepared)
+        {
+            // 物理盘上的分区（BS_EFIESP 等）也要按布局的 FileSystem 格式化，否则 UpdateDLL 提交阶段
+            // 复制 bootmgr 到物理 ESP 会报 0x800703ED（此卷不包含可识别的文件系统）。
+            std::vector<PhysicalFormatSpec> physicalFormats;
+            for (const LayoutStore& store : model.stores)
+            {
+                for (const LayoutPartition& p : store.partitions)
+                {
+                    if (IsPoolPartition(p)) continue;
+                    if (p.fileSystem.empty()) continue;
+                    PhysicalFormatSpec fmtSpec;
+                    fmtSpec.name = Utf8ToWide(p.name);
+                    fmtSpec.fileSystem = Utf8ToWide(p.fileSystem);
+                    unsigned long long cluster = 0;
+                    if (!p.clusterSize.empty() && ParseHexOrDec(p.clusterSize, cluster)) fmtSpec.clusterSize = static_cast<unsigned int>(cluster);
+                    physicalFormats.push_back(fmtSpec);
+                }
+            }
+            if (!physicalFormats.empty())
+            {
+                std::vector<std::string> formatReport;
+                std::string formatError;
+                const bool formatOk = PoolFormatPartitions(wideDevice, physicalFormats, formatReport, formatError);
+                for (const std::string& line : formatReport) OutLn("  " + line);
+                if (!formatOk) { Err("物理分区格式化失败：" + formatError); return 1; }
+            }
+        }
         if (!prepared) { Err("池内分区/格式化失败：" + error); return 1; }
         OutLn("池内准备完成：" + file);
         if (!isDevice) OutLn("  space 已 detach；基座磁盘由进程退出自动卸载");
@@ -4471,6 +4499,7 @@ int CmdLayout(const std::vector<std::string>& args)
         request.actionListFile = Utf8ToWide(actionList);
         request.packagesRoot = Utf8ToWide(packagesRootOverride.empty() ? packagesDir : packagesRootOverride);
         request.updateInputFile = Utf8ToWide(updateInputPath);
+    request.oemInputFile = Utf8ToWide(oemInputPath);
         request.updateOutputFile = Utf8ToWide(outDir + "\\UpdateOutput.xml");
         request.updateHistoryFile = Utf8ToWide(outDir + "\\UpdateHistory.xml");
         request.logFile = Utf8ToWide(outDir + "\\imagegen-update.log");
