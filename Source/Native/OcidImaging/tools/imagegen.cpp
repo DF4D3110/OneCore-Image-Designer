@@ -51,6 +51,8 @@ void PrintUsage()
     OutLn("  ocid_imagegen layout show <DeviceLayout.xml|OEMDevicePlatform.xml>");
     OutLn("  ocid_imagegen layout validate <文件> [--schema-dir <目录>]");
     OutLn("  ocid_imagegen layout check <文件> [--disk-sectors <N>] [--min-sector-count <N>]");
+    OutLn("  ocid_imagegen disk plan|build|verify --layout <DeviceLayout.xml> --outdir <目录>");
+    OutLn("  ocid_imagegen image build --layout <DeviceLayout.xml> --outdir <目录> [落包选项]");
     OutLn("  ocid_imagegen version");
     OutLn("");
     OutLn("plan 选项：");
@@ -2953,6 +2955,84 @@ int CmdLayout(const std::vector<std::string>& args)
         return attachedCount == 0 || cleaned == attachedCount ? 0 : 1;
     }
 
+    // disk verify：把"一块完整磁盘"摊开给人看——物理 GPT、池、池内每个 space 的分区与文件系统。
+    static int CmdDiskVerify(const std::vector<std::string>& args)
+    {
+        std::string file, device, layoutPath;
+        for (std::size_t i = 3; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            auto next = [&](std::string& out) -> bool { if (i + 1 >= args.size()) return false; out = args[++i]; return true; };
+            if (a == "--vhd") { if (!next(file)) { Err("--vhd 缺少值"); return 2; } }
+            else if (a == "--device") { if (!next(device)) { Err("--device 缺少值"); return 2; } }
+            else if (a == "--layout") { if (!next(layoutPath)) { Err("--layout 缺少值"); return 2; } }
+            else if (!a.empty() && a[0] == '-') { Err("未知参数：" + a); return 2; }
+            else if (file.empty()) file = a;
+            else { Err("多余的位置参数：" + a); return 2; }
+        }
+        if (file.empty() && device.empty()) { Err("disk verify 需要 --vhd <文件> 或 --device <\\\\.\\PhysicalDriveN>"); return 2; }
+        std::string error;
+        bool attached = false;
+        if (!file.empty())
+        {
+            VhdInfo info;
+            if (!VhdQuery(Utf8ToWide(file), info, error)) { Err("不是可识别的虚拟磁盘：" + error); return 1; }
+            if (!VhdAttach(Utf8ToWide(file), false, device, error)) { Err("挂载失败：" + error); return 1; }
+            attached = true;
+            OutLn("镜像：" + file);
+            OutLn("  设备：" + device + "  虚拟容量：" + FormatBytes(info.virtualBytes));
+        }
+        else
+        {
+            OutLn("设备：" + device);
+        }
+        std::string diskId;
+        std::vector<VhdPartition> parts;
+        std::uint32_t sector = 0;
+        if (!VhdReadGpt(device, diskId, parts, sector, error))
+        {
+            Err("读 GPT 失败：" + error);
+            if (attached) { std::string ignore; VhdDetach(Utf8ToWide(file), ignore); }
+            return 1;
+        }
+        OutLn("  物理分区表：GPT  扇区=" + NumText(sector) + "  磁盘 GUID=" + diskId);
+        bool hasEsp = false, hasPool = false;
+        for (const VhdPartition& part : parts)
+        {
+            OutLn("    " + part.name + "  type=" + part.type + "  offset=" + FormatBytes(part.offsetBytes) +
+                  "  size=" + FormatBytes(part.sizeBytes));
+            if (EqualsNoCase(part.name, "BS_EFIESP")) hasEsp = true;
+            if (EqualsNoCase(part.name, "OSPool") || part.type.find("75caf8f") != std::string::npos) hasPool = true;
+        }
+        OutLn("  检查：BS_EFIESP=" + std::string(hasEsp ? "有" : "缺") + "  OSPool=" + std::string(hasPool ? "有" : "缺"));
+        int exitCode = (hasEsp && hasPool) ? 0 : 1;
+        if (!layoutPath.empty() && hasPool)
+        {
+            LayoutModel model;
+            if (!LoadLayout(layoutPath, model, error)) { Err("读布局失败：" + error); return 1; }
+            std::string poolError;
+            const LayoutPool* poolGroup = SelectLayoutPool(model, std::string(), poolError);
+            if (poolGroup == nullptr && !poolError.empty()) { Err(poolError); return 1; }
+            const std::vector<LayoutStore>& spaceStores = poolGroup != nullptr ? poolGroup->stores : model.pools;
+            std::vector<std::wstring> spaceNames;
+            for (const LayoutStore& store : spaceStores)
+            {
+                if (store.storeType.empty()) continue;
+                spaceNames.push_back(Utf8ToWide(store.storeType));
+            }
+            OutLn("  池内 space：" + NumText(spaceNames.size()) + " 个（池=" +
+                  WideToUtf8(LayoutPoolName(poolGroup)) + "）");
+            std::vector<std::string> report;
+            std::string dir = "ocid_verify";
+            const bool ok = PoolVerifySpaces(Utf8ToWide(device), LayoutPoolName(poolGroup),
+                                             LayoutPoolVersion(poolGroup, 24), Utf8ToWide(dir), spaceNames, report, error);
+            for (const std::string& line : report) OutLn("  " + line);
+            if (!ok) { OutLn("  校验未完全通过：" + error); exitCode = 1; }
+        }
+        if (attached) { std::string ignore; VhdDetach(Utf8ToWide(file), ignore); }
+        return exitCode;
+    }
+
     int CmdDisk(const std::vector<std::string>& args)
     {
         if (args.size() < 3 || WantsHelp(args))
@@ -2974,6 +3054,7 @@ int CmdLayout(const std::vector<std::string>& args)
             return args.size() < 3 ? 2 : 0;
         }
         const std::string sub = args[2];
+        if (EqualsNoCase(sub, "verify")) return CmdDiskVerify(args);
         std::string layoutPath, outDir, onlyStore, firmwareDir, packagesDir, poolName;
         unsigned int version = 24;
         std::uint64_t sizeOption = 0;
@@ -4249,6 +4330,97 @@ int CmdLayout(const std::vector<std::string>& args)
         return 0;
     }
 
+    // image build：一条命令走完"先组装硬盘，再组装系统"——
+    //   1) disk build（每块物理盘一个 VHDX，写 GPT/MBR）
+    //   2) pool prepare --format（建池、池内 GPT、space/物理分区格式化）
+    //   3) apply（可选：UpdateDLL 暂存 + 提交）
+    //   4) disk verify（把完整磁盘摊开打印）
+    static int CmdImageBuild(const std::vector<std::string>& args)
+    {
+        std::string layoutPath, outDir, packagesDir, packagesRoot, actionList, oemInput, fmDir, arch = "arm64";
+        std::string poolName, onlyStore, dirOverride;
+        std::uint64_t sizeOption = 0;
+        unsigned long applyTimeout = 3600;
+        bool noApply = false;
+        for (std::size_t i = 3; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            auto next = [&](std::string& out) -> bool { if (i + 1 >= args.size()) return false; out = args[++i]; return true; };
+            if (a == "--layout") { if (!next(layoutPath)) { Err("--layout 缺少值"); return 2; } }
+            else if (a == "--outdir") { if (!next(outDir)) { Err("--outdir 缺少值"); return 2; } }
+            else if (a == "--packages") { if (!next(packagesDir)) { Err("--packages 缺少值"); return 2; } }
+            else if (a == "--packages-root") { if (!next(packagesRoot)) { Err("--packages-root 缺少值"); return 2; } }
+            else if (a == "--action-list") { if (!next(actionList)) { Err("--action-list 缺少值"); return 2; } }
+            else if (a == "--oem-input") { if (!next(oemInput)) { Err("--oem-input 缺少值"); return 2; } }
+            else if (a == "--fm-dir") { if (!next(fmDir)) { Err("--fm-dir 缺少值"); return 2; } }
+            else if (a == "--arch") { if (!next(arch)) { Err("--arch 缺少值"); return 2; } }
+            else if (a == "--pool") { if (!next(poolName)) { Err("--pool 缺少值"); return 2; } }
+            else if (a == "--store") { if (!next(onlyStore)) { Err("--store 缺少值"); return 2; } }
+            else if (a == "--dir") { if (!next(dirOverride)) { Err("--dir 缺少值"); return 2; } }
+            else if (a == "--size") { std::string v; if (!next(v)) { Err("--size 缺少值"); return 2; } sizeOption = ParseNum(v); }
+            else if (a == "--timeout") { std::string v; if (!next(v)) { Err("--timeout 缺少值"); return 2; } applyTimeout = static_cast<unsigned long>(std::strtoul(v.c_str(), nullptr, 0)); }
+            else if (a == "--no-apply") noApply = true;
+            else if (!a.empty() && a[0] == '-') { Err("未知参数：" + a); return 2; }
+            else { Err("多余的位置参数：" + a); return 2; }
+        }
+        if (layoutPath.empty() || outDir.empty()) { Err("image build 需要 --layout <DeviceLayout.xml> --outdir <目录>"); return 2; }
+        std::string error;
+        if (!EnsureDirectory(Utf8ToWide(outDir), error)) { Err("创建输出目录失败：" + error); return 1; }
+        const std::string stagingDir = dirOverride.empty() ? (outDir + "\\tmp") : dirOverride;
+        LayoutModel model;
+        if (!LoadLayout(layoutPath, model, error)) { Err("读布局失败：" + error); return 1; }
+        std::vector<PhysicalDiskPlan> plans;
+        if (!PlanPhysicalDisks(model, outDir, plans, sizeOption, error)) { Err(error); return 1; }
+        std::string poolError;
+        const LayoutPool* poolGroup = SelectLayoutPool(model, poolName, poolError);
+        if (poolGroup == nullptr && !poolError.empty()) { Err(poolError); return 1; }
+        unsigned long code = 0;
+
+        OutLn("=== 1/4 组装物理磁盘 ===");
+        std::vector<std::string> child = { "disk", "build", "--layout", layoutPath, "--outdir", outDir };
+        if (!onlyStore.empty()) { child.push_back("--store"); child.push_back(onlyStore); }
+        if (sizeOption != 0) { child.push_back("--size"); child.push_back(std::to_string(sizeOption)); }
+        if (!poolName.empty()) { child.push_back("--pool"); child.push_back(poolName); }
+        if (!RunSelfWithTimeout(child, 1800ul * 1000ul, code, error)) { Err("disk build 失败：" + error); return 1; }
+        if (code != 0) { Err("disk build 退出码 " + std::to_string(code)); return 1; }
+
+        const PhysicalDiskPlan* poolPlan = nullptr;
+        for (const PhysicalDiskPlan& plan : plans) { if (plan.holdsPool) { poolPlan = &plan; break; } }
+        if (poolPlan == nullptr) { Err("布局里没有池载体磁盘"); return 1; }
+        const std::string imageFile = poolPlan->fileName;
+
+        OutLn("=== 2/4 建池 + 池内 GPT + 格式化 ===");
+        child = { "pool", "prepare", "--vhd", imageFile, "--layout", layoutPath, "--format", "--dir", stagingDir };
+        if (!poolName.empty()) { child.push_back("--pool"); child.push_back(poolName); }
+        if (!RunSelfWithTimeout(child, 1800ul * 1000ul, code, error)) { Err("pool prepare 失败：" + error); return 1; }
+        if (code != 0) { Err("pool prepare 退出码 " + std::to_string(code)); return 1; }
+
+        if (!noApply && !packagesDir.empty())
+        {
+            OutLn("=== 3/4 落包（更新暂存 + 提交）===");
+            child = { "apply", "--vhd", imageFile, "--layout", layoutPath, "--packages", packagesDir,
+                      "--arch", arch, "--outdir", outDir + "\\out", "--dir", stagingDir,
+                      "--timeout", std::to_string(applyTimeout) };
+            if (!packagesRoot.empty()) { child.push_back("--packages-root"); child.push_back(packagesRoot); }
+            if (!actionList.empty()) { child.push_back("--action-list"); child.push_back(actionList); }
+            if (!oemInput.empty()) { child.push_back("--oem-input"); child.push_back(oemInput); }
+            if (!fmDir.empty()) { child.push_back("--fm-dir"); child.push_back(fmDir); }
+            if (!poolName.empty()) { child.push_back("--pool"); child.push_back(poolName); }
+            if (!RunSelfWithTimeout(child, (applyTimeout + 600ul) * 1000ul, code, error)) { Err("apply 失败：" + error); return 1; }
+            if (code != 0) { Err("apply 退出码 " + std::to_string(code)); return 1; }
+        }
+        else
+        {
+            OutLn("=== 3/4 跳过落包（未给 --packages 或指定了 --no-apply）===");
+        }
+
+        OutLn("=== 4/4 校验完整磁盘 ===");
+        child = { "disk", "verify", "--vhd", imageFile, "--layout", layoutPath };
+        if (!RunSelfWithTimeout(child, 600ul * 1000ul, code, error)) { Err("disk verify 失败：" + error); return 1; }
+        OutLn("镜像组装完成：" + imageFile);
+        return static_cast<int>(code);
+    }
+
     int CmdApply(const std::vector<std::string>& args)
     {
         std::string imagePath;
@@ -4941,7 +5113,8 @@ static int RunMain(int argc, wchar_t** wargv)
     if (command == "disk") return CmdDisk(args);
     if (command == "pool") return CmdPool(args);
     if (command == "wim") return CmdWim(args);
-    if (command == "apply") return CmdApply(args);    if (command == "actionlist") return CmdActionList(args);
+    if (command == "apply") return CmdApply(args);
+    if (command == "image") return CmdImageBuild(args);    if (command == "apply") return CmdApply(args);    if (command == "actionlist") return CmdActionList(args);
     if (command == "doctor") return CmdDoctor(args);
     if (command == "layout")
     {

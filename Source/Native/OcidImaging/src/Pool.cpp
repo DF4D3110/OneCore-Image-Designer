@@ -1470,6 +1470,10 @@ bool PoolDetachSpaces(const std::wstring& imagePath, const std::wstring& poolNam
             ++detached;
             report.push_back("space detached: " + std::string(name.begin(), name.end()));
         }
+        else if (static_cast<unsigned int>(detachRc) == 0x80070490u)
+        {
+            report.push_back("space not attached: " + std::string(name.begin(), name.end()));
+        }
         else
         {
             char buffer[128] = { 0 };
@@ -1495,6 +1499,148 @@ bool PoolDetachSpaces(const std::wstring& imagePath, const std::wstring& poolNam
         else report.push_back("base vhdx detach failed: " + detachError);
     }
     return true;
+}
+
+namespace {
+    std::string ProbeVolumeFileSystem(const std::string& device, std::uint64_t offset)
+    {
+        unsigned char head[512] = { 0 };
+        std::string readError;
+        if (!VhdReadBytes(device, offset, head, static_cast<std::size_t>(sizeof(head)), readError)) return "读失败";
+        bool allZero = true;
+        for (unsigned char ch : head) { if (ch != 0) { allZero = false; break; } }
+        if (allZero) return "未格式化";
+        if (head[3] == 'N' && head[4] == 'T' && head[5] == 'F' && head[6] == 'S') return "NTFS";
+        if ((head[0] == 0xEB || head[0] == 0xE9) && std::memcmp(head + 54, "FAT16", 5) == 0) return "FAT16";
+        if ((head[0] == 0xEB || head[0] == 0xE9) && std::memcmp(head + 54, "FAT32", 5) == 0) return "FAT32";
+        if ((head[0] == 0xEB || head[0] == 0xE9) && std::memcmp(head + 82, "FAT32", 5) == 0) return "FAT32";
+        if ((head[0] == 0xEB || head[0] == 0xE9) && std::memcmp(head + 54, "FAT", 3) == 0) return "FAT";
+        return "未知";
+    }
+}
+
+bool PoolVerifySpaces(const std::wstring& imagePath, const std::wstring& poolName, unsigned int version,
+                      const std::wstring& directory, const std::vector<std::wstring>& spaceNames,
+                      std::vector<std::string>& report, std::string& error)
+{
+    report.clear();
+    error.clear();
+    if (imagePath.empty()) { error = "未指定虚拟磁盘"; return false; }
+    std::string dllPath, dirError;
+    std::vector<std::string> found, missing;
+    if (!EnsurePoolTempDirectory(directory, dirError)) { error = dirError; return false; }
+    if (!PoolProbe(dllPath, found, missing, error)) return false;
+    if (!missing.empty()) { error = "ImageStorageService 缺少导出：" + missing[0]; return false; }
+    const std::wstring wideDll(dllPath.begin(), dllPath.end());
+    HMODULE module = LoadLibraryW(wideDll.c_str());
+    if (module == nullptr) { error = "LoadLibraryW 失败（win32=" + std::to_string(GetLastError()) + "）"; return false; }
+    CreateServiceFn createService = reinterpret_cast<CreateServiceFn>(GetProcAddress(module, "CreateStorageService"));
+    CloseServiceFn closeService = reinterpret_cast<CloseServiceFn>(GetProcAddress(module, "CloseImageStorageService"));
+    OpenVhdFn openVhd = reinterpret_cast<OpenVhdFn>(GetProcAddress(module, "OpenVirtualHardDisk"));
+    GetDiskNameFn getDiskName = reinterpret_cast<GetDiskNameFn>(GetProcAddress(module, "GetDiskName"));
+    OpenPoolFn openPool = reinterpret_cast<OpenPoolFn>(GetProcAddress(module, "OpenStoragePool"));
+    ClosePoolFn closePool = reinterpret_cast<ClosePoolFn>(GetProcAddress(module, "CloseStoragePool"));
+    AttachSpaceFn attachSpace = reinterpret_cast<AttachSpaceFn>(GetProcAddress(module, "AttachStorageSpace"));
+    DetachSpaceFn detachSpace = reinterpret_cast<DetachSpaceFn>(GetProcAddress(module, "DetachStorageSpace"));
+    if (createService == nullptr || closeService == nullptr || openVhd == nullptr || getDiskName == nullptr ||
+        openPool == nullptr || closePool == nullptr || attachSpace == nullptr || detachSpace == nullptr)
+    {
+        FreeLibrary(module);
+        error = "ImageStorageService 缺少 space 相关导出";
+        return false;
+    }
+    g_poolLog.clear();
+    void* service = nullptr;
+    long rc = createService(&service, PoolLogCallback, 0, nullptr, 1);
+    if (rc < 0 || service == nullptr)
+    {
+        FreeLibrary(module);
+        error = "CreateStorageService 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "）。" + eol8() + g_poolLog;
+        return false;
+    }
+    unsigned char storeId[32] = {};
+    void* baseDisk = nullptr;
+    std::wstring diskName;
+    if (IsDevicePathW(imagePath))
+    {
+        baseDisk = CreateFileW(imagePath.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               nullptr, OPEN_EXISTING, 0, nullptr);
+        if (baseDisk == INVALID_HANDLE_VALUE)
+        {
+            baseDisk = nullptr;
+            closeService(service);
+            FreeLibrary(module);
+            error = "OpenDevice failed (win32=" + std::to_string(GetLastError()) + ")";
+            return false;
+        }
+        diskName = imagePath;
+    }
+    else
+    {
+        rc = openVhd(service, imagePath.c_str(), 0, storeId, &baseDisk);
+        if (rc < 0 || baseDisk == nullptr)
+        {
+            closeService(service);
+            FreeLibrary(module);
+            error = "OpenVirtualHardDisk 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "）。" + eol8() + g_poolLog;
+            return false;
+        }
+        wchar_t nameBuffer[512] = { 0 };
+        if (getDiskName(baseDisk, nameBuffer, 512) >= 0) diskName.assign(nameBuffer);
+    }
+    void* pool = nullptr;
+    rc = openPool(service, diskName.c_str(), directory.c_str(), 1, &pool);
+    if (rc < 0 || pool == nullptr)
+    {
+        closeService(service);
+        if (baseDisk != nullptr) CloseHandle(baseDisk);
+        FreeLibrary(module);
+        error = "OpenStoragePool 失败（hr=" + std::to_string(static_cast<long long>(rc)) + "）。" + eol8() + g_poolLog;
+        return false;
+    }
+    (void)poolName;
+    (void)version;
+    bool ok = true;
+    for (const std::wstring& name : spaceNames)
+    {
+        void* spaceDisk = nullptr;
+        const long attachRc = attachSpace(service, pool, name.c_str(), 0, &spaceDisk);
+        const std::string spaceName = WideToUtf8Local(name.c_str());
+        if (attachRc < 0 || spaceDisk == nullptr)
+        {
+            ok = false;
+            report.push_back("space " + spaceName + "：挂载失败（hr=" + std::to_string(static_cast<long long>(attachRc)) + "）");
+            continue;
+        }
+        wchar_t spaceBuffer[512] = { 0 };
+        const long nameRc = getDiskName(spaceDisk, spaceBuffer, 512);
+        const std::string spaceDevice = nameRc >= 0 ? WideToUtf8Local(spaceBuffer) : std::string();
+        std::vector<VhdPartition> parts;
+        std::string gptError;
+        std::string gptDiskId;
+        std::uint32_t gptSector = 0;
+        if (!VhdReadGpt(spaceDevice, gptDiskId, parts, gptSector, gptError))
+        {
+            ok = false;
+            report.push_back("space " + spaceName + "：读 GPT 失败（" + gptError + "）");
+        }
+        else
+        {
+            report.push_back("space " + spaceName + "  device=" + spaceDevice + "  分区数=" + std::to_string(parts.size()));
+            for (const VhdPartition& part : parts)
+            {
+                report.push_back("    " + part.name + "  type=" + part.type + "  offset=" + std::to_string(part.offsetBytes) +
+                                 "  size=" + std::to_string(part.sizeBytes) + "  fs=" +
+                                 ProbeVolumeFileSystem(spaceDevice, part.offsetBytes));
+            }
+        }
+        (void)detachSpace(service, pool, name.c_str(), 0);
+    }
+    (void)closePool(service, pool, 0);
+    closeService(service);
+    if (baseDisk != nullptr) CloseHandle(baseDisk);
+    FreeLibrary(module);
+    return ok;
 }
 
 bool PoolFormatPartitions(const std::wstring& imagePath,

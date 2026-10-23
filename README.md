@@ -280,6 +280,9 @@ ocid_imagegen disk plan DeviceLayout.xml            # 造盘计划：几块盘�
 ocid_imagegen disk build --layout DeviceLayout.xml --outdir disks [--store Default] [--pool OSPool] [--size 42G]                          [--firmware <目录>] [--packages <包目录>]   # 建盘 + 写 GPT/MBR + 固件 payload
 ocid_imagegen pool build --vhd disks\Default.vhdx --layout DeviceLayout.xml      # 物理盘上建池与 space
 ocid_imagegen pool prepare --vhd disks\Default.vhdx --layout DeviceLayout.xml --format   # space 内写 GPT + 格式化
+ocid_imagegen disk verify --vhd disks\Default.vhdx --layout DeviceLayout.xml             # 摊开看：物理 GPT + 池 + 每个 space 的分区
+ocid_imagegen image build --layout DeviceLayout.xml --outdir out [--packages <包目录> --action-list <xml> --oem-input <xml>]
+                                                                            # 一条命令：组装硬盘 -> 建池格式化 -> 落包 -> 校验
 ocid_imagegen vhd create|attach|detach|info <file.vhdx>
 ocid_imagegen cab extract a.cab --out dir
 ocid_imagegen schema validate OEMInput.xml --schema Schemas\adk\OEMInput.V2.OEMInputV2.xsd

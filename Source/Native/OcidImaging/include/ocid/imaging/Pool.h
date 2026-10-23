@@ -163,6 +163,16 @@ struct PhysicalFormatSpec
     unsigned int clusterSize = 0;
 };
 
+// 逐个挂载 space、读它内部的 GPT 并探测每个分区首扇区的文件系统（只读，不做修改）。
+// report 每条一行，供 `imagegen disk verify` 打印；结束时所有 space 都会 detach。
+OCID_POOL_API bool PoolVerifySpaces(const std::wstring& imagePath,
+                                    const std::wstring& poolName,
+                                    unsigned int version,
+                                    const std::wstring& directory,
+                                    const std::vector<std::wstring>& spaceNames,
+                                    std::vector<std::string>& report,
+                                    std::string& error);
+
 OCID_POOL_API bool PoolFormatPartitions(const std::wstring& imagePath,
                                         const std::vector<PhysicalFormatSpec>& partitions,
                                         std::vector<std::string>& report,
