@@ -47,6 +47,7 @@ struct UpdateRequest
     std::wstring updateHistoryFile;
     std::string storeStyle;            // onecore / state-separated / desktop (env var for UpdateDLL)
     std::wstring logFile;
+    std::wstring storeArch;
     std::wstring overlapFile;           // 可为空
     bool stageOnly = false;             // true = 只跑 PrepareUpdate（暂存）
 };

@@ -913,6 +913,7 @@ namespace imaging
             return true;
         }
 
+        DWORD lastDetachRc = ERROR_SUCCESS;
         for (int attempt = 0; attempt < 3; ++attempt)
         {
             HANDLE handle = INVALID_HANDLE_VALUE;
@@ -920,6 +921,7 @@ namespace imaging
             if (OpenVirtual(imagePath, VIRTUAL_DISK_ACCESS_DETACH, handle, detachError))
             {
                 const DWORD rc = DetachVirtualDisk(handle, DETACH_VIRTUAL_DISK_FLAG_NONE, 0);
+                lastDetachRc = rc;
                 // 对 PERMANENT_LIFETIME 挂载的盘还要按永久语义再卸一次（此 SDK 头里没有该枚举值，取值 1）。
                 DetachVirtualDisk(handle, static_cast<DETACH_VIRTUAL_DISK_FLAG>(1), 0);
                 CloseHandle(handle);
@@ -973,6 +975,12 @@ namespace imaging
         if (!attached)
         {
             report.push_back("已卸载");
+            return true;
+        }
+        // DetachVirtualDisk returns 21 (ERROR_NOT_READY) when already detached.
+        if (lastDetachRc == ERROR_NOT_READY)
+        {
+            report.push_back("detach: kernel reported not-attached (rc=21); treated as detached");
             return true;
         }
         error = "镜像仍处于挂载状态"

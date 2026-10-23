@@ -15,6 +15,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -293,6 +294,48 @@ bool CreateWimViaChildProcess(const std::wstring& mainOsPath, const std::wstring
 }
 } // namespace
 
+namespace {
+// UpdateDLL 的诊断消息只通过 IU_LogTo 注册的回调送出来（ImageApp 的 LogUtil.IULogTo 就是它），
+// 不注册的话我们只能拿到一个 HRESULT。回调签名是 void(*)(const wchar_t*)，默认 __stdcall。
+typedef void(__stdcall* IuLogSink)(const wchar_t* message);
+typedef void(__cdecl* IuLogToFn)(IuLogSink, IuLogSink, IuLogSink, IuLogSink);
+typedef void(__cdecl* IuProgressFn)(int phase);
+
+std::mutex g_iuLogMutex;
+HANDLE g_iuLogHandle = INVALID_HANDLE_VALUE;
+
+void IuLogWrite(const char* level, const wchar_t* message)
+{
+    if (message == nullptr) return;
+    // 不能用 CRT 的 fprintf：回调发生在 UpdateDLL 的线程里，%s/流状态会触发 invalid parameter handler。
+    char text[4096];
+    const int n = WideCharToMultiByte(CP_UTF8, 0, message, -1, text, sizeof(text) - 1, nullptr, nullptr);
+    if (n <= 0) return;
+    text[n - 1] = 0;
+
+    char line[4200];
+    const int len = wsprintfA(line, "[iu][%s] %s" "\r\n", level, text);
+    if (len <= 0) return;
+
+    std::lock_guard<std::mutex> guard(g_iuLogMutex);
+    DWORD written = 0;
+    HANDLE out = GetStdHandle(STD_ERROR_HANDLE);
+    if (out != nullptr && out != INVALID_HANDLE_VALUE)
+    {
+        WriteFile(out, line, static_cast<DWORD>(len), &written, nullptr);
+    }
+    if (g_iuLogHandle != INVALID_HANDLE_VALUE)
+    {
+        WriteFile(g_iuLogHandle, line, static_cast<DWORD>(len), &written, nullptr);
+    }
+}
+
+void __stdcall IuLogError(const wchar_t* message) { IuLogWrite("error", message); }
+void __stdcall IuLogWarning(const wchar_t* message) { IuLogWrite("warning", message); }
+void __stdcall IuLogInfo(const wchar_t* message) { IuLogWrite("info", message); }
+void __stdcall IuLogDebug(const wchar_t* message) { IuLogWrite("debug", message); }
+} // namespace
+
 bool UpdateApply(const UpdateRequest& request, std::vector<std::string>& report, std::string& error)
 {
     report.clear();
@@ -339,6 +382,21 @@ bool UpdateApply(const UpdateRequest& request, std::vector<std::string>& report,
         if (!updateDllPath.empty()) error += " (" + std::string(updateDllPath.begin(), updateDllPath.end()) + ")";
         return false;
     }
+
+    // UpdateDLL 的诊断消息只走 IU_LogTo 注册的回调；不注册就只有一个裸 HRESULT。
+    if (g_iuLogHandle == INVALID_HANDLE_VALUE && !request.logFile.empty())
+    {
+        g_iuLogHandle = CreateFileW(request.logFile.c_str(), FILE_APPEND_DATA,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
+                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+    }
+    IuLogToFn logTo = reinterpret_cast<IuLogToFn>(GetProcAddress(module, "IU_LogTo"));
+    if (logTo != nullptr)
+    {
+        logTo(IuLogError, IuLogWarning, IuLogInfo, IuLogDebug);
+        report.push_back("IU_LogTo 已注册");
+    }
+    IuProgressFn iuProgress = reinterpret_cast<IuProgressFn>(GetProcAddress(module, "IU_InitializeDefaultProgressReporting"));
 
     // 1) 挂盘、开池、逐 space 取 store id（随后交给 UpdateDLL）。
     std::vector<std::vector<unsigned char> > storeIds;
@@ -402,7 +460,10 @@ bool UpdateApply(const UpdateRequest& request, std::vector<std::string>& report,
             return false;
         }
         // 参照 ImageApp：混合运行时会设 MIXED_RUNTIME_PROJECTION，UpdateDLL 才会建投影镜像。
-        if (!request.storeStyle.empty())
+        SetEnvironmentVariableW(L"IN_IMAGING", L"1");
+    SetEnvironmentVariableW(L"WINDOWS_WCP_INSKUASSEMBLY", L"1");
+    if (!request.storeArch.empty()) SetEnvironmentVariableW(L"STORE_ARCH", request.storeArch.c_str());
+    if (!request.storeStyle.empty())
         {
             SetEnvironmentVariableW(L"MIXED_RUNTIME_PROJECTION", L"1");
         }
@@ -450,6 +511,7 @@ bool UpdateApply(const UpdateRequest& request, std::vector<std::string>& report,
         {
             setDriveLetterConfig(context, request.driveLetterConfigPath.c_str());
         }
+        if (iuProgress != nullptr) iuProgress(1);
         rc = prepareUpdate(context, 2);
         if (deinitialize != nullptr) deinitialize(context);
         releaseContext(context);
@@ -501,6 +563,7 @@ bool UpdateApply(const UpdateRequest& request, std::vector<std::string>& report,
         {
             setDriveLetterConfig(context, request.driveLetterConfigPath.c_str());
         }
+        if (iuProgress != nullptr) iuProgress(2);
         rc = executeUpdate(context, 0);
         if (deinitialize != nullptr) deinitialize(context);
         releaseContext(context);

@@ -4476,6 +4476,15 @@ int CmdLayout(const std::vector<std::string>& args)
         request.logFile = Utf8ToWide(outDir + "\\imagegen-update.log");
         request.stageOnly = stageOnly;
         request.storeStyle = storeStyle;
+    {
+        std::string archName = arch.empty() ? std::string("amd64") : LowerText(arch);
+        if (archName == "arm64") request.storeArch = L"ARM64";
+        else if (archName == "amd64") request.storeArch = L"AMD64";
+        else if (archName == "x86") request.storeArch = L"X86";
+        else if (archName == "arm") request.storeArch = L"ARM";
+        else request.storeArch = L"AMD64";
+    }
+
 
         OutLn("落包：" + std::to_string(spaceNames.size()) + " 个 space，池=" + WideToUtf8(widePool) +
               "，版本=" + std::to_string(poolVersion) + (stageOnly ? "（只暂存）" : "（暂存+提交）"));
