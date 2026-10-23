@@ -60,6 +60,14 @@ OCID_UPDATE_API bool UpdateCreateEmptyUpdateOsWim(const std::wstring& mainOsPath
                                               const std::wstring& tempRoot,
                                               std::string& error);
 
+// 生成 ActionList：调用 UpdateAgent.dll 的 UA_CreateActionList
+// （imageapp 的 Imaging.CreateActionList 用的同一入口；deviceType 传 1）。
+OCID_UPDATE_API bool UpdateCreateActionList(const std::wstring& compDbFolder,
+                                            const std::wstring& deviceDbPath,
+                                            unsigned int deviceType,
+                                            std::wstring& actionListPath,
+                                            std::string& error);
+
 OCID_UPDATE_API const char* UpdateVersion();
 
 }  // namespace imaging

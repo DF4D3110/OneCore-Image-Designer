@@ -517,5 +517,62 @@ bool UpdateApply(const UpdateRequest& request, std::vector<std::string>& report,
     return true;
 }
 
+namespace
+{
+typedef int(__stdcall* CreateActionListFn)(int deviceType, void* sessionData, const wchar_t* compDbFolder,
+                                           const wchar_t* deviceInfoPath, int cchDest, wchar_t* actionListPath);
+}  // namespace
+
+bool UpdateCreateActionList(const std::wstring& compDbFolder, const std::wstring& deviceDbPath,
+                            unsigned int deviceType, std::wstring& actionListPath, std::string& error)
+{
+    actionListPath.clear();
+    if (compDbFolder.empty() || deviceDbPath.empty())
+    {
+        error = "compDB 目录或 DeviceDB 路径为空";
+        return false;
+    }
+
+    std::wstring dllPath;
+    if (!PoolFindAdkDll(L"UpdateAgent.dll", "UA_CreateActionList", dllPath, error))
+    {
+        return false;
+    }
+
+    HMODULE module = LoadLibraryExW(dllPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (module == nullptr)
+    {
+        error = "LoadLibraryEx(UpdateAgent.dll) 失败（" + Narrow(dllPath) + "）";
+        return false;
+    }
+
+    CreateActionListFn createActionList =
+        reinterpret_cast<CreateActionListFn>(GetProcAddress(module, "UA_CreateActionList"));
+    if (createActionList == nullptr)
+    {
+        FreeLibrary(module);
+        error = "UpdateAgent.dll 缺少导出 UA_CreateActionList（" + Narrow(dllPath) + "）";
+        return false;
+    }
+
+    wchar_t buffer[1024] = {0};
+    const int rc = createActionList(static_cast<int>(deviceType), nullptr, compDbFolder.c_str(),
+                                    deviceDbPath.c_str(), static_cast<int>(sizeof(buffer) / sizeof(buffer[0])),
+                                    buffer);
+    FreeLibrary(module);
+    if (rc != 0)
+    {
+        error = "UA_CreateActionList 失败（rc=" + std::to_string(rc) + "）";
+        return false;
+    }
+    actionListPath = buffer;
+    if (actionListPath.empty())
+    {
+        error = "UA_CreateActionList 返回成功但未给出 ActionList 路径";
+        return false;
+    }
+    return true;
+}
+
 }  // namespace imaging
 }  // namespace ocid

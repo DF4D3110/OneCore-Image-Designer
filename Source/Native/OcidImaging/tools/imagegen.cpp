@@ -3980,6 +3980,247 @@ int CmdLayout(const std::vector<std::string>& args)
         return WriteFileText(Utf8ToWide(outPath), xml, error);
     }
 
+    static std::string LocalFileName(const std::string& path)
+    {
+        const std::size_t pos = path.find_last_of("\\/");
+        return pos == std::string::npos ? path : path.substr(pos + 1);
+    }
+
+    static std::string LocalStem(const std::string& fileName)
+    {
+        const std::size_t pos = fileName.find_last_of('.');
+        return pos == std::string::npos ? fileName : fileName.substr(0, pos);
+    }
+
+    static bool EndsWithNoCase(const std::string& text, const std::string& suffix)
+    {
+        if (text.size() < suffix.size()) { return false; }
+        return EqualsNoCase(text.substr(text.size() - suffix.size()), suffix);
+    }
+
+    static bool RunMakeCab(const std::string& source, const std::string& cab, std::string& error)
+    {
+        std::wstring cmdline = L"makecab.exe /D CompressionType=MSZIP /D CompressionMemory=21 \"";
+        cmdline += Utf8ToWide(source);
+        cmdline += L"\" \"";
+        cmdline += Utf8ToWide(cab);
+        cmdline += L"\"";
+
+        std::vector<wchar_t> mutableCmd(cmdline.begin(), cmdline.end());
+        mutableCmd.push_back(L'\0');
+
+        STARTUPINFOW si = {sizeof(si)};
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        PROCESS_INFORMATION pi = {};
+        if (!CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr,
+                            &si, &pi))
+        {
+            error = "启动 makecab 失败（win32=" + std::to_string(GetLastError()) + "）";
+            return false;
+        }
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        DWORD code = 1;
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        if (code != 0)
+        {
+            error = "makecab 失败（exit=" + std::to_string(code) + "）";
+            return false;
+        }
+        return true;
+    }
+
+    // actionlist：把 InboxCompDB 包 cab 重新打成 <名字>.DB.xml.cab 放进 CompDBFolder，
+    // 再调 UpdateAgent.dll 的 UA_CreateActionList 生成 ActionList.xml。
+    static int CmdActionList(const std::vector<std::string>& args)
+    {
+        std::string compdbPath;
+        std::string deviceDbPath;
+        std::string bspDbPath;
+        std::string outPath;
+        std::string workDir;
+        unsigned int deviceType = 1;
+
+        for (std::size_t i = 2; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            auto next = [&](std::string& out) -> bool {
+                if (i + 1 >= args.size()) return false;
+                out = args[++i];
+                return true;
+            };
+            if (a == "--compdb") { if (!next(compdbPath)) { Err("--compdb 缺少值"); return 2; } }
+            else if (a == "--devicedb") { if (!next(deviceDbPath)) { Err("--devicedb 缺少值"); return 2; } }
+            else if (a == "--bspdb") { if (!next(bspDbPath)) { Err("--bspdb 缺少值"); return 2; } }
+            else if (a == "--out") { if (!next(outPath)) { Err("--out 缺少值"); return 2; } }
+            else if (a == "--dir") { if (!next(workDir)) { Err("--dir 缺少值"); return 2; } }
+            else if (a == "--type")
+            {
+                std::string v;
+                if (!next(v)) { Err("--type 缺少值"); return 2; }
+                deviceType = static_cast<unsigned int>(std::strtoul(v.c_str(), nullptr, 0));
+            }
+            else if (WantsHelp(args)) { OutLn("actionlist 用法见 imagegen help"); return 0; }
+            else { Err("actionlist 未知选项：" + a); return 2; }
+        }
+
+        if (compdbPath.empty() || deviceDbPath.empty())
+        {
+            Err("actionlist 需要 --compdb <InboxCompDB 包 cab 或已备文件夹> --devicedb <DeviceDB.xml>");
+            return 2;
+        }
+        if (!FileExists(Utf8ToWide(compdbPath))) { Err("找不到 --compdb：" + compdbPath); return 2; }
+        if (!FileExists(Utf8ToWide(deviceDbPath))) { Err("找不到 --devicedb：" + deviceDbPath); return 2; }
+        if (!bspDbPath.empty() && !FileExists(Utf8ToWide(bspDbPath))) { Err("找不到 --bspdb：" + bspDbPath); return 2; }
+
+        if (workDir.empty())
+        {
+            if (!outPath.empty() && outPath.find_first_of("\\/") != std::string::npos)
+            {
+                workDir = outPath.substr(0, outPath.find_last_of("\\/"));
+            }
+            else
+            {
+                workDir = ".";
+            }
+            workDir += "\\_actionlist";
+        }
+
+        std::string ioError;
+        const std::wstring workWide = Utf8ToWide(workDir);
+        const std::wstring folderWide = workWide + L"\\CompDBFolder";
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path(folderWide), ec);
+        if (!EnsureDirectory(folderWide, ioError)) { Err("创建 CompDBFolder 失败：" + ioError); return 1; }
+
+        std::vector<std::string> inputs;
+        if (EndsWithNoCase(compdbPath, ".cab"))
+        {
+            inputs.push_back(compdbPath);
+        }
+        else
+        {
+            for (const std::filesystem::directory_entry& e : std::filesystem::directory_iterator(std::filesystem::path(Utf8ToWide(compdbPath))))
+            {
+                if (!e.is_regular_file()) { continue; }
+                const std::string name = WideToUtf8(e.path().filename().wstring());
+                if (EndsWithNoCase(name, ".cab")) { inputs.push_back(WideToUtf8(e.path().wstring())); }
+            }
+        }
+        if (inputs.empty()) { Err("compdb 输入里没有 .cab：" + compdbPath); return 1; }
+
+        int prepared = 0;
+        for (const std::string& cabPath : inputs)
+        {
+            const std::string cabName = LocalFileName(cabPath);
+            const std::wstring targetWide = folderWide + L"\\" + Utf8ToWide(LocalStem(cabName) + ".DB.xml.cab");
+
+            if (EndsWithNoCase(cabName, ".DB.xml.cab"))
+            {
+                std::vector<std::uint8_t> bytes;
+                if (!ReadFileBytes(Utf8ToWide(cabPath), bytes, ioError))
+                {
+                    Err("读 cab 失败：" + ioError);
+                    return 1;
+                }
+                if (!WriteFileBytes(targetWide, bytes.data(), bytes.size(), ioError))
+                {
+                    Err("写 cab 失败：" + ioError);
+                    return 1;
+                }
+                ++prepared;
+                continue;
+            }
+
+            CabInfo info;
+            std::string cabError;
+            if (!CabList(Utf8ToWide(cabPath), info, cabError))
+            {
+                Err("读 cab 失败：" + cabError);
+                return 1;
+            }
+            std::string entry;
+            for (const CabEntry& e : info.files)
+            {
+                if (!EndsWithNoCase(e.name, ".xml")) { continue; }
+                if (entry.empty()) { entry = e.name; }
+                if (WideToUtf8(Utf8ToWide(e.name)).find("InboxCompDB") != std::string::npos
+                    || e.name.find("InboxCompDB") != std::string::npos)
+                {
+                    entry = e.name;
+                    break;
+                }
+            }
+            if (entry.empty())
+            {
+                Err("cab 里找不到 .xml 条目：" + cabPath);
+                return 1;
+            }
+            std::vector<std::uint8_t> bytes;
+            if (!CabExtractEntry(Utf8ToWide(cabPath), entry, bytes, cabError))
+            {
+                Err("解条目失败：" + cabError);
+                return 1;
+            }
+            const std::wstring xmlWide = folderWide + L"\\" + Utf8ToWide(LocalFileName(entry));
+            if (!WriteFileBytes(xmlWide, bytes.data(), bytes.size(), ioError))
+            {
+                Err("写 xml 失败：" + ioError);
+                return 1;
+            }
+            if (!RunMakeCab(WideToUtf8(xmlWide), WideToUtf8(targetWide), cabError))
+            {
+                Err("重新打 cab 失败：" + cabError);
+                return 1;
+            }
+            ++prepared;
+        }
+
+        if (!bspDbPath.empty())
+        {
+            const std::string bspName = LocalFileName(bspDbPath);
+            const std::wstring bspTarget = folderWide + L"\\" + Utf8ToWide(bspName + ".cab");
+            std::string bspError;
+            if (!RunMakeCab(bspDbPath, WideToUtf8(bspTarget), bspError))
+            {
+                Err("BSP DB 打包失败：" + bspError);
+                return 1;
+            }
+            ++prepared;
+        }
+
+        OutLn("CompDBFolder：" + WideToUtf8(folderWide) + "（" + std::to_string(prepared) + " 个 cab）");
+        OutLn("DeviceDB：" + deviceDbPath);
+
+        std::wstring produced;
+        std::string updateError;
+        if (!UpdateCreateActionList(folderWide, Utf8ToWide(deviceDbPath), deviceType, produced, updateError))
+        {
+            Err("生成 ActionList 失败：" + updateError);
+            return 1;
+        }
+        OutLn("ActionList：" + WideToUtf8(produced));
+
+        if (!outPath.empty())
+        {
+            std::vector<std::uint8_t> bytes;
+            if (!ReadFileBytes(produced, bytes, ioError))
+            {
+                Err("读生成的 ActionList 失败：" + ioError);
+                return 1;
+            }
+            if (!WriteFileBytes(Utf8ToWide(outPath), bytes.data(), bytes.size(), ioError))
+            {
+                Err("写 --out 失败：" + ioError);
+                return 1;
+            }
+            OutLn("已复制到：" + outPath + "（" + std::to_string(bytes.size()) + " 字节）");
+        }
+        return 0;
+    }
+
     int CmdApply(const std::vector<std::string>& args)
     {
         std::string imagePath;
@@ -4385,6 +4626,8 @@ int CmdLayout(const std::vector<std::string>& args)
         OutLn("  pool finalize --vhd <vhdx> --layout <xml> [--pool <名>] [--space <名>] [--dir <临时目录>] [--drive-letter-config <xml>] [--no-wof] [--dry]");
     OutLn("");
     OutLn("  apply --vhd <vhdx>|--device <\\\\.\\PhysicalDriveN> --layout <xml> --packages <包目录> --action-list <ActionList.xml> --outdir <输出目录>");
+    OutLn("  actionlist --compdb <InboxCompDB 包 cab 或文件夹> --devicedb <DeviceDB.xml> [--out <ActionList.xml>]");
+    OutLn("        [--bspdb <BSPDB.xml>] [--dir <工作目录>] [--type <1>]  调 UpdateAgent.dll 生成 ActionList");
     OutLn("        [--oem-input <xml> --fm-dir <目录>] [--arch amd64|arm64] [--update-input <xml>] [--space <名>]");
     OutLn("        [--drive-letter-config <xml>] [--dir <临时目录>] [--pool <名>] [--version <n>] [--stage-only] [--dry]");
     OutLn("        [--packages-root <目录>]  ActionList 的 SourcePath 相对根（默认同 --packages）");
@@ -4660,7 +4903,7 @@ static int RunMain(int argc, wchar_t** wargv)
     if (command == "disk") return CmdDisk(args);
     if (command == "pool") return CmdPool(args);
     if (command == "wim") return CmdWim(args);
-    if (command == "apply") return CmdApply(args);
+    if (command == "apply") return CmdApply(args);    if (command == "actionlist") return CmdActionList(args);
     if (command == "doctor") return CmdDoctor(args);
     if (command == "layout")
     {
