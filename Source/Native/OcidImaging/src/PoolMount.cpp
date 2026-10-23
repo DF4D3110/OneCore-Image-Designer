@@ -352,7 +352,114 @@ bool PoolMountForUpdate(const std::wstring& imagePath,
         error = "GetPartitionPath(MainOS) failed (no MainOS partition found in pool).";
         return false;
     }
-    return true;
+    return true;
 }
+// 挂载池内全部 space 并解析每个 space 内指定分区的卷路径（供 CLI 的 pool mount 使用）；
+// 调用方负责随后 PoolDetachSpaces 或让进程退出时自动卸载。
+bool PoolMountSpaces(const std::wstring& imagePath, const std::wstring& poolName,
+                     unsigned int version, const std::wstring& directory,
+                     const std::vector<std::pair<std::wstring, std::wstring> >& spaces,
+                     std::vector<std::vector<unsigned char> >& storeIds,
+                     std::vector<std::pair<std::wstring, std::wstring> >& volumes,
+                     std::vector<std::string>& report, std::string& error)
+{
+    (void)poolName;
+    (void)version;
+    storeIds.clear();
+    volumes.clear();
+    report.clear();
+    error.clear();
+    if (!EnsureDirectoryTree(directory, error)) return false;
+
+    std::wstring dllPath;
+    if (!PoolFindAdkDll(L"ImageStorageService.dll", "AssignMountPoints", dllPath, error)) return false;
+    HMODULE module = LoadLibraryExW(dllPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (module == nullptr)
+    {
+        error = "LoadLibraryExW(ImageStorageService) failed (win32=" + std::to_string(GetLastError()) + ").";
+        return false;
+    }
+    CreateServiceFn createService = reinterpret_cast<CreateServiceFn>(GetProcAddress(module, "CreateStorageService"));
+    CloseServiceFn closeService = reinterpret_cast<CloseServiceFn>(GetProcAddress(module, "CloseImageStorageService"));
+    OpenVhdFn openVhd = reinterpret_cast<OpenVhdFn>(GetProcAddress(module, "OpenVirtualHardDisk"));
+    GetDiskNameFn getDiskName = reinterpret_cast<GetDiskNameFn>(GetProcAddress(module, "GetDiskName"));
+    GetStoreIdFn getStoreId = reinterpret_cast<GetStoreIdFn>(GetProcAddress(module, "GetStoreId"));
+    OpenPoolFn openPool = reinterpret_cast<OpenPoolFn>(GetProcAddress(module, "OpenStoragePool"));
+    ClosePoolFn closePool = reinterpret_cast<ClosePoolFn>(GetProcAddress(module, "CloseStoragePool"));
+    AttachSpaceFn attachSpace = reinterpret_cast<AttachSpaceFn>(GetProcAddress(module, "AttachStorageSpace"));
+    DetachSpaceFn detachSpace = reinterpret_cast<DetachSpaceFn>(GetProcAddress(module, "DetachStorageSpace"));
+    GetPartitionPathFn getPartitionPath = reinterpret_cast<GetPartitionPathFn>(GetProcAddress(module, "GetPartitionPath"));
+    if (createService == nullptr || openVhd == nullptr || getDiskName == nullptr || getStoreId == nullptr ||
+        openPool == nullptr || attachSpace == nullptr || getPartitionPath == nullptr)
+    {
+        FreeLibrary(module);
+        error = "ImageStorageService 缺少 pool mount 所需导出。";
+        return false;
+    }
+    void* service = nullptr;
+    if (createService(&service, MountLog, 0, nullptr, 1) < 0 || service == nullptr)
+    {
+        FreeLibrary(module);
+        error = "CreateStorageService failed.";
+        return false;
+    }
+    unsigned char baseId[20] = { 0 };
+    void* imageDisk = nullptr;
+    wchar_t diskName[512] = { 0 };
+    if (openVhd(service, imagePath.c_str(), 0, baseId, &imageDisk) < 0 || imageDisk == nullptr)
+    {
+        if (closeService != nullptr) closeService(service);
+        FreeLibrary(module);
+        error = "OpenVirtualHardDisk failed.";
+        return false;
+    }
+    getDiskName(imageDisk, diskName, 512);
+    void* pool = nullptr;
+    if (openPool(service, diskName, directory.c_str(), 1, &pool) < 0 || pool == nullptr)
+    {
+        if (closeService != nullptr) closeService(service);
+        FreeLibrary(module);
+        error = "OpenStoragePool failed.";
+        return false;
+    }
+    bool ok = true;
+    for (std::size_t i = 0; i < spaces.size(); ++i)
+    {
+        void* spaceDisk = nullptr;
+        if (attachSpace(service, pool, spaces[i].first.c_str(), 0, &spaceDisk) < 0 || spaceDisk == nullptr)
+        {
+            report.push_back("space " + WideToLocal(spaces[i].first.c_str()) + ": attach failed");
+            ok = false;
+            continue;
+        }
+        std::vector<unsigned char> id(20, 0);
+        if (getStoreId(service, spaceDisk, id.data()) < 0)
+        {
+            report.push_back("space " + WideToLocal(spaces[i].first.c_str()) + ": GetStoreId failed");
+            ok = false;
+            if (detachSpace != nullptr) detachSpace(service, spaceDisk, spaces[i].first.c_str(), 0);
+            continue;
+        }
+        wchar_t path[512] = { 0 };
+        const long pathRc = getPartitionPath(service, ToStoreIdValue(id), spaces[i].second.c_str(), path, 512, 1);
+        if (pathRc < 0)
+        {
+            report.push_back("space " + WideToLocal(spaces[i].first.c_str()) + ": GetPartitionPath(" +
+                             WideToLocal(spaces[i].second.c_str()) + ") failed " + Hex(pathRc));
+            ok = false;
+        }
+        else
+        {
+            storeIds.push_back(id);
+            volumes.push_back(std::make_pair(spaces[i].first, std::wstring(path)));
+            report.push_back("space " + WideToLocal(spaces[i].first.c_str()) + " -> " + WideToLocal(path));
+        }
+    }
+    if (closePool != nullptr) closePool(service, pool, 0);
+    if (closeService != nullptr) closeService(service);
+    FreeLibrary(module);
+    return ok;
+}
+
 } // namespace imaging
 } // namespace ocid

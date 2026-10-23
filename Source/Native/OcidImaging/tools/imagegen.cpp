@@ -51,7 +51,7 @@ void PrintUsage()
     OutLn("  ocid_imagegen layout show <DeviceLayout.xml|OEMDevicePlatform.xml>");
     OutLn("  ocid_imagegen layout validate <文件> [--schema-dir <目录>]");
     OutLn("  ocid_imagegen layout check <文件> [--disk-sectors <N>] [--min-sector-count <N>]");
-    OutLn("  ocid_imagegen disk plan|build|verify --layout <DeviceLayout.xml> --outdir <目录>");
+    OutLn("  ocid_imagegen disk plan|build|verify --layout <DeviceLayout.xml> --outdir <目录> [--format vhdx|vhd]");
     OutLn("  ocid_imagegen image build --layout <DeviceLayout.xml> --outdir <目录> [落包选项]");
     OutLn("  ocid_imagegen version");
     OutLn("");
@@ -2218,6 +2218,28 @@ int CmdLayout(const std::vector<std::string>& args)
     }
 
     // 多盘布局里每个物理盘的扇区可能不同（QC 用 4096），这里按 store 取。
+    // --format 语义：auto = 按布局扇区自动选择（512 用 vhd，>=4096 用 vhdx）。
+    static bool ResolveDiskFormat(const LayoutModel& model, const std::string& requested, std::string& resolved,
+                                  std::string& error)
+    {
+        std::string want = requested;
+        if (want.empty()) want = "auto";
+        if (EqualsNoCase(want, "auto"))
+        {
+            unsigned long long sector = model.hasSectorSize ? model.sectorSize : 512;
+            if (sector == 0) sector = 512;
+            resolved = sector >= 4096 ? "vhdx" : "vhd";
+            return true;
+        }
+        if (!EqualsNoCase(want, "vhdx") && !EqualsNoCase(want, "vhd"))
+        {
+            error = "--format 只支持 auto / vhd / vhdx（ffu 见 image pack）";
+            return false;
+        }
+        resolved = EqualsNoCase(want, "vhd") ? "vhd" : "vhdx";
+        return true;
+    }
+
     static std::uint64_t StoreSectorBytes(const LayoutModel& model, const LayoutStore& store)
     {
         if (store.hasSectorSize && store.sectorSize != 0) return store.sectorSize;
@@ -2500,7 +2522,7 @@ int CmdLayout(const std::vector<std::string>& args)
 
     static bool PlanPhysicalDisks(const LayoutModel& model, const std::string& outDir,
                                   std::vector<PhysicalDiskPlan>& plans, std::uint64_t flatBytes,
-                                  std::string& error)
+                                  std::string& error, const std::string& ext = ".vhdx")
     {
         std::size_t physical = 0;
         for (const LayoutStore& store : model.stores)
@@ -2523,7 +2545,7 @@ int CmdLayout(const std::vector<std::string>& args)
                 for (const PhysicalDiskPlan& other : plans) if (EqualsNoCase(other.storeType, leaf)) clash = true;
                 if (clash) leaf += "_" + std::to_string(physical);
             }
-            plan.fileName = outDir.empty() ? (leaf + ".vhdx") : (outDir + "\\" + leaf + ".vhdx");
+            plan.fileName = outDir.empty() ? (leaf + ext) : (outDir + "\\" + leaf + ext);
             plans.push_back(plan);
         }
         if (physical == 0)
@@ -2540,7 +2562,7 @@ int CmdLayout(const std::vector<std::string>& args)
                 plan.bytes = flatBytes != 0 ? flatBytes : DefaultFlatDiskBytes(model);
                 plan.bytes = (plan.bytes + plan.sector - 1) / plan.sector * plan.sector;
                 if (!BuildPhysicalDiskParts(model, *flat, plan.bytes, plan.parts, plan.holdsPool, error)) return false;
-                plan.fileName = outDir.empty() ? std::string("Default.vhdx") : (outDir + "\\Default.vhdx");
+                plan.fileName = outDir.empty() ? ("Default" + ext) : (outDir + "\\Default" + ext);
                 plans.push_back(plan);
                 return true;
             }
@@ -3056,6 +3078,7 @@ int CmdLayout(const std::vector<std::string>& args)
         const std::string sub = args[2];
         if (EqualsNoCase(sub, "verify")) return CmdDiskVerify(args);
         std::string layoutPath, outDir, onlyStore, firmwareDir, packagesDir, poolName;
+        std::string formatName = "auto";
         unsigned int version = 24;
         std::uint64_t sizeOption = 0;
         bool dry = false;
@@ -3075,6 +3098,7 @@ int CmdLayout(const std::vector<std::string>& args)
                 version = static_cast<unsigned int>(std::strtoul(v.c_str(), nullptr, 0));
             }
             else if (a == "--firmware") { if (!next(firmwareDir)) { Err("--firmware 缺少值"); return 2; } }
+            else if (a == "--format") { if (!next(formatName)) { Err("--format 缺少值"); return 2; } }
             else if (a == "--size")
             {
                 std::string v;
@@ -3091,8 +3115,15 @@ int CmdLayout(const std::vector<std::string>& args)
         std::string error;
         if (!LoadLayout(layoutPath, model, error)) { Err("读布局失败：" + error); return 1; }
 
+        {
+            std::string resolvedFormat;
+            if (!ResolveDiskFormat(model, formatName, resolvedFormat, error)) { Err(error); return 2; }
+            if (EqualsNoCase(formatName, "auto")) OutLn("输出格式：" + resolvedFormat + "（按布局扇区自动选择）");
+            formatName = resolvedFormat;
+        }        const VhdFormat diskFormat = EqualsNoCase(formatName, "vhd") ? VhdFormat::Vhd : VhdFormat::Vhdx;
+        const std::string ext = EqualsNoCase(formatName, "vhd") ? ".vhd" : ".vhdx";
         std::vector<PhysicalDiskPlan> plans;
-        if (!PlanPhysicalDisks(model, outDir, plans, sizeOption, error)) { Err(error); return 1; }
+        if (!PlanPhysicalDisks(model, outDir, plans, sizeOption, error, ext)) { Err(error); return 1; }
 
         std::string poolError;
         const LayoutPool* poolGroup = SelectLayoutPool(model, poolName, poolError);
@@ -3185,7 +3216,7 @@ int CmdLayout(const std::vector<std::string>& args)
                 }
             }
             const std::uint32_t planSector = static_cast<std::uint32_t>(plan.sector != 0 ? plan.sector : 512);
-            if (!VhdCreate(path, plan.bytes, VhdKind::Dynamic, 0, planSector, error))
+            if (!VhdCreate(path, plan.bytes, VhdKind::Dynamic, 0, planSector, error, diskFormat))
             {
                 Err("创建 " + plan.fileName + " 失败：" + error);
                 return 1;
@@ -3300,7 +3331,17 @@ int CmdLayout(const std::vector<std::string>& args)
                 for (const std::string& line : detachReport) OutLn("  " + line);
             }
             // 非永久挂载：进程退出后系统自动卸载；池载体盘显式 DetachVirtualDisk 会挂死。
-            if (plan.holdsPool) OutLn("  池载体磁盘由进程退出自动卸载（非永久挂载）");
+            if (plan.holdsPool)
+            {
+                // 池建好之后镜像里已经有 space；服务打开镜像时用的是永久挂载，必须显式卸掉，
+                // 否则进程退出镜像仍挂在系统上（实测 Get-Disk 会留一块 42 GiB 的虚拟盘）。
+                std::vector<std::string> detachReport;
+                std::string detachError;
+                if (!VhdForceDetach(Utf8ToWide(plan.fileName), false, detachReport, detachError))
+                    OutLn("  镜像仍处于挂载状态：" + detachError);
+                else
+                    OutLn("  池载体镜像已卸载");
+            }
             ++built;
         }
         OutLn("完成：物理磁盘 " + NumText(built) + " 块。");
@@ -3319,6 +3360,7 @@ int CmdLayout(const std::vector<std::string>& args)
         std::uint64_t size = 0, block = 0;
         std::uint32_t sectorSize = 512;
         bool fixed = false, readOnly = false, dry = false, keepAttached = false, wantPartitions = false;
+        std::string formatName = "vhdx";
         bool apply = false, physicalView = false, force = false, killHolders = false;
 
         for (std::size_t i = 3; i < args.size(); ++i)
@@ -3342,6 +3384,7 @@ int CmdLayout(const std::vector<std::string>& args)
             else if (a == "--size") { std::string v; if (!next(v)) { Err("--size 缺少值"); return 2; } size = VhdScaled(v); }
             else if (a == "--block") { std::string v; if (!next(v)) { Err("--block 缺少值"); return 2; } block = VhdScaled(v); }
             else if (a == "--sector") { std::string v; if (!next(v)) { Err("--sector 缺少值"); return 2; } sectorSize = static_cast<std::uint32_t>(VhdScaled(v)); }
+            else if (a == "--format") { if (!next(formatName)) { Err("--format 缺少值"); return 2; } }
             else if (a == "--device") { if (!next(device)) { Err("--device 缺少值"); return 2; } }
             else if (a == "--layout") { if (!next(layout)) { Err("--layout 缺少值"); return 2; } }
             else if (a == "--disk-id") { if (!next(diskId)) { Err("--disk-id 缺少值"); return 2; } }
@@ -3361,8 +3404,14 @@ int CmdLayout(const std::vector<std::string>& args)
         if (sub == "create")
         {
             if (size == 0) { Err("create 需要 --size"); return 2; }
+            if (!EqualsNoCase(formatName, "vhdx") && !EqualsNoCase(formatName, "vhd"))
+            {
+                Err("--format 只支持 vhdx 或 vhd");
+                return 2;
+            }
+            const VhdFormat vhdFormat = EqualsNoCase(formatName, "vhd") ? VhdFormat::Vhd : VhdFormat::Vhdx;
             if (!VhdCreate(wideFile, size, fixed ? VhdKind::Fixed : VhdKind::Dynamic,
-                           static_cast<std::uint32_t>(block), sectorSize, error))
+                           static_cast<std::uint32_t>(block), sectorSize, error, vhdFormat))
             {
                 Err("建盘失败：" + error);
                 return 1;
@@ -4339,6 +4388,7 @@ int CmdLayout(const std::vector<std::string>& args)
     {
         std::string layoutPath, outDir, packagesDir, packagesRoot, actionList, oemInput, fmDir, arch = "arm64";
         std::string poolName, onlyStore, dirOverride;
+        std::string formatName = "auto";
         std::uint64_t sizeOption = 0;
         unsigned long applyTimeout = 3600;
         bool noApply = false;
@@ -4359,6 +4409,7 @@ int CmdLayout(const std::vector<std::string>& args)
             else if (a == "--dir") { if (!next(dirOverride)) { Err("--dir 缺少值"); return 2; } }
             else if (a == "--size") { std::string v; if (!next(v)) { Err("--size 缺少值"); return 2; } sizeOption = ParseNum(v); }
             else if (a == "--timeout") { std::string v; if (!next(v)) { Err("--timeout 缺少值"); return 2; } applyTimeout = static_cast<unsigned long>(std::strtoul(v.c_str(), nullptr, 0)); }
+            else if (a == "--format") { if (!next(formatName)) { Err("--format 缺少值"); return 2; } }
             else if (a == "--no-apply") noApply = true;
             else if (!a.empty() && a[0] == '-') { Err("未知参数：" + a); return 2; }
             else { Err("多余的位置参数：" + a); return 2; }
@@ -4370,14 +4421,21 @@ int CmdLayout(const std::vector<std::string>& args)
         LayoutModel model;
         if (!LoadLayout(layoutPath, model, error)) { Err("读布局失败：" + error); return 1; }
         std::vector<PhysicalDiskPlan> plans;
-        if (!PlanPhysicalDisks(model, outDir, plans, sizeOption, error)) { Err(error); return 1; }
+        {
+            std::string resolvedFormat;
+            if (!ResolveDiskFormat(model, formatName, resolvedFormat, error)) { Err(error); return 2; }
+            if (EqualsNoCase(formatName, "auto")) OutLn("输出格式：" + resolvedFormat + "（按布局扇区自动选择）");
+            formatName = resolvedFormat;
+        }        const std::string ext = EqualsNoCase(formatName, "vhd") ? ".vhd" : ".vhdx";
+        if (!PlanPhysicalDisks(model, outDir, plans, sizeOption, error, ext)) { Err(error); return 1; }
         std::string poolError;
         const LayoutPool* poolGroup = SelectLayoutPool(model, poolName, poolError);
         if (poolGroup == nullptr && !poolError.empty()) { Err(poolError); return 1; }
         unsigned long code = 0;
 
         OutLn("=== 1/4 组装物理磁盘 ===");
-        std::vector<std::string> child = { "disk", "build", "--layout", layoutPath, "--outdir", outDir };
+        std::vector<std::string> child = { "disk", "build", "--layout", layoutPath, "--outdir", outDir,
+                                           "--format", formatName };
         if (!onlyStore.empty()) { child.push_back("--store"); child.push_back(onlyStore); }
         if (sizeOption != 0) { child.push_back("--size"); child.push_back(std::to_string(sizeOption)); }
         if (!poolName.empty()) { child.push_back("--pool"); child.push_back(poolName); }
@@ -4419,6 +4477,29 @@ int CmdLayout(const std::vector<std::string>& args)
         if (!RunSelfWithTimeout(child, 600ul * 1000ul, code, error)) { Err("disk verify 失败：" + error); return 1; }
         OutLn("镜像组装完成：" + imageFile);
         return static_cast<int>(code);
+    }
+
+    // UpdateDLL 的 ImagingStyle 提交会在 staging 目录里造一批 {GUID}.vhdx 覆盖盘并永久挂载，
+    // 提交结束后它们仍留在系统上；收尾必须逐个强制卸载（并删掉文件，避免几十 GB 残留）。
+    static int DetachStagingImages(const std::string& dir, bool removeFiles)
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        fs::path root = fs::u8path(dir);
+        if (!fs::exists(root, ec) || !fs::is_directory(root, ec)) return 0;
+        int detached = 0;
+        for (const fs::directory_entry& entry : fs::directory_iterator(root, ec))
+        {
+            if (!entry.is_regular_file(ec)) continue;
+            const std::string name = entry.path().filename().u8string();
+            if (name.size() < 5) continue;
+            if (!EqualsNoCase(name.substr(name.size() - 5), ".vhdx")) continue;
+            std::vector<std::string> report;
+            std::string detachError;
+            if (VhdForceDetach(entry.path().wstring(), false, report, detachError)) ++detached;
+            if (removeFiles) fs::remove(entry.path(), ec);
+        }
+        return detached;
     }
 
     int CmdApply(const std::vector<std::string>& args)
@@ -4722,6 +4803,8 @@ int CmdLayout(const std::vector<std::string>& args)
         for (const std::string& line : report) OutLn("  " + line);
         if (!keepOpen)
         {
+            const int stagingDetached = DetachStagingImages(stagingDir, true);
+            if (stagingDetached > 0) OutLn("  staging 覆盖盘已卸载：" + std::to_string(stagingDetached) + " 个");
             // 收尾统一走子进程 + 超时：服务侧调用可能在内核里挂死，父进程必须能强制结束它。
             auto runChild = [&](const std::vector<std::string>& childArgs, const char* what) -> bool
             {
@@ -4819,6 +4902,91 @@ int CmdLayout(const std::vector<std::string>& args)
         return 0;
     }
 
+    // pool mount：挂载池内各 space 并把每个 space 的分区卷路径打印出来，供产物可访问性验证。
+    int CmdPoolMount(const std::vector<std::string>& args)
+    {
+        std::string file;
+        std::string device;
+        std::string layoutPath;
+        std::string directory = "ocid_pool";
+        std::string onlySpace;
+        std::string poolName;
+        std::string versionText;
+        for (std::size_t i = 3; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            if (a == "--vhd" && i + 1 < args.size()) file = args[++i];
+            else if (a == "--device" && i + 1 < args.size()) device = args[++i];
+            else if (a == "--layout" && i + 1 < args.size()) layoutPath = args[++i];
+            else if (a == "--dir" && i + 1 < args.size()) directory = args[++i];
+            else if (a == "--space" && i + 1 < args.size()) onlySpace = args[++i];
+            else if (a == "--pool" && i + 1 < args.size()) poolName = args[++i];
+            else if (a == "--version" && i + 1 < args.size()) versionText = args[++i];
+            else if (a == "--help" || a == "-h" || a == "?") { PrintUsage(); return 0; }
+            else { Err("pool mount 未知选项：" + a); return 2; }
+        }
+        if ((file.empty() && device.empty()) || layoutPath.empty())
+        {
+            Err("pool mount 需要 --vhd <虚拟磁盘>（或 --device）--layout <布局 XML>");
+            return 2;
+        }
+        LayoutModel model;
+        std::string loadError;
+        if (!LoadLayout(layoutPath, model, loadError))
+        {
+            Err("读取布局失败：" + loadError);
+            return 1;
+        }
+        std::string poolError;
+        const LayoutPool* poolGroup = SelectLayoutPool(model, poolName, poolError);
+        if (poolGroup == nullptr)
+        {
+            Err(poolError);
+            return 1;
+        }
+        std::vector<std::pair<std::wstring, std::wstring> > spaces;
+        for (const LayoutStore& store : poolGroup->stores)
+        {
+            if (!onlySpace.empty() && !EqualsNoCase(store.storeType, onlySpace)) continue;
+            if (store.partitions.empty()) continue;
+            spaces.push_back(std::make_pair(Utf8ToWide(store.storeType), Utf8ToWide(store.partitions.front().name)));
+        }
+        if (spaces.empty())
+        {
+            Err("所选存储池内没有可挂载的 space");
+            return 1;
+        }
+        std::wstring imagePath;
+        if (!file.empty())
+        {
+            imagePath = Utf8ToWide(file);
+            std::error_code ec;
+            if (!std::filesystem::exists(std::filesystem::u8path(file), ec))
+            {
+                Err("镜像文件不存在：" + file);
+                return 1;
+            }
+        }
+        else
+        {
+            imagePath = Utf8ToWide(device);
+        }
+        std::vector<std::vector<unsigned char> > storeIds;
+        std::vector<std::pair<std::wstring, std::wstring> > volumes;
+        std::vector<std::string> report;
+        std::string mountError;
+        const bool mounted = PoolMountSpaces(imagePath, Utf8ToWide(poolGroup->name), LayoutPoolVersion(poolGroup, 24),
+                                             Utf8ToWide(directory), spaces, storeIds, volumes, report, mountError);
+        for (const std::string& line : report) OutLn("  " + line);
+        if (!mounted)
+        {
+            Err("pool mount 失败：" + mountError);
+            return 1;
+        }
+        OutLn("已挂载 " + std::to_string(volumes.size()) + " 个 space；用 pool detach 释放。");
+        return 0;
+    }
+
     int CmdPool(const std::vector<std::string>& args)
     {
         const std::string sub = args.size() > 2 ? args[2] : std::string();
@@ -4851,6 +5019,7 @@ int CmdLayout(const std::vector<std::string>& args)
         if (sub == "prepare") return CmdPoolPrepare(args);
         if (sub == "detach") return CmdPoolDetach(args);
         if (sub == "finalize") return CmdPoolFinalize(args);
+        if (sub == "mount") return CmdPoolMount(args);
         if (sub == "close") return CmdPoolClose(args);
         if (sub == "probe")
         {

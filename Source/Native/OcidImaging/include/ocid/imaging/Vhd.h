@@ -29,6 +29,13 @@ namespace imaging
         Fixed,
     };
 
+    // 磁盘文件格式：VHDX 支持 512/4096 扇区；VHD 只支持 512（微软工具 ImgDump 只认 VHD/FFU）。
+    enum class VhdFormat
+    {
+        Vhdx,
+        Vhd,
+    };
+
     struct VhdInfo
     {
         std::string path;          // UTF-8 文件路径
@@ -63,7 +70,8 @@ namespace imaging
                                 VhdKind kind,
                                 std::uint32_t blockSize,
                                 std::uint32_t physicalSectorSize,
-                                std::string& error);
+                                std::string& error,
+                                VhdFormat format = VhdFormat::Vhdx);
 
     // 挂载（读写），成功后 devicePath 形如 \\.\PhysicalDriveN。
     // 进程退出时释放所有非永久挂载（wmain 收尾调用）。

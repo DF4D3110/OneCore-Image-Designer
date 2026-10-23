@@ -102,11 +102,25 @@ namespace imaging
             return value;
         }
 
+        // 按扩展名选设备类型：.vhd 必须用 VIRTUAL_STORAGE_TYPE_DEVICE_VHD，用 VHDX 打开会被
+        // VirtDisk 判为 ERROR_FILE_CORRUPT(1392)（实测连 diskpart 生成的正品 .vhd 也报错）。
+        ULONG StorageDeviceFor(const std::wstring& path)
+        {
+            std::wstring lower = path;
+            for (wchar_t& ch : lower)
+            {
+                if (ch >= L'A' && ch <= L'Z') ch = static_cast<wchar_t>(ch - L'A' + L'a');
+            }
+            if (lower.size() >= 4 && lower.compare(lower.size() - 4, 4, L".vhd") == 0)
+                return VIRTUAL_STORAGE_TYPE_DEVICE_VHD;
+            return VIRTUAL_STORAGE_TYPE_DEVICE_VHDX;
+        }
+
         bool OpenVirtual(const std::wstring& path, VIRTUAL_DISK_ACCESS_MASK access,
                          HANDLE& handle, std::string& error)
         {
             VIRTUAL_STORAGE_TYPE storage{};
-            storage.DeviceId = VIRTUAL_STORAGE_TYPE_DEVICE_VHDX;
+            storage.DeviceId = StorageDeviceFor(path);
             storage.VendorId = VendorMicrosoft();
             // 用 version 1 打开：version 2 的 GetInfoOnly 语义在 GET_INFO 访问下会被拒
             // （实测 OpenVirtualDisk 返回成功但句柄无效、win32=0）；version 1 稳定可用。
@@ -165,12 +179,277 @@ namespace imaging
         return "1.0.0";
     }
 
+    namespace
+    {
+        // ---- 自带固定 VHD 写入器 -------------------------------------------------
+        // 为什么不用 CreateVirtualDisk 造 VHD：本机该 API 对 VHD 设备返回 win32=2。
+        // 固定 VHD 的格式很简单（尾部 512 字节 footer + 裸数据），自己写既可控又能被
+        // VirtDisk 打开、被微软的 ImgDump.exe 识别。
+        void PutBe16(unsigned char* p, unsigned int v) { p[0] = (unsigned char)(v >> 8); p[1] = (unsigned char)v; }
+        void PutBe32(unsigned char* p, unsigned int v)
+        {
+            p[0] = (unsigned char)(v >> 24); p[1] = (unsigned char)(v >> 16);
+            p[2] = (unsigned char)(v >> 8);  p[3] = (unsigned char)v;
+        }
+        void PutBe64(unsigned char* p, std::uint64_t v)
+        {
+            for (int i = 0; i < 8; ++i) p[i] = (unsigned char)(v >> (56 - 8 * i));
+        }
+
+        // Virtual PC 的 CHS 换算（VHD footer 里要填，读盘的工具会拿它做 sanity check）。
+        void VhdGeometry(std::uint64_t bytes, unsigned int& cylinders, unsigned int& heads, unsigned int& sectors)
+        {
+            std::uint64_t total = bytes / 512;
+            const std::uint64_t maxChs = 65535ull * 16ull * 255ull;
+            if (total > maxChs) total = maxChs;
+            sectors = 17;
+            heads = 4;
+            if (total >= 65535ull * 16ull * 63ull)
+            {
+                sectors = 255;
+                heads = 16;
+            }
+            else
+            {
+                std::uint64_t cth = total / sectors;
+                heads = static_cast<unsigned int>((cth + 1023) / 1024);
+                if (heads < 4) heads = 4;
+                if (cth >= static_cast<std::uint64_t>(heads) * 65535ull) { sectors = 255; heads = 16; }
+            }
+            cylinders = static_cast<unsigned int>(total / (static_cast<std::uint64_t>(heads) * sectors));
+            if (cylinders > 65535) cylinders = 65535;
+        }
+
+        // ---------- 动态 VHD（type=3）----------
+        // 固定 VHD 必须整盘分配（42 GiB 就是 42 GiB 磁盘），而 VHD 又只能 512 字节扇区，
+        // 所以这里自己写一个动态 VHD 头部：footer(offset 0) + dynamic header(512) + BAT(1536) +
+        // footer(文件尾)。盘挂上以后块分配由 VirtDisk 驱动完成，文件按写入量增长。
+        bool VhdWriteAt(HANDLE file, std::uint64_t offset, const void* data, std::uint32_t length, std::string& error)
+        {
+            LARGE_INTEGER pos;
+            pos.QuadPart = static_cast<LONGLONG>(offset);
+            if (!SetFilePointerEx(file, pos, nullptr, FILE_BEGIN))
+            {
+                error = LastErrorText("SetFilePointerEx(VHD)");
+                return false;
+            }
+            const unsigned char* bytes = static_cast<const unsigned char*>(data);
+            std::uint32_t written = 0;
+            while (written < length)
+            {
+                DWORD chunk = 0;
+                if (!WriteFile(file, bytes + written, length - written, &chunk, nullptr) || chunk == 0)
+                {
+                    error = LastErrorText("WriteFile(VHD)");
+                    return false;
+                }
+                written += chunk;
+            }
+            return true;
+        }
+
+        std::uint32_t VhdChecksum(const unsigned char* data, std::size_t length)
+        {
+            std::uint32_t sum = 0;
+            for (std::size_t i = 0; i < length; ++i) sum += data[i];
+            return ~sum;
+        }
+
+        void VhdFillFooter(unsigned char* footer, std::uint64_t bytes, std::uint32_t type,
+                           std::uint64_t dataOffset, const unsigned char* uniqueId)
+        {
+            std::memset(footer, 0, 512);
+            std::memcpy(footer, "conectix", 8);
+            PutBe32(footer + 8, 2);            // features
+            PutBe32(footer + 12, 0x00010000u); // file format version
+            PutBe64(footer + 16, dataOffset);
+            std::uint32_t timestamp = 0;
+            SYSTEMTIME st;
+            GetSystemTime(&st);
+            FILETIME ft;
+            SystemTimeToFileTime(&st, &ft);
+            ULARGE_INTEGER ticks;
+            ticks.LowPart = ft.dwLowDateTime;
+            ticks.HighPart = ft.dwHighDateTime;
+            const std::uint64_t epoch = 125911584000000000ull; // 2000-01-01 UTC
+            if (ticks.QuadPart > epoch)
+                timestamp = static_cast<std::uint32_t>((ticks.QuadPart - epoch) / 10000000ull);
+            PutBe32(footer + 24, timestamp);
+            std::memcpy(footer + 28, "ocid", 4);
+            PutBe32(footer + 32, 0x00010000u);
+            std::memcpy(footer + 36, "Wi2k", 4);
+            PutBe64(footer + 40, bytes);
+            PutBe64(footer + 48, bytes);
+            const std::uint64_t totalSectors = bytes / 512ull;
+            std::uint32_t cylinders = 0;
+            std::uint32_t heads = 0;
+            std::uint32_t sectors = 0;
+            if (totalSectors >= 65535ull * 16ull * 63ull)
+            {
+                sectors = 255;
+                heads = 16;
+                cylinders = static_cast<std::uint32_t>(totalSectors / (heads * sectors));
+            }
+            else
+            {
+                sectors = 17;
+                const std::uint64_t cth = totalSectors / sectors;
+                heads = static_cast<std::uint32_t>((cth + 1023ull) / 1024ull);
+                if (heads < 4) heads = 4;
+                if (cth >= static_cast<std::uint64_t>(heads) * 65535ull)
+                {
+                    heads = 16;
+                    sectors = 255;
+                    cylinders = static_cast<std::uint32_t>(totalSectors / (static_cast<std::uint64_t>(heads) * sectors));
+                }
+                else
+                {
+                    cylinders = static_cast<std::uint32_t>(cth / heads);
+                }
+            }
+            if (cylinders > 65535) cylinders = 65535;
+            PutBe16(footer + 56, cylinders);
+            footer[58] = static_cast<unsigned char>(heads);
+            footer[59] = static_cast<unsigned char>(sectors);
+            PutBe32(footer + 60, type);
+            if (uniqueId != nullptr) std::memcpy(footer + 68, uniqueId, 16);
+            PutBe32(footer + 64, 0);
+            PutBe32(footer + 64, VhdChecksum(footer, 512));
+        }
+
+        bool CreateDynamicVhdFile(const std::wstring& path, std::uint64_t bytes, std::string& error)
+        {
+            if (bytes == 0 || bytes % 512 != 0) { error = "VHD 虚拟容量必须是 512 的整数倍"; return false; }
+            const std::uint64_t blockSize = 2ull * 1024 * 1024;
+            const std::uint32_t tableEntries = static_cast<std::uint32_t>((bytes + blockSize - 1) / blockSize);
+            unsigned char uniqueId[16] = {0};
+            GUID guid{};
+            if (SUCCEEDED(CoCreateGuid(&guid)))
+                std::memcpy(uniqueId, &guid, 16);
+
+            unsigned char footer[512];
+            unsigned char footerEnd[512];
+            VhdFillFooter(footer, bytes, 3, 512, uniqueId);
+            VhdFillFooter(footerEnd, bytes, 3, 0xFFFFFFFFFFFFFFFFull, uniqueId);
+
+            unsigned char header[1024];
+            std::memset(header, 0, sizeof(header));
+            std::memcpy(header, "cxsparse", 8);
+            PutBe64(header + 8, 0xFFFFFFFFFFFFFFFFull); // data offset（动态盘固定 ~0）
+            PutBe64(header + 16, 1536);                 // BAT 表偏移
+            PutBe32(header + 24, 0x00010000u);          // header version
+            PutBe32(header + 28, tableEntries);         // max table entries
+            PutBe32(header + 32, static_cast<std::uint32_t>(blockSize));
+            PutBe32(header + 36, 0);
+            PutBe32(header + 36, VhdChecksum(header, 1024));
+
+            HANDLE file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                      FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file == INVALID_HANDLE_VALUE) { error = LastErrorText("CreateFile(VHD)"); return false; }
+
+            const std::uint64_t batOffset = 1536;
+            // BAT 之后要按 512 字节对齐（VirtDisk 要求 footer 落在扇区边界上，否则判为损坏）。
+            const std::uint64_t batBytes = ((static_cast<std::uint64_t>(tableEntries) * 4ull + 511ull) / 512ull) * 512ull;
+            const std::uint64_t footerOffset = batOffset + batBytes;
+            std::vector<unsigned char> bat(static_cast<std::size_t>(batBytes), 0xFF);
+            bool ok = VhdWriteAt(file, 0, footer, 512, error) &&
+                      VhdWriteAt(file, 512, header, 1024, error) &&
+                      VhdWriteAt(file, batOffset, bat.data(), static_cast<std::uint32_t>(batBytes), error);
+            LARGE_INTEGER end;
+            end.QuadPart = static_cast<LONGLONG>(footerOffset + 512);
+            if (ok && (!SetFilePointerEx(file, end, nullptr, FILE_BEGIN) || !SetEndOfFile(file)))
+            {
+                error = LastErrorText("SetEndOfFile(VHD)");
+                ok = false;
+            }
+            if (ok) ok = VhdWriteAt(file, footerOffset, footerEnd, 512, error);
+            CloseHandle(file);
+            return ok;
+        }
+
+        bool CreateFixedVhdFile(const std::wstring& path, std::uint64_t bytes, std::string& error)
+        {
+            if (bytes == 0 || bytes % 512 != 0) { error = "VHD 容量必须是 512 的整数倍"; return false; }
+            HANDLE file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                      FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file == INVALID_HANDLE_VALUE) { error = LastErrorText("CreateFile(VHD)"); return false; }
+            // 不能把固定 VHD 标成 sparse：实测 VirtDisk 打开 sparse 的固定 VHD 会返回
+            // 0xC03A001A（ERROR_VHD_INVALID_SIZE），清掉 sparse 标志后即可正常打开。
+            // 非 sparse 的 SetEndOfFile 在 NTFS 上是惰性分配的，未写的区域不占物理空间。
+            LARGE_INTEGER end;
+            end.QuadPart = static_cast<LONGLONG>(bytes);
+            if (!SetFilePointerEx(file, end, nullptr, FILE_BEGIN) || !SetEndOfFile(file))
+            {
+                error = LastErrorText("SetEndOfFile(VHD)");
+                CloseHandle(file);
+                return false;
+            }
+
+            unsigned char footer[512] = { 0 };
+            std::memcpy(footer, "conectix", 8);
+            PutBe32(footer + 8, 2);                    // features: reserved bit
+            PutBe32(footer + 12, 0x00010000);          // file format version 1.0
+            PutBe64(footer + 16, 0xFFFFFFFFFFFFFFFFull);  // data offset: none for fixed
+            SYSTEMTIME now;
+            GetSystemTime(&now);
+            FILETIME ft{};
+            SystemTimeToFileTime(&now, &ft);
+            ULARGE_INTEGER ticks;
+            ticks.LowPart = ft.dwLowDateTime;
+            ticks.HighPart = ft.dwHighDateTime;
+            const unsigned long long vhdEpoch100ns = 125911584000000000ull;  // 2000-01-01T00:00:00Z
+            const unsigned long long seconds100 = ticks.QuadPart > vhdEpoch100ns ? ticks.QuadPart - vhdEpoch100ns : 0;
+            PutBe32(footer + 24, static_cast<std::uint32_t>(seconds100 / 10000000ull));
+            std::memcpy(footer + 28, "ocid", 4);       // creator application
+            PutBe32(footer + 32, 0x00010000);          // creator version
+            std::memcpy(footer + 36, "Wi2k", 4);       // creator host OS
+            PutBe64(footer + 40, bytes);               // original size
+            PutBe64(footer + 48, bytes);               // current size
+            unsigned int cylinders = 0, heads = 0, sectors = 0;
+            VhdGeometry(bytes, cylinders, heads, sectors);
+            PutBe16(footer + 56, cylinders);
+            footer[58] = static_cast<unsigned char>(heads);
+            footer[59] = static_cast<unsigned char>(sectors);
+            PutBe32(footer + 60, 2);                   // disk type: fixed
+            // 68..83 unique id：沿用磁盘 GUID 的随机数即可
+            GUID id;
+            if (CoCreateGuid(&id) == S_OK)
+            {
+                unsigned char* p = footer + 68;
+                p[0] = static_cast<unsigned char>(id.Data1 >> 24); p[1] = static_cast<unsigned char>(id.Data1 >> 16);
+                p[2] = static_cast<unsigned char>(id.Data1 >> 8);  p[3] = static_cast<unsigned char>(id.Data1);
+                p[4] = static_cast<unsigned char>(id.Data2 >> 8);  p[5] = static_cast<unsigned char>(id.Data2);
+                p[6] = static_cast<unsigned char>(id.Data3 >> 8);  p[7] = static_cast<unsigned char>(id.Data3);
+                std::memcpy(p + 8, id.Data4, 8);
+            }
+            footer[84] = 0;                            // saved state
+            unsigned int sum = 0;
+            for (int i = 0; i < 512; ++i) sum += footer[i];
+            PutBe32(footer + 64, ~sum);
+
+            LARGE_INTEGER at;
+            at.QuadPart = static_cast<LONGLONG>(bytes);
+            DWORD written = 0;
+            if (!SetFilePointerEx(file, at, nullptr, FILE_BEGIN) ||
+                !WriteFile(file, footer, 512, &written, nullptr) || written != 512)
+            {
+                error = LastErrorText("WriteFile(VHD footer)");
+                CloseHandle(file);
+                return false;
+            }
+            FlushFileBuffers(file);
+            CloseHandle(file);
+            return true;
+        }
+    }
+
     bool VhdCreate(const std::wstring& path,
                    std::uint64_t virtualBytes,
                    VhdKind kind,
                    std::uint32_t blockSize,
                    std::uint32_t physicalSectorSize,
-                   std::string& error)
+                   std::string& error,
+                   VhdFormat format)
     {
         if (virtualBytes < 3ull * 1024 * 1024)
         {
@@ -182,22 +461,46 @@ namespace imaging
             error = "虚拟容量必须是 1 MiB 的整数倍（VirtDisk 的硬要求）";
             return false;
         }
+        const bool vhd = (format == VhdFormat::Vhd);
+        if (vhd && physicalSectorSize != 0 && physicalSectorSize != 512)
+        {
+            error = "VHD 只支持 512 字节扇区（当前布局是 " + std::to_string(physicalSectorSize) +
+                    "）；需要 4K 扇区请用 VHDX";
+            return false;
+        }
+        if (vhd && kind == VhdKind::Fixed)
+        {
+            // 固定 VHD 由我们自己写：CreateVirtualDisk 的 FULL_PHYSICAL_ALLOCATION 对 VHD 不生效。
+            return CreateFixedVhdFile(path, virtualBytes, error);
+        }
         VIRTUAL_STORAGE_TYPE storage{};
-        storage.DeviceId = VIRTUAL_STORAGE_TYPE_DEVICE_VHDX;
+        storage.DeviceId = vhd ? VIRTUAL_STORAGE_TYPE_DEVICE_VHD : VIRTUAL_STORAGE_TYPE_DEVICE_VHDX;
         storage.VendorId = VendorMicrosoft();
 
         CREATE_VIRTUAL_DISK_PARAMETERS params{};
-        params.Version = CREATE_VIRTUAL_DISK_VERSION_2;
-        params.Version2.UniqueId = GUID_NULL;
-        params.Version2.MaximumSize = virtualBytes;
-        params.Version2.BlockSizeInBytes = (blockSize == 0) ? 0 : blockSize;
-        params.Version2.SectorSizeInBytes = (physicalSectorSize == 0) ? 512 : physicalSectorSize;
-        params.Version2.PhysicalSectorSizeInBytes = params.Version2.SectorSizeInBytes;
+        if (vhd)
+        {
+            params.Version = CREATE_VIRTUAL_DISK_VERSION_1;
+            params.Version1.UniqueId = GUID_NULL;
+            params.Version1.MaximumSize = virtualBytes;
+            params.Version1.BlockSizeInBytes = 0;
+            params.Version1.SectorSizeInBytes = 512;
+        }
+        else
+        {
+            params.Version = CREATE_VIRTUAL_DISK_VERSION_2;
+            params.Version2.UniqueId = GUID_NULL;
+            params.Version2.MaximumSize = virtualBytes;
+            params.Version2.BlockSizeInBytes = (blockSize == 0) ? 0 : blockSize;
+            params.Version2.SectorSizeInBytes = (physicalSectorSize == 0) ? 512 : physicalSectorSize;
+            params.Version2.PhysicalSectorSizeInBytes = params.Version2.SectorSizeInBytes;
+        }
 
         HANDLE handle = INVALID_HANDLE_VALUE;
         const CREATE_VIRTUAL_DISK_FLAG flags =
             (kind == VhdKind::Fixed) ? CREATE_VIRTUAL_DISK_FLAG_FULL_PHYSICAL_ALLOCATION : CREATE_VIRTUAL_DISK_FLAG_NONE;
-        const DWORD rc = CreateVirtualDisk(&storage, path.c_str(), VIRTUAL_DISK_ACCESS_NONE, nullptr,
+        const VIRTUAL_DISK_ACCESS_MASK createAccess = vhd ? VIRTUAL_DISK_ACCESS_ALL : VIRTUAL_DISK_ACCESS_NONE;
+        const DWORD rc = CreateVirtualDisk(&storage, path.c_str(), createAccess, nullptr,
                                            flags, 0, &params, nullptr, &handle);
         if (rc != ERROR_SUCCESS)
         {
