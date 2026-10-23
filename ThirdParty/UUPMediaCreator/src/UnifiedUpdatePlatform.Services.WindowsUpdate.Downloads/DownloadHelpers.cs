@@ -25,6 +25,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using UnifiedUpdatePlatform.Services.Composition.Database;
 using UnifiedUpdatePlatform.Services.Composition.Database.Applications;
@@ -472,21 +473,10 @@ namespace UnifiedUpdatePlatform.Services.WindowsUpdate.Downloads
             return (payloadItems, bannedPayloadItems);
         }
 
-        public static async Task<string> ProcessUpdateAsync(UpdateData update, string pOutputFolder, MachineType MachineType, IProgress<GeneralDownloadProgress> generalDownloadProgress, string Language = "", string Edition = "", bool WriteMetadata = true, bool UseAutomaticDownloadFolder = true, int downloadThreads = 4)
+        public static async Task<string> ProcessUpdateAsync(UpdateData update, string pOutputFolder, MachineType MachineType, IProgress<GeneralDownloadProgress> generalDownloadProgress, string Language = "", string Edition = "", bool WriteMetadata = true, bool UseAutomaticDownloadFolder = true, int downloadThreads = 4, CancellationToken cancellationToken = default)
         {
-            string buildstr = "";
-            IEnumerable<string> languages = null;
-
-            int returnCode = 0;
-            IEnumerable<CExtendedUpdateInfoXml.File> filesToDownload = null;
-
             HashSet<CompDB> compDBs = await update.GetCompDBsAsync();
-
-            await Task.WhenAll(
-                Task.Run(async () => buildstr = await update.GetBuildStringAsync()),
-                Task.Run(async () => languages = await update.GetAvailableLanguagesAsync()));
-
-            buildstr ??= "";
+            string buildstr = await update.GetBuildStringAsync() ?? "";
 
             if (string.IsNullOrEmpty(buildstr) && update.Xml.LocalizedProperties.Title.Contains("(UUP-CTv2)"))
             {
@@ -510,77 +500,68 @@ namespace UnifiedUpdatePlatform.Services.WindowsUpdate.Downloads
             (HashSet<PayloadItem> payloadItems, HashSet<PayloadItem> bannedPayloadItems) =
                 BuildListOfPayloads(compDBs, Edition, Language);
 
-            do
+            IEnumerable<FileExchangeV3FileDownloadInformation> fileUrls =
+                await FE3Handler.GetFileUrls(update) ?? throw new Exception("Getting file urls failed.");
+            if (!Directory.Exists(OutputFolder))
             {
-                IEnumerable<FileExchangeV3FileDownloadInformation> fileUrls = await FE3Handler.GetFileUrls(update) ?? throw new Exception("Getting file urls failed.");
-                if (!Directory.Exists(OutputFolder))
+                _ = Directory.CreateDirectory(OutputFolder);
+            }
+
+            string tmpname = update.Xml.LocalizedProperties.Title + " (" + MachineType.ToString() + ").uupmcreplay";
+            illegalCharacters = invalidCharactersRegex();
+            tmpname = illegalCharacters.Replace(tmpname, "");
+            string filename = Path.Combine(OutputFolder, tmpname);
+
+            if (WriteMetadata && !File.Exists(filename))
+            {
+                File.WriteAllText(filename, JsonSerializer.Serialize(update, new JsonSerializerOptions() { WriteIndented = true, IncludeFields = true }));
+            }
+
+            IEnumerable<CExtendedUpdateInfoXml.File> filesToDownload =
+                update.Xml.Files.File.AsParallel().Where(x => !IsFileBanned(x, bannedPayloadItems));
+
+            IEnumerable<(CExtendedUpdateInfoXml.File, FileExchangeV3FileDownloadInformation)> boundList = filesToDownload
+                .AsParallel()
+                .Select(x => (x, fileUrls.First(y => y.Digest == x.Digest)))
+                //.Where(x => UpdateUtils.ShouldFileGetDownloaded(x.x, payloadItems))
+                .OrderBy(x => x.Item2.ExpirationDate);
+
+            IEnumerable<UUPFile> fileList = boundList.SelectMany(boundFile =>
+            {
+                return GetFilenameForCEUIFile(boundFile.Item1, payloadItems).Select(path =>
                 {
-                    _ = Directory.CreateDirectory(OutputFolder);
-                }
-
-                string tmpname = update.Xml.LocalizedProperties.Title + " (" + MachineType.ToString() + ").uupmcreplay";
-                illegalCharacters = invalidCharactersRegex();
-                tmpname = illegalCharacters.Replace(tmpname, "");
-                string filename = Path.Combine(OutputFolder, tmpname);
-
-                if (WriteMetadata && !File.Exists(filename))
-                {
-                    File.WriteAllText(filename, JsonSerializer.Serialize(update, new JsonSerializerOptions() { WriteIndented = true, IncludeFields = true }));
-                }
-
-                using HttpDownloader helperDl = new(OutputFolder, downloadThreads);
-                filesToDownload = update.Xml.Files.File.AsParallel().Where(x => !IsFileBanned(x, bannedPayloadItems));
-
-                returnCode = 0;
-
-                IEnumerable<(CExtendedUpdateInfoXml.File, FileExchangeV3FileDownloadInformation)> boundList = filesToDownload
-                    .AsParallel()
-                    .Select(x => (x, fileUrls.First(y => y.Digest == x.Digest)))
-                    //.Where(x => UpdateUtils.ShouldFileGetDownloaded(x.x, payloadItems))
-                    .OrderBy(x => x.Item2.ExpirationDate);
-
-                IEnumerable<UUPFile> fileList = boundList.SelectMany(boundFile =>
-                {
-                    return GetFilenameForCEUIFile(boundFile.Item1, payloadItems).Select(path =>
+                    /*try
                     {
-                        /*try
+                        foreach (CompDB compDb in compDBs)
                         {
-                            foreach (CompDB compDb in compDBs)
+                            foreach (Package pkg in compDb.Packages.Package)
                             {
-                                foreach (Package pkg in compDb.Packages.Package)
+                                string payloadHash = pkg.Payload.PayloadItem[0].PayloadHash;
+                                if (payloadHash == boundFile.Item1.AdditionalDigest.Text || payloadHash == boundFile.Item1.Digest)
                                 {
-                                    string payloadHash = pkg.Payload.PayloadItem[0].PayloadHash;
-                                    if (payloadHash == boundFile.Item1.AdditionalDigest.Text || payloadHash == boundFile.Item1.Digest)
+                                    if (pkg.ID.Contains('-') && pkg.ID.Contains(".inf", StringComparison.InvariantCultureIgnoreCase))
                                     {
-                                        if (pkg.ID.Contains('-') && pkg.ID.Contains(".inf", StringComparison.InvariantCultureIgnoreCase))
-                                        {
-                                            path = pkg.ID.Split("-")[1].Replace(".inf", ".cab", StringComparison.InvariantCultureIgnoreCase);
-                                        }
-                                        break;
+                                        path = pkg.ID.Split("-")[1].Replace(".inf", ".cab", StringComparison.InvariantCultureIgnoreCase);
                                     }
+                                    break;
                                 }
                             }
                         }
-                        catch { }*/
+                    }
+                    catch { }*/
 
-                        return new UUPFile(
-                            boundFile.Item2,
-                            path,
-                            long.Parse(boundFile.Item1.Size),
-                            boundFile.Item1.AdditionalDigest.Text,
-                            boundFile.Item1.AdditionalDigest.Algorithm);
-                    });
+                    return new UUPFile(
+                        boundFile.Item2,
+                        path,
+                        long.Parse(boundFile.Item1.Size),
+                        boundFile.Item1.AdditionalDigest.Text,
+                        boundFile.Item1.AdditionalDigest.Algorithm);
                 });
+            });
 
-                returnCode = await helperDl.DownloadAsync(fileList.ToList(), generalDownloadProgress) ? 0 : -1;
-
-                if (returnCode != 0)
-                {
-                    continue;
-                }
-            }
-            while (returnCode != 0);
-
+            using HttpDownloader helperDl = new(OutputFolder, downloadThreads);
+            if (!await helperDl.DownloadAsync(fileList.ToList(), generalDownloadProgress, cancellationToken))
+                throw new IOException("One or more UUP files failed to download. See the task log for failed files.");
             return OutputFolder;
         }
 

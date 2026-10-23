@@ -1,3 +1,5 @@
+extern alias UupCabinet;
+
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -8,10 +10,14 @@ using System.Text.Json;
 using Microsoft.Win32;
 using OneCore_Image_Designer.Models;
 using OneCore_Image_Designer.Services;
+using UnifiedUpdatePlatform.Services.WindowsUpdate;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
     ("UUP query parsing", () => { QueryParsing(); return Task.CompletedTask; }),
+    ("UUP automatic query profile planning", () => { QueryProfilePlanning(); return Task.CompletedTask; }),
+    ("UUP local result filtering", () => { UupLocalResultFiltering(); return Task.CompletedTask; }),
+    ("UUP architecture attributes", () => { ArchitectureAttributes(); return Task.CompletedTask; }),
     ("UUP snapshot round-trip", () => { SnapshotRoundTrip(); return Task.CompletedTask; }),
     ("UUP payload lookup and safe path", () => { PayloadLookup(); return Task.CompletedTask; }),
     ("UUP bridge cancellation and errors", BridgeCancellationAndErrors),
@@ -51,8 +57,78 @@ static void QueryParsing()
     Throws<ArgumentException>(() => UupQueryParser.ParseArchitecture("mips"));
     SequenceEqual(new[] { "ProductRelease", "OSFlight" },
         UupQueryParser.ParseFilters(new[] { "productrelease", "OSFlight", "PRODUCTRELEASE" }));
+    SequenceEqual(new[] { "amd64", "arm64", "x86", "arm" },
+        new[] { "AMD64", "ARM64", "x86", "ARM" }.Select(UupQueryParser.ParseArchitecture));
     Throws<ArgumentException>(() => UupQueryParser.ParseFilters(Array.Empty<string>()));
     Throws<ArgumentException>(() => UupQueryParser.ParseFilters(new[] { "unexpected" }));
+}
+
+static void QueryProfilePlanning()
+{
+    var automatic = UupQueryPlanner.Build(
+        new[] { "ProductRelease", "OSFlight" }, string.Empty, string.Empty, string.Empty, string.Empty);
+    True(automatic.Length > 2, "Automatic query should fan out across known active branch profiles.");
+    True(automatic.All(plan => !string.IsNullOrWhiteSpace(plan.CurrentBranch)),
+        "Automatic query profiles must never send an empty product branch.");
+    True(automatic.Any(plan => plan.Filter == "ProductRelease" && plan.FlightRing == "Retail"),
+        "Automatic query should include retail updates.");
+    True(automatic.Any(plan => plan.Filter == "OSFlight" && plan.FlightRing == "External" &&
+                              plan.FlightingBranchName == "CanaryChannel"),
+        "Automatic query should include Canary Insider updates.");
+    True(automatic.Any(plan => plan.CurrentBranch == "ge_release" &&
+                              plan.ReportingVersion == "10.0.26100.1") &&
+         automatic.Any(plan => plan.CurrentBranch == "ni_release" &&
+                              plan.ReportingVersion == "10.0.22621.1") &&
+         automatic.Any(plan => plan.CurrentBranch == "vb_release" &&
+                              plan.ReportingVersion == "10.0.19041.1"),
+        "Automatic matching should pair known branches with compatible reporting versions.");
+
+    var explicitProfile = UupQueryPlanner.Build(
+        new[] { "OSFlight" }, "10.0.26100.1", "External", "Dev", "ni_release");
+    Equal(1, explicitProfile.Length);
+    Equal("External", explicitProfile[0].FlightRing);
+    Equal("Dev", explicitProfile[0].FlightingBranchName);
+    Equal("ni_release", explicitProfile[0].CurrentBranch);
+}
+
+static void UupLocalResultFiltering()
+{
+    var entries = new List<UupScanEntry>
+    {
+        new() { Build = "10.0.26100.1", Title = "Windows 11 24H2 Cumulative Update" },
+        new() { Build = "10.0.26100.2", Title = "Windows 11 24H2 Preview Update" },
+        new() { Build = "10.0.26200.1", ReleaseVersion = "25H2", Title = "Windows 11 25H2 Cumulative Update" },
+        new() { ReleaseVersion = "25H2", Title = "Windows 11, version 25H2" }
+    };
+
+    SequenceEqual(entries, UupResultFilter.Apply(entries, " ", null));
+    SequenceEqual(new[] { entries[0], entries[1] }, UupResultFilter.Apply(entries, " 26100 ", string.Empty));
+    SequenceEqual(new[] { entries[0] }, UupResultFilter.Apply(entries, "26100", " 24h2 cumulative "));
+    SequenceEqual(new[] { entries[2], entries[3] }, UupResultFilter.Apply(entries, "25H2", string.Empty));
+    Equal(0, UupResultFilter.Apply(entries, "26100", "25H2").Count);
+    Equal(4, entries.Count);
+}
+
+static void ArchitectureAttributes()
+{
+    var architectures = new[]
+    {
+        (Name: "amd64", Machine: MachineType.amd64, Reported: "AMD64"),
+        (Name: "arm64", Machine: MachineType.arm64, Reported: "ARM64"),
+        (Name: "x86", Machine: MachineType.x86, Reported: "X86"),
+        (Name: "arm", Machine: MachineType.arm, Reported: "ARM")
+    };
+
+    foreach (var architecture in architectures)
+    {
+        Equal(architecture.Name, UupQueryParser.ParseArchitecture(architecture.Name));
+        var ctac = new CTAC(OSSkuId.Professional, "10.0.26100.1", architecture.Machine,
+            "Retail", string.Empty, "CB", "ge_release", "Production", false);
+        True(ctac.DeviceAttributes.Contains($"OSArchitecture={architecture.Reported}&", StringComparison.Ordinal),
+            $"CTAC did not report the selected {architecture.Name} architecture.");
+        True(ctac.DeviceAttributes.Contains("MediaVersion=10.0.26100.1&IsVbsEnabled=1", StringComparison.Ordinal),
+            "CTAC media version and VBS attributes must remain separate fields.");
+    }
 }
 
 static void SnapshotRoundTrip()
@@ -64,23 +140,45 @@ static void SnapshotRoundTrip()
         var snapshot = new UupScanSnapshot
         {
             TotalRequests = 2,
+            FailedRequests = 1,
             ReportingSku = "Professional",
             Architecture = "amd64",
             FlightRing = "Retail",
             CurrentBranch = "ge_release",
             PayloadFile = "scan.data.json.gz",
+            QueryProfiles = new List<UupQueryProfileSummary>
+            {
+                new() { Profile = "OSFlight | External | ni_release | Dev", ResultCount = 2, NewCount = 1, SkippedCount = 1 }
+            },
             Entries = new List<UupScanEntry>
             {
-                new() { Title = "Build 26100", UpdateId = "abc", Build = "10.0.26100.1", Filter = "OSFlight" }
+                new()
+                {
+                    Title = "Build 26100", UpdateId = "abc", Build = "10.0.26100.1",
+                    PayloadKey = "abc|3",
+                    ReleaseVersion = "25H2", Revision = "3", FlightRing = "External",
+                    Profiles = new List<string> { "OSFlight | External | ni_release | Dev" },
+                    EstimatedDownloadBytes = 1024, Filter = "OSFlight"
+                }
             }
         };
         File.WriteAllText(path, JsonSerializer.Serialize(snapshot));
         var loaded = new UupIntegrationService().LoadSnapshot(path);
         Equal(2, loaded.TotalRequests);
+        Equal(1, loaded.FailedRequests);
         Equal("amd64", loaded.Architecture);
         Equal("abc", loaded.Entries.Single().UpdateId);
+        Equal("abc|3", loaded.Entries.Single().PayloadKey);
         Equal("10.0.26100.1", loaded.Entries.Single().Build);
         Equal("scan.data.json.gz", loaded.PayloadFile);
+        Equal("25H2", loaded.Entries.Single().ReleaseVersion);
+        Equal("3", loaded.Entries.Single().Revision);
+        Equal("External", loaded.Entries.Single().FlightRing);
+        True(loaded.Entries.Single().DetailsSummary.Contains("估算下载：1 KiB", StringComparison.Ordinal),
+            "Entry details should show the estimated download size.");
+        Equal(2, loaded.QueryProfiles.Single().ResultCount);
+        Equal(1, loaded.QueryProfiles.Single().SkippedCount);
+        SequenceEqual(loaded.Entries, UupResultFilter.Apply(loaded.Entries, "26100", "Build 26100"));
     }
     finally { Directory.Delete(root, true); }
 }
@@ -111,18 +209,63 @@ static async Task BridgeCancellationAndErrors()
         File.WriteAllText(executable, string.Empty);
         File.WriteAllText(payload, "offline-test-payload");
         var snapshot = new UupScanSnapshot { SnapshotPath = Path.Combine(root, "scan.json"), PayloadFile = "payload.gz", Architecture = "amd64" };
+
+        var attempts = 0;
+        string[]? lastDownloadArguments = null;
+        var retrying = new UupBridgeService(executable, (_, _, _) =>
+        {
+            attempts++;
+            return attempts < 3
+                ? Task.FromException(new InvalidOperationException("temporary bridge failure"))
+                : Task.CompletedTask;
+        });
+        var capturing = new UupBridgeService(executable, (arguments, _, _) =>
+        {
+            lastDownloadArguments = arguments;
+            return Task.CompletedTask;
+        });
+        await capturing.DownloadAsync(snapshot, new UupScanEntry { UpdateId = "id", PayloadKey = "id|2" }, root, "en-US", null, CancellationToken.None);
+        Equal("id|2", lastDownloadArguments?[2]);
+        Equal("en-US", lastDownloadArguments?[5]);
+
+        await retrying.DownloadAsync(snapshot, new UupScanEntry { UpdateId = "id" }, root, string.Empty, null, CancellationToken.None);
+        Equal(3, attempts);
+
+        var languageReader = new UupBridgeService(executable, (arguments, _, _) =>
+        {
+            Equal("languages", arguments[0]);
+            Equal("id|2", arguments[2]);
+            File.WriteAllText(arguments[3], JsonSerializer.Serialize(new[] { "en-US", "de-DE" }));
+            return Task.CompletedTask;
+        });
+        SequenceEqual(new[] { "en-US", "de-DE" },
+            await languageReader.GetAvailableLanguagesAsync(
+                snapshot, new UupScanEntry { UpdateId = "id", PayloadKey = "id|2" }, null, CancellationToken.None));
+
+        attempts = 0;
+        var exhausted = new UupBridgeService(executable, (_, _, _) =>
+        {
+            attempts++;
+            return Task.FromException(new InvalidOperationException("persistent bridge failure"));
+        });
+        var retryError = await ThrowsAsync<IOException>(() =>
+            exhausted.DownloadAsync(snapshot, new UupScanEntry { UpdateId = "id" }, root, string.Empty, null, CancellationToken.None));
+        True(retryError.Message.Contains("3 次尝试", StringComparison.Ordinal),
+            "Final download error should report the bounded attempt count.");
+        Equal(3, attempts);
+
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
         var cancelling = new UupBridgeService(executable,
             (_, _, token) => Task.FromCanceled(token));
         await ThrowsAsync<OperationCanceledException>(() =>
-            cancelling.DownloadAsync(snapshot, new UupScanEntry { UpdateId = "id" }, root, null, cancellation.Token));
+            cancelling.DownloadAsync(snapshot, new UupScanEntry { UpdateId = "id" }, root, string.Empty, null, cancellation.Token));
 
         var failing = new UupBridgeService(executable,
             (_, _, _) => Task.FromException(new InvalidOperationException("bridge exit code 7")));
-        var error = await ThrowsAsync<InvalidOperationException>(() =>
-            failing.DownloadAsync(snapshot, new UupScanEntry { UpdateId = "id" }, root, null, CancellationToken.None));
-        Equal("bridge exit code 7", error.Message);
+        var error = await ThrowsAsync<IOException>(() =>
+            failing.DownloadAsync(snapshot, new UupScanEntry { UpdateId = "id" }, root, string.Empty, null, CancellationToken.None));
+        Equal("bridge exit code 7", error.InnerException?.Message);
     }
     finally { Directory.Delete(root, true); }
 }
@@ -159,10 +302,13 @@ static void MediaConversionPreflight()
         File.WriteAllText(Path.Combine(input, "payload.cab"), "local fixture");
         var converter = Path.Combine(root, "UUPMediaConverter.exe");
         File.WriteAllText(converter, "not executable; preflight only");
+        var cdImageDirectory = Path.Combine(root, "CDImage");
+        Directory.CreateDirectory(cdImageDirectory);
+        File.WriteAllText(Path.Combine(cdImageDirectory, "cdimage.exe"), "preflight fixture");
         var iso = Path.Combine(root, "exists.iso");
         File.WriteAllText(iso, "preserve existing output");
-        var request = new UupMediaConversionRequest(converter, input, iso, temp, "en-US", "");
-        var report = UupMediaConversionService.Preflight(request, _ => long.MaxValue);
+        var request = new UupMediaConversionRequest(input, iso, temp, "en-US", "");
+        var report = UupMediaConversionService.Preflight(request, _ => long.MaxValue, converter);
         True(!report.IsReady, "Preflight must block overwriting an existing ISO.");
         True(report.Errors.Any(error => error.Contains("already exists", StringComparison.OrdinalIgnoreCase)),
             "Existing ISO overwrite hazard was not surfaced.");
@@ -170,30 +316,29 @@ static void MediaConversionPreflight()
             "Preflight should expose its conservative working-space estimate.");
         File.Delete(iso);
         File.WriteAllText(Path.Combine(temp, "occupied.tmp"), "keep");
-        report = UupMediaConversionService.Preflight(request with { IsoPath = iso }, _ => long.MaxValue);
+        report = UupMediaConversionService.Preflight(request with { IsoPath = iso }, _ => long.MaxValue, converter);
         True(report.Errors.Any(error => error.Contains("empty temporary", StringComparison.OrdinalIgnoreCase)),
             "Non-empty temporary directory must block conversion.");
 
         File.Delete(Path.Combine(temp, "occupied.tmp"));
         report = UupMediaConversionService.Preflight(request with { IsoPath = iso },
-            _ => report.EstimatedRequiredBytes + 1024 * 1024 * 1024);
+            _ => report.EstimatedRequiredBytes + 1024 * 1024 * 1024, converter);
         True(report.Errors.Any(error => error.Contains("combined estimated requirement", StringComparison.OrdinalIgnoreCase)),
             "Same-volume temp and output space demands must be combined.");
 
         var invalid = UupMediaConversionService.Preflight(new UupMediaConversionRequest(
-            Path.Combine(root, "missing.exe"), Path.Combine(root, "missing-input"),
-            Path.Combine(root, "bad-output.bin"), Path.Combine(root, "missing-temp"), " ", ""),
-            _ => 0);
+            Path.Combine(root, "missing-input"), Path.Combine(root, "bad-output.bin"),
+            Path.Combine(root, "missing-temp"), " ", ""), _ => 0, Path.Combine(root, "missing.exe"));
         True(invalid.Errors.Any(error => error.Contains("converter", StringComparison.OrdinalIgnoreCase)), "Missing converter was not rejected.");
         True(invalid.Errors.Any(error => error.Contains("input directory", StringComparison.OrdinalIgnoreCase)), "Missing UUP input was not rejected.");
         True(invalid.Errors.Any(error => error.Contains("language", StringComparison.OrdinalIgnoreCase)), "Invalid language was not rejected.");
         True(invalid.Errors.Any(error => error.Contains(".iso", StringComparison.OrdinalIgnoreCase)), "Invalid ISO extension was not rejected.");
         var malformed = UupMediaConversionService.Preflight(new UupMediaConversionRequest(
-            converter, input, "\0bad.iso", temp, "en-US", ""), _ => long.MaxValue);
+            input, "\0bad.iso", temp, "en-US", ""), _ => long.MaxValue, converter);
         True(!malformed.IsReady && malformed.Errors.Any(error => error.Contains("Invalid conversion path", StringComparison.OrdinalIgnoreCase)),
             "Malformed output paths should be returned as explicit preflight errors.");
 
-        var command = UupMediaConversionService.CreateStartInfo(request with { IsoPath = iso, Edition = "Professional" });
+        var command = UupMediaConversionService.CreateStartInfo(request with { IsoPath = iso, Edition = "Professional" }, converter);
         True(!command.UseShellExecute, "Converter must run without shell invocation.");
         True(command.ArgumentList.Contains("--no-key-prompt"), "Redirected conversion must disable the upstream keypress prompt.");
         True(command.ArgumentList.Contains("--uup-path") && command.ArgumentList.Contains(input), "CLI must pass UUP input as a distinct argument.");
@@ -1423,7 +1568,7 @@ static void CabinetDecompression()
 
             string outDir = Path.Combine(root, "out-" + stem);
             Directory.CreateDirectory(outDir);
-            Cabinet.CabinetExtractor.ExtractCabinet(cabPath, outDir);
+            UupCabinet::Cabinet.CabinetExtractor.ExtractCabinet(cabPath, outDir);
 
             foreach (var (name, data) in files)
             {
@@ -1515,7 +1660,7 @@ static void CabExtractionAgainstExpand()
         try
         {
             using FileStream fs = File.OpenRead(cab);
-            Cabinet.Cabinet cabReader = new(fs);
+            UupCabinet::Cabinet.Cabinet cabReader = new(fs);
             cix = cabReader.Files.Any(f => Path.GetFileName(f.FileName)
                 .Equals("_manifest_.cix.xml", StringComparison.OrdinalIgnoreCase)) ? "yes" : "";
         }
@@ -1625,4 +1770,3 @@ static async Task<TException> ThrowsAsync<TException>(Func<Task> action) where T
     catch (TException ex) { return ex; }
     throw new InvalidOperationException($"Expected {typeof(TException).Name}.");
 }
-

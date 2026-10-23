@@ -1,0 +1,1 @@
+﻿Microsoft.Wim.WimgApi.FILETIME.FILETIME() -> void

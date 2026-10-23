@@ -35,8 +35,12 @@ The application UI is in Chinese.
     addonkit README.
   - An image source: FFU, VHD/VHDX, WIM, or a mounted directory.
   - Visual Studio 2022 with the C++ workload to build the native servicing stack.
-- The optional UUP-to-ISO workflow needs a separately built `UUPMediaConverter.exe` **and** a
-  .NET 10 runtime. Neither is shipped here (see [Third-party code and licensing](#third-party-code-and-licensing)).
+- The optional UUP-to-ISO workflow builds and deploys `UUPMediaConverter` from the vendored source;
+  users no longer select a converter executable. It requires the .NET 10 Runtime. The upstream
+  CDImage utility is not included because its redistribution terms are unclear; provide it at
+  `ThirdParty/UUPMediaCreator/src/UnifiedUpdatePlatform.Media.Creator/CDImage/cdimage.exe` or
+  conversion preflight will block the operation (see
+  [Third-party code and licensing](#third-party-code-and-licensing)).
 
 UUP queries and downloads run only when the user asks for them; nothing is queried or downloaded at
 startup.
@@ -98,7 +102,7 @@ additive — anything the in-app downloader has already placed under `addonkit\a
 | CBS | `Views/Cbs/` | CBS servicing against a mounted image. |
 | FFU browser | `Views/FFUBrowser/` | Browse FFU partitions, with a hex viewer. |
 | updateapp | `Views/UpdateAppView.xaml` | Dispatch the version-specific `updateapp.exe` commands, rendered per build from that build's official usage text, with per-command argument template, category and risk level. |
-| UUP | `Views/UupView.xaml` | Query Microsoft UUP by SKU/architecture/ring/branch, pick an update, save and reload snapshots, download it, and optionally convert to ISO through an external converter. |
+| UUP | `Views/UupView.xaml` | Query Microsoft UUP by SKU/architecture (AMD64, ARM64, x86, ARM); advanced options allow a reporting version, ring and branches, while omitted branches trigger scans across known Retail/Insider branch profiles. Locally filter by target NT Build and title, select a language from update metadata, save/reload snapshots, and optionally convert to ISO with the source-built converter. Scans, downloads and conversion run in background processes, with logs in a dedicated window. |
 | SxS | `Views/SxsView.xaml` | Non-executing preflight/preview of a selected image and output directory. It runs no scripts and creates no output. |
 | addonkit | `Views/AddonKitView.xaml` | Microsoft `iot-adk-addonkit` front end: module/ADK status, sample workspace discovery, preflight gating, and elevated one-click build commands with live transcript logging. |
 | Tools | `Views/Tools/` | Offline registry editor, driver extractor, firmware parser, WinSxS hash calculator, dependency viewer, component-store verifier, and the ADK tool downloader. |
@@ -126,7 +130,9 @@ Cross-cutting behaviour:
   storage-pool adapters, CAB and DCM compression, cat/signature rebuilding, the `CbsxCli` and
   `SxSFounderCli` command-line tools). It has its own README at `MobilePackageGen/readme.md`.
 - `Source/Native/` — the project-owned C++ servicing stack and the diagnostic registry hook.
-- `ThirdParty/` — the vendored UUP source closure used by `UupBridge` (`ThirdParty/UUPMediaCreator/`).
+- `ThirdParty/` — the vendored UUPMediaCreator source tree (`ThirdParty/UUPMediaCreator/`), including
+  the upstream `UUPDownload` source project. OCID's `UupBridge` builds from these C# project sources;
+  it does not rely on checked-in precompiled DLLs.
 - `Schemas/`, `Assets/` — the OEMInput XML schemas and the UI assets, project templates and
   device-layout validation rule sets.
 
@@ -344,7 +350,7 @@ ships; everything else is either project-owned or taken from an installation the
 | iot-adk-addonkit 17763-v7 | [microsoft/iot-adk-addonkit](https://github.com/microsoft/iot-adk-addonkit) | `addonkit/` — PowerShell IoT Core imaging toolchain and its sample workspace | MIT (`addonkit/LICENSE`); Microsoft's own bundled notice list at `addonkit/TPN`. The sample certificates and `.pfx` files inside are Microsoft's publicly published sample keys shipped with the official toolkit, not private credentials. |
 | MobilePackageGen (fork) | [MobileTooling/MobilePackageGen](https://github.com/MobileTooling/MobilePackageGen) → [DF4D3110/MobilePackageGen](https://github.com/DF4D3110/MobilePackageGen) | `MobilePackageGen/` — CLI, WinForms GUI, `CbsxCli`, `SxSFounderCli`, image adapters, CAB/DCM compression, cat/signature rebuilding | MIT. Full component table in `MobilePackageGen/readme.md`; license text in `MobilePackageGen/license.md`. |
 | WSK Tools v1.0.4 | [gus33000/WSK](https://github.com/gus33000/WSK) | the baseline the MobilePackageGen fork was built from | MIT |
-| UUPMediaCreator | [OSTooling/UUPMediaCreator](https://github.com/OSTooling/UUPMediaCreator) | `ThirdParty/UUPMediaCreator/` — source closure; only the projects `UupBridge` needs, with the upstream license and README retained | MIT. `src/Cabinet/Xna/LzxDecoder.cs` is dual-licensed LGPL-2.1 or MS-PL and keeps its original header. No converter or `cdimage.exe` binary is redistributed. |
+| UUPMediaCreator | [OSTooling/UUPMediaCreator](https://github.com/OSTooling/UUPMediaCreator) | `ThirdParty/UUPMediaCreator/` — source and required projects for both `UupBridge` and the media converter, with upstream license and README retained; the converter is built from source rather than checked-in binaries | MIT. `src/Cabinet/Xna/LzxDecoder.cs` is dual-licensed LGPL-2.1 or MS-PL and keeps its original header. The upstream `cdimage.exe` is not checked in and must be provided by the local build environment. |
 | NSudo (elevation) | [M2TeamArchived/NSudo](https://github.com/M2TeamArchived/NSudo) (archived; `NSudoAPI.dll` built from the [UUP-Project/NSudo](https://github.com/UUP-Project/NSudo) branch) | C# binding at `MobilePackageGen/MobilePackageGen.Common/NSudo`; the DLL itself is **not** shipped | MIT |
 | wcpex | [smx-smx/wcpex](https://github.com/smx-smx/wcpex) | `Tools/wcpex/wcpex.exe` + `wcp.dll`, embedded as resources and extracted at run time to decompress DCM-compressed manifests | Prebuilt binaries; the upstream project ships no license file, so they are retained unmodified and are not part of the build. |
 | DevImgGen | [mediaexplorer74/DevImgGen](https://github.com/mediaexplorer74/DevImgGen) (fork: [DF4D3110/DevImgGen](https://github.com/DF4D3110/DevImgGen)) | design reference for the image-build page entry, recorded in the file header of `ViewModels/ImageBuild/ImageBuildViewModel.cs` | MIT. No code is copied; nothing from it is distributed. |
@@ -365,7 +371,8 @@ codecs are not part of it: MSZIP/LZX are project-owned (`Source/Managed/OcidCabi
   GitHub Release tagged `adktool`.
 - `CbsExploder` and `SxSFounder` executables — their independent redistribution terms have not been
   established.
-- A UUP-to-ISO converter and its .NET 10 runtime — the user must supply a separately built one.
+- The UUP-to-ISO converter is built from vendored source; the .NET 10 Runtime and upstream
+  `cdimage.exe` (not checked in due unclear redistribution terms) must be provided by the user environment.
 - The GPL-3.0 `pureSxS` / `explodeSxS` script trees that were previously vendored under
   `ThirdParty/SxS/` have been **removed** from the repository. The behaviours they documented are
   re-implemented in project code (`Services/PureSxsService.cs`,

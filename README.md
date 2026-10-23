@@ -28,8 +28,10 @@ C++（见[自带服务栈](#自带服务栈进行中)）。
   - Windows 10 IoT Core Kits 1809（10.0.17763.x）：内置 addonkit shell 需要，见上游 addonkit README。
   - 一个镜像来源：FFU、VHD/VHDX、WIM，或已挂载的目录。
   - Visual Studio 2022 与 C++ 工作负载：构建原生服务栈需要。
-- 可选的「UUP 转 ISO」流程需要单独构建的 `UUPMediaConverter.exe`**以及**.NET 10 运行时；
-  两者都不随本仓库分发（见[第三方代码与许可](#第三方代码与许可)）。
+- 可选的「UUP 转 ISO」流程由本仓库中的 UUPMediaConverter 源码构建并随应用部署，用户无需选择转换器 EXE；
+  运行时需要 .NET 10 Runtime。上游 CDImage 工具因再分发条款不明不随仓库分发，需在源码树
+  `ThirdParty/UUPMediaCreator/src/UnifiedUpdatePlatform.Media.Creator/CDImage/cdimage.exe` 提供，
+  否则转换预检会明确阻止启动（见[第三方代码与许可](#第三方代码与许可)）。
 
 UUP 的查询与下载只会在用户主动发起时进行；启动时不查询、不下载任何东西。
 
@@ -88,7 +90,7 @@ dotnet run --project ".\Tests\OneCore.Image.Designer.OfflineTests.csproj" --conf
 | CBS | `Views/Cbs/` | 对已挂载镜像做 CBS 服务。 |
 | FFU 浏览 | `Views/FFUBrowser/` | 浏览 FFU 分区，带十六进制查看器。 |
 | updateapp | `Views/UpdateAppView.xaml` | 派发各版本专属的 `updateapp.exe` 命令：按该版本的官方用法文本逐版本渲染，每个命令带参数模板、分类与风险等级。 |
-| UUP | `Views/UupView.xaml` | 按 SKU/架构/通道/分支查询微软 UUP，挑选更新，保存与重载快照，下载，并可选地经外部转换器转成 ISO。 |
+| UUP | `Views/UupView.xaml` | 按 SKU/架构查询微软 UUP（AMD64、ARM64、x86、ARM）；高级选项允许填写设备版本、通道和分支，不填分支时自动扫描一组已知 Retail/Insider 分支组合。目标 NT Build 与标题关键词用于本地筛选，下载语言从更新元数据读取并可选择，支持快照和源码构建的 ISO 转换器。查询、下载和转换均在后台进程执行，日志显示在单独窗口。 |
 | SxS | `Views/SxsView.xaml` | 对选定镜像与输出目录做**不执行**的预检/预览：不跑脚本，不产生输出。 |
 | addonkit | `Views/AddonKitView.xaml` | 微软 `iot-adk-addonkit` 前端：模块/ADK 状态、示例工作区发现、预检门禁，以及提权的一键构建命令并实时回传日志。 |
 | 工具 | `Views/Tools/` | 离线注册表编辑器、驱动提取器、固件解析器、WinSxS 哈希计算器、依赖查看器、组件存储校验器，以及 ADK 工具下载器。 |
@@ -115,7 +117,8 @@ dotnet run --project ".\Tests\OneCore.Image.Designer.OfflineTests.csproj" --conf
   CAB 与 DCM 压缩、cat/签名重建，以及 `CbsxCli`、`SxSFounderCli` 两个命令行工具）。它有自己的
   README：`MobilePackageGen/readme.md`。
 - `Source/Native/` —— 项目自有的 C++ 服务栈，以及诊断用的注册表钩子。
-- `ThirdParty/` —— `UupBridge` 使用的内置 UUP 源码闭包（`ThirdParty/UUPMediaCreator/`）。
+- `ThirdParty/` —— 内置 UUPMediaCreator 源码树（`ThirdParty/UUPMediaCreator/`），包含原始
+  `UUPDownload` 源码项目；OCID 的 `UupBridge` 从 vendored C# 项目源码编译，不依赖提交的预编译 DLL。
 - `Schemas/`、`Assets/` —— OEMInput XML schema，以及界面资源、工程模板与设备布局校验规则集。
 
 ### 按年代选择的 OEMInput 校验
@@ -346,7 +349,7 @@ Release 上，标签为 `adktool`。
 | iot-adk-addonkit 17763-v7 | [microsoft/iot-adk-addonkit](https://github.com/microsoft/iot-adk-addonkit) | `addonkit/` —— PowerShell 版 IoT Core 镜像工具链及其示例工作区 | MIT（`addonkit/LICENSE`）；微软自带的第三方声明清单见 `addonkit/TPN`。其中的示例证书与 `.pfx` 是微软随官方工具链公开发布的示例密钥，**不是**私密凭据。 |
 | MobilePackageGen（fork） | [MobileTooling/MobilePackageGen](https://github.com/MobileTooling/MobilePackageGen) → [DF4D3110/MobilePackageGen](https://github.com/DF4D3110/MobilePackageGen) | `MobilePackageGen/` —— CLI、WinForms GUI、`CbsxCli`、`SxSFounderCli`、各类镜像适配器、CAB/DCM 压缩、cat/签名重建 | MIT。完整组件表见 `MobilePackageGen/readme.md`，许可正文见 `MobilePackageGen/license.md`。 |
 | WSK Tools v1.0.4 | [gus33000/WSK](https://github.com/gus33000/WSK) | MobilePackageGen fork 的原始基线 | MIT |
-| UUPMediaCreator | [OSTooling/UUPMediaCreator](https://github.com/OSTooling/UUPMediaCreator) | `ThirdParty/UUPMediaCreator/` —— 源码闭包；只含 `UupBridge` 需要的工程，保留上游许可与 README | MIT。`src/Cabinet/Xna/LzxDecoder.cs` 为 LGPL-2.1 或 MS-PL 双许可，保留其原始文件头。不重分发任何转换器或 `cdimage.exe` 二进制。 |
+| UUPMediaCreator | [OSTooling/UUPMediaCreator](https://github.com/OSTooling/UUPMediaCreator) | `ThirdParty/UUPMediaCreator/` —— UUP 桥接与媒体转换器的源码及所需工程，保留上游许可与 README；转换器从源码构建，不签入其预编译输出 | MIT。`src/Cabinet/Xna/LzxDecoder.cs` 为 LGPL-2.1 或 MS-PL 双许可，保留其原始文件头。上游 `cdimage.exe` 不签入仓库；本地构建/运行需自行提供。 |
 | NSudo（提权） | [M2TeamArchived/NSudo](https://github.com/M2TeamArchived/NSudo)（已归档；`NSudoAPI.dll` 用 [UUP-Project/NSudo](https://github.com/UUP-Project/NSudo) 分支构建） | C# 绑定位于 `MobilePackageGen/MobilePackageGen.Common/NSudo`；DLL 本身**不**随仓库分发 | MIT |
 | wcpex | [smx-smx/wcpex](https://github.com/smx-smx/wcpex) | `Tools/wcpex/wcpex.exe` + `wcp.dll`，以内嵌资源方式打包、运行期释放，用于解压 DCM 压缩的清单 | 预编译二进制；上游未随附许可文件，因此这里按原样保留、不参与构建。 |
 | DevImgGen | [mediaexplorer74/DevImgGen](https://github.com/mediaexplorer74/DevImgGen)（fork：[DF4D3110/DevImgGen](https://github.com/DF4D3110/DevImgGen)） | 镜像构建页入口的**设计参考**，记录在 `ViewModels/ImageBuild/ImageBuildViewModel.cs` 的文件头注释里 | MIT。未复制任何代码，也未分发其中任何内容。 |
@@ -366,7 +369,7 @@ SharpZipLib 与 XNA `LzxDecoder`。
 - 应用内下载器使用的分版本 ADK 工具 zip，作为资源托管在本仓库的 GitHub Release 上（标签
   `adktool`）。
 - `CbsExploder` 与 `SxSFounder` 可执行文件——其独立的再分发条款尚未确定。
-- UUP 转 ISO 转换器及其 .NET 10 运行时——需用户自行提供单独构建的版本。
+- UUP 转 ISO 流程使用源码构建的内置转换器；.NET 10 Runtime 与未随仓库分发的上游 `cdimage.exe` 仍需由用户环境提供。
 - 曾在 `ThirdParty/SxS/` 下内置的 GPL-3.0 `pureSxS` / `explodeSxS` 脚本树已从仓库中**移除**；它们
   所记录的行为已在项目代码中重写（`Services/PureSxsService.cs`、
   `Services/ExplodeSxSNativeService.cs`，两者都在文件头注明了来源）。SxS 页面仍是只读预检，不执行

@@ -41,8 +41,7 @@ namespace UnifiedUpdatePlatform.Services.WindowsUpdate
         private static readonly HttpClient httpClient = new(new HttpClientHandler()
         {
             AllowAutoRedirect = false,
-            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
-            ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator // Linux
+            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
         });
 
         #region Data manipulation

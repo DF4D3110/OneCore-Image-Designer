@@ -19,15 +19,17 @@ namespace OneCore_Image_Designer.ViewModels
         private readonly IntegrationArtifactRegistry _artifacts = IntegrationArtifactRegistry.Shared;
         private CancellationTokenSource? _cts;
         private CancellationTokenSource? _conversionCts;
+        private CancellationTokenSource? _languageCts;
 
         [ObservableProperty] private string _snapshotPath = string.Empty;
         [ObservableProperty] private string _outputDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "UUP Downloads");
-        [ObservableProperty] private string _status = "选择产品线和更新通道后开始扫描";
+        [ObservableProperty] private string _status = "选择 SKU 和架构后开始扫描";
         [ObservableProperty] private UupScanSnapshot? _snapshot;
+        [NotifyCanExecuteChangedFor(nameof(ScanCommand))]
+        [NotifyCanExecuteChangedFor(nameof(DownloadSelectedCommand))]
         [NotifyCanExecuteChangedFor(nameof(StartConversionCommand))]
         [ObservableProperty] private bool _isBusy;
-        [ObservableProperty] private string _converterExecutablePath = string.Empty;
         [ObservableProperty] private string _conversionInputDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "UUP Downloads");
         [ObservableProperty] private string _conversionIsoPath = Path.Combine(
@@ -35,18 +37,29 @@ namespace OneCore_Image_Designer.ViewModels
         [ObservableProperty] private string _conversionTemporaryDirectory = string.Empty;
         [ObservableProperty] private string _conversionLanguageCode = "en-US";
         [ObservableProperty] private string _conversionEdition = string.Empty;
-        [ObservableProperty] private string _conversionPreflightSummary = "选择 UUP 输入目录、转换器和空的临时目录后运行预检。";
-        [ObservableProperty] private string _conversionStatus = "转换器不会随应用打包；需提供兼容的 UUPMediaConverter.exe。";
+        [ObservableProperty] private string _conversionPreflightSummary = "选择 UUP 输入目录和空的临时目录后运行预检。";
+        [ObservableProperty] private string _conversionStatus = "内置 UUP 转换器就绪；请先运行预检。";
         [ObservableProperty] private bool _conversionPreflightReady;
         [ObservableProperty]
+        [NotifyCanExecuteChangedFor(nameof(ScanCommand))]
+        [NotifyCanExecuteChangedFor(nameof(DownloadSelectedCommand))]
         [NotifyCanExecuteChangedFor(nameof(StartConversionCommand))]
         private bool _isCheckingConversionPreflight;
         [ObservableProperty]
+        [NotifyCanExecuteChangedFor(nameof(ScanCommand))]
+        [NotifyCanExecuteChangedFor(nameof(DownloadSelectedCommand))]
         [NotifyCanExecuteChangedFor(nameof(StartConversionCommand))]
         private bool _isConverting;
         [ObservableProperty]
         [NotifyCanExecuteChangedFor(nameof(DownloadSelectedCommand))]
         private UupScanEntry? _selectedEntry;
+        [ObservableProperty]
+        [NotifyCanExecuteChangedFor(nameof(DownloadSelectedCommand))]
+        private bool _isLoadingLanguages;
+        [ObservableProperty]
+        [NotifyCanExecuteChangedFor(nameof(DownloadSelectedCommand))]
+        private string _selectedDownloadLanguage = string.Empty;
+        [ObservableProperty] private string _downloadLanguageStatus = "选择更新以读取可用语言";
 
         public UupSkuOption[] ReportingSkuChoices { get; } =
         [
@@ -77,32 +90,69 @@ namespace OneCore_Image_Designer.ViewModels
             new("PPIPro", "PPIPro — Surface Hub"),
             new("WNC", "WNC — Windows 365 / Cloud PC")
         ];
-        public string[] ArchitectureChoices { get; } = ["amd64", "arm64", "x86", "arm"];
-        public string[] FlightRingChoices { get; } = ["Retail", "External", "WIS", "WIF", "RP"];
-        public string[] FlightingBranchChoices { get; } =
-            ["", "ReleasePreview", "Beta", "Dev", "CanaryChannel"];
+        public string[] ArchitectureChoices { get; } = ["arm64", "amd64", "x86", "arm"];
+        public UupQueryOption[] FlightRingChoices { get; } =
+        [
+            new(string.Empty, "自动（正式版 / Insider）"),
+            new("Retail", "Retail"),
+            new("External", "External"),
+            new("WIS", "WIS"),
+            new("WIF", "WIF"),
+            new("RP", "RP")
+        ];
         [ObservableProperty] private string _selectedSku = "Professional";
         [ObservableProperty] private string _selectedArchitecture = "amd64";
-        [ObservableProperty] private string _selectedFlightRing = "Retail";
+        [ObservableProperty] private string _selectedFlightRing = string.Empty;
+        [ObservableProperty] private string _reportingVersion = string.Empty;
+        [ObservableProperty] private string _currentBranch = string.Empty;
         [ObservableProperty] private string _selectedFlightingBranch = string.Empty;
-        [ObservableProperty] private string _reportingVersion = "10.0.26100.1";
-        [ObservableProperty] private string _currentBranch = "ge_release";
         [ObservableProperty] private bool _syncCurrentVersionOnly;
         [ObservableProperty] private bool _includeProductRelease = true;
         [ObservableProperty] private bool _includeOsFlight = true;
+        [ObservableProperty] private string _targetBuildFilter = string.Empty;
+        [ObservableProperty] private string _titleKeywordFilter = string.Empty;
 
         public ObservableCollection<string> ConversionChecks { get; } = new();
         public ObservableCollection<UupScanEntry> Entries { get; } = new();
+        public ObservableCollection<UupScanEntry> FilteredEntries { get; } = new();
+        public ObservableCollection<UupLanguageOption> AvailableDownloadLanguages { get; } =
+            new() { new UupLanguageOption(string.Empty, "全部语言") };
         public bool HasEntries => Entries.Count > 0;
+        public bool HasVisibleEntries => FilteredEntries.Count > 0;
+        public string ResultCountText => Entries.Count == FilteredEntries.Count
+            ? $"{Entries.Count} 项"
+            : $"显示 {FilteredEntries.Count} / {Entries.Count} 项";
+        public string EmptyResultsMessage => HasEntries
+            ? "没有符合当前 Build / 标题条件的更新"
+            : "还没有查询结果";
+        public string QuerySummaryText
+        {
+            get
+            {
+                var profiles = Snapshot?.QueryProfiles;
+                if (Snapshot == null || profiles == null || profiles.Count == 0) return string.Empty;
+                var successful = profiles.Where(profile => string.IsNullOrEmpty(profile.Error)).ToArray();
+                var rawResults = successful.Sum(profile => profile.ResultCount);
+                var skipped = successful.Sum(profile => profile.SkippedCount);
+                var repeated = Math.Max(0, rawResults - Entries.Count - skipped);
+                return $"查询组合 {successful.Length}/{profiles.Count} 成功；服务端返回 {rawResults} 条，合并为 {Entries.Count} 个更新身份（ID + 修订号），重复 {repeated} 条，缺少身份跳过 {skipped} 条。";
+            }
+        }
 
-        [RelayCommand]
+        partial void OnTargetBuildFilterChanged(string value) => RefreshFilteredEntries();
+        partial void OnTitleKeywordFilterChanged(string value) => RefreshFilteredEntries();
+        partial void OnSelectedEntryChanged(UupScanEntry? value) => _ = LoadAvailableLanguagesAsync(value);
+
+        [RelayCommand(CanExecute = nameof(CanScan))]
         private async Task Scan()
         {
             string version;
             string[] filters;
             try
             {
-                version = UupQueryParser.ParseVersion(ReportingVersion);
+                version = string.IsNullOrWhiteSpace(ReportingVersion)
+                    ? string.Empty
+                    : UupQueryParser.ParseVersion(ReportingVersion);
                 UupQueryParser.ParseArchitecture(SelectedArchitecture);
                 filters = UupQueryParser.ParseFilters(new[]
                 {
@@ -127,20 +177,20 @@ namespace OneCore_Image_Designer.ViewModels
                     ReportingVersion = version,
                     Architecture = UupQueryParser.ParseArchitecture(SelectedArchitecture),
                     FlightRing = SelectedFlightRing,
-                    FlightingBranchName = SelectedFlightingBranch,
+                    FlightingBranchName = SelectedFlightingBranch.Trim(),
                     CurrentBranch = CurrentBranch.Trim(),
                     SyncCurrentVersionOnly = SyncCurrentVersionOnly,
                     Filters = filters
                 };
-                var snapshot = await _bridge.ScanAsync(request, new Progress<string>(Log), token);
+                var snapshot = await _bridge.ScanAsync(request, CreateLogProgress(), token);
                 Snapshot = snapshot;
+                OnPropertyChanged(nameof(QuerySummaryText));
                 SnapshotPath = snapshot.SnapshotPath;
                 RegisterSnapshotArtifact(snapshot.SnapshotPath);
-                Entries.Clear();
-                foreach (var entry in snapshot.Entries) Entries.Add(entry);
-                SelectedEntry = Entries.FirstOrDefault();
-                OnPropertyChanged(nameof(HasEntries));
-                Status = $"扫描完成：找到 {Entries.Count} 个可选更新，快照已保存";
+                SetEntries(snapshot.Entries);
+                Status = snapshot.FailedRequests == 0
+                    ? $"扫描完成：找到 {Entries.Count} 个可选更新，快照已保存"
+                    : $"扫描部分完成：{Entries.Count} 个更新；{snapshot.FailedRequests}/{snapshot.TotalRequests} 个查询组合失败";
                 Log(Status);
             });
         }
@@ -148,9 +198,18 @@ namespace OneCore_Image_Designer.ViewModels
         [RelayCommand(CanExecute = nameof(CanDownloadSelected))]
         private async Task DownloadSelected()
         {
-            if (Snapshot == null || SelectedEntry == null) return;
+            var snapshot = Snapshot;
+            var selectedEntry = SelectedEntry;
+            var outputDirectory = OutputDirectory.Trim();
+            var downloadLanguage = SelectedDownloadLanguage;
+            if (snapshot == null || selectedEntry == null) return;
+            if (outputDirectory.Length == 0)
+            {
+                Fail("下载目录无效", new ArgumentException("请选择 UUP 下载输出目录。"));
+                return;
+            }
             var confirmation = MessageBox.Show(
-                $"将下载所选更新：\n\n{SelectedEntry.Title}\n\n输出目录：\n{OutputDirectory}",
+                $"将下载所选更新：\n\n{selectedEntry.Title}\n\n下载语言：{(string.IsNullOrEmpty(downloadLanguage) ? "全部语言" : downloadLanguage)}\n\n输出目录：\n{outputDirectory}",
                 "确认下载 UUP 更新", MessageBoxButton.OKCancel, MessageBoxImage.Information);
             if (confirmation != MessageBoxResult.OK) return;
             TaskHeader("UUP 下载");
@@ -158,18 +217,17 @@ namespace OneCore_Image_Designer.ViewModels
             {
                 await RunAsync(async token =>
                 {
-                    Directory.CreateDirectory(OutputDirectory);
-                    Status = $"开始下载：{SelectedEntry.Title}";
-                    await _bridge.DownloadAsync(Snapshot, SelectedEntry, OutputDirectory,
-                        new Progress<string>(Log), token);
+                    Status = $"开始下载：{selectedEntry.Title}";
+                    await _bridge.DownloadAsync(snapshot, selectedEntry, outputDirectory,
+                        downloadLanguage, CreateLogProgress(), token);
                     var artifact = _artifacts.Register(new IntegrationArtifact(
-                        IntegrationArtifactKind.UupPackage, OutputDirectory, $"Downloaded UUP files: {SelectedEntry.Title}",
-                        SelectedEntry.Build, Snapshot.Architecture));
+                        IntegrationArtifactKind.UupPackage, outputDirectory, $"Downloaded UUP files: {selectedEntry.Title}",
+                        selectedEntry.Build, snapshot.Architecture));
                     var preflight = _artifacts.Preflight(artifact);
                     Log(preflight.IsReady
                         ? $"已注册 UUP 下载产物：{artifact.Path}"
                         : $"UUP 下载产物预检警告：{string.Join("; ", preflight.Errors)}");
-                    Status = $"下载完成：{SelectedEntry.Title}";
+                    Status = $"下载完成：{selectedEntry.Title}";
                 });
             }
             finally { _taskSink?.Write("── 下载任务结束 ──"); }
@@ -190,31 +248,122 @@ namespace OneCore_Image_Designer.ViewModels
             return _taskSink;
         }
 
+        [RelayCommand]
+        private void ShowLog()
+        {
+            EnsureTaskLog();
+            _taskWin?.Activate();
+        }
+
         private void TaskHeader(string title)
         {
             EnsureTaskLog().Write($"=== {title} ===");
         }
 
-        private bool CanDownloadSelected() => !IsBusy && Snapshot != null && SelectedEntry != null;
+        private bool CanScan() => !IsBusy && !IsConverting && !IsCheckingConversionPreflight;
+
+        private bool CanDownloadSelected() =>
+            !IsBusy && !IsConverting && !IsCheckingConversionPreflight &&
+            !IsLoadingLanguages && Snapshot != null && SelectedEntry != null && FilteredEntries.Contains(SelectedEntry);
+
+        private async Task LoadAvailableLanguagesAsync(UupScanEntry? entry)
+        {
+            _languageCts?.Cancel();
+            _languageCts?.Dispose();
+            _languageCts = null;
+            IsLoadingLanguages = false;
+            AvailableDownloadLanguages.Clear();
+            AvailableDownloadLanguages.Add(new UupLanguageOption(string.Empty, "全部语言"));
+            SelectedDownloadLanguage = string.Empty;
+
+            var snapshot = Snapshot;
+            if (entry == null || snapshot == null) {
+                DownloadLanguageStatus = "选择更新以读取可用语言";
+                return;
+            }
+
+            var cancellation = new CancellationTokenSource();
+            _languageCts = cancellation;
+            IsLoadingLanguages = true;
+            DownloadLanguageStatus = "正在读取该更新的语言选项…";
+            try
+            {
+                var languages = await _bridge.GetAvailableLanguagesAsync(
+                    snapshot, entry, CreateLogProgress(), cancellation.Token);
+                if (!ReferenceEquals(_languageCts, cancellation)) return;
+
+                foreach (var language in languages)
+                {
+                    var displayName = GetLanguageDisplayName(language);
+                    AvailableDownloadLanguages.Add(new UupLanguageOption(language, $"{displayName} ({language})"));
+                }
+                if (languages.Length > 0)
+                    SelectedDownloadLanguage = languages[0];
+                DownloadLanguageStatus = languages.Length == 0
+                    ? "该更新未返回可用语言；请检查日志后重试或选择“全部语言”"
+                    : $"发现 {languages.Length} 个语言选项";
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+            }
+            catch (Exception ex)
+            {
+                if (!ReferenceEquals(_languageCts, cancellation)) return;
+                DownloadLanguageStatus = "语言列表读取失败；下载时将保留全部语言：" + ex.Message;
+                Log(DownloadLanguageStatus);
+            }
+            finally
+            {
+                if (ReferenceEquals(_languageCts, cancellation))
+                {
+                    _languageCts = null;
+                    cancellation.Dispose();
+                    IsLoadingLanguages = false;
+                }
+            }
+        }
+
+        [RelayCommand]
+        private Task ReloadAvailableLanguages() => LoadAvailableLanguagesAsync(SelectedEntry);
+
+        private static string GetLanguageDisplayName(string language)
+        {
+            try { return System.Globalization.CultureInfo.GetCultureInfo(language).DisplayName; }
+            catch (System.Globalization.CultureNotFoundException) { return language; }
+        }
+
+        private void SetEntries(System.Collections.Generic.IEnumerable<UupScanEntry> entries)
+        {
+            Entries.Clear();
+            foreach (var entry in entries) Entries.Add(entry);
+            SelectedEntry = null;
+            RefreshFilteredEntries();
+            OnPropertyChanged(nameof(HasEntries));
+            OnPropertyChanged(nameof(QuerySummaryText));
+        }
+
+        private void RefreshFilteredEntries()
+        {
+            var previousSelection = SelectedEntry;
+            FilteredEntries.Clear();
+            foreach (var entry in UupResultFilter.Apply(Entries, TargetBuildFilter, TitleKeywordFilter))
+                FilteredEntries.Add(entry);
+
+            SelectedEntry = previousSelection != null && FilteredEntries.Contains(previousSelection)
+                ? previousSelection
+                : FilteredEntries.FirstOrDefault();
+            OnPropertyChanged(nameof(HasVisibleEntries));
+            OnPropertyChanged(nameof(ResultCountText));
+            OnPropertyChanged(nameof(EmptyResultsMessage));
+            DownloadSelectedCommand.NotifyCanExecuteChanged();
+        }
 
         private UupMediaConversionRequest GetConversionRequest() => new(
-            ConverterExecutablePath,
             ConversionInputDirectory,
             ConversionIsoPath,
             ConversionTemporaryDirectory,
             ConversionLanguageCode,
             ConversionEdition);
-
-        [RelayCommand]
-        private void BrowseConverter()
-        {
-            var dialog = new Microsoft.Win32.OpenFileDialog
-            {
-                Title = "选择 UUPMediaConverter.exe",
-                Filter = "UUPMediaConverter (*.exe)|*.exe|所有文件 (*.*)|*.*"
-            };
-            if (dialog.ShowDialog() == true) ConverterExecutablePath = dialog.FileName;
-        }
 
         [RelayCommand]
         private void BrowseConversionInput()
@@ -256,7 +405,7 @@ namespace OneCore_Image_Designer.ViewModels
         {
             if (IsCheckingConversionPreflight) return;
             IsCheckingConversionPreflight = true;
-            ConversionStatus = "正在检查 UUP 文件、运行时和磁盘空间…";
+            ConversionStatus = "正在检查内置转换器、UUP 文件和磁盘空间…";
             try
             {
                 var request = GetConversionRequest();
@@ -287,17 +436,18 @@ namespace OneCore_Image_Designer.ViewModels
             await CheckConversionPreflight();
             if (!ConversionPreflightReady) return;
             var confirmation = MessageBox.Show(
-                $"UUPMediaConverter 将读取：\n{ConversionInputDirectory}\n\n并新建：\n{ConversionIsoPath}\n\n临时文件目录：\n{ConversionTemporaryDirectory}\n\n继续启动外部转换器？",
+                $"内置 UUP 转换功能将读取：\n{ConversionInputDirectory}\n\n并新建：\n{ConversionIsoPath}\n\n临时文件目录：\n{ConversionTemporaryDirectory}\n\n继续转换？",
                 "确认 UUP 媒体转换", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
             if (confirmation != MessageBoxResult.OK) return;
 
             _conversionCts = new CancellationTokenSource();
             IsConverting = true;
             TaskHeader("UUP 媒体转换");
-            ConversionStatus = "正在转换…可使用取消按钮终止外部进程。";
+            ConversionStatus = "正在转换…可使用取消按钮终止转换进程。";
             try
             {
-                var progress = new Progress<string>(line => Log($"[Media] {line}"));
+                var logSink = EnsureTaskLog();
+                var progress = new InlineProgress<string>(line => logSink.Write($"[Media] {line}"));
                 var exitCode = await UupMediaConversionService.RunAsync(
                     GetConversionRequest(), progress, _conversionCts.Token);
                 if (exitCode != 0)
@@ -347,12 +497,12 @@ namespace OneCore_Image_Designer.ViewModels
                 SnapshotPath = dialog.FileName;
                 Snapshot = _service.LoadSnapshot(dialog.FileName);
                 Snapshot.SnapshotPath = dialog.FileName;
+                OnPropertyChanged(nameof(QuerySummaryText));
                 RegisterSnapshotArtifact(dialog.FileName);
-                Entries.Clear();
-                foreach (var entry in Snapshot.Entries) Entries.Add(entry);
-                SelectedEntry = Entries.FirstOrDefault();
-                OnPropertyChanged(nameof(HasEntries));
-                Status = $"已载入 {Snapshot.Entries.Count} 个更新条目";
+                SetEntries(Snapshot.Entries);
+                Status = Snapshot.FailedRequests == 0
+                    ? $"已载入 {Snapshot.Entries.Count} 个更新条目"
+                    : $"已载入 {Snapshot.Entries.Count} 个更新条目；原扫描有 {Snapshot.FailedRequests}/{Snapshot.TotalRequests} 个查询组合失败";
                 Log(Status);
             }
             catch (Exception ex) { Fail("载入快照失败", ex); }
@@ -393,6 +543,12 @@ namespace OneCore_Image_Designer.ViewModels
 
         private void Log(string text) => EnsureTaskLog().Write(text);
 
+        private IProgress<string> CreateLogProgress()
+        {
+            var logSink = EnsureTaskLog();
+            return new InlineProgress<string>(logSink.Write);
+        }
+
         private void RegisterSnapshotArtifact(string path)
         {
             var artifact = _artifacts.Register(new IntegrationArtifact(
@@ -409,6 +565,11 @@ namespace OneCore_Image_Designer.ViewModels
             Status = ex.Message;
             Log($"{title}: {ex.Message}");
             MessageBox.Show(ex.Message, title, MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
+        {
+            public void Report(T value) => report(value);
         }
     }
 }
