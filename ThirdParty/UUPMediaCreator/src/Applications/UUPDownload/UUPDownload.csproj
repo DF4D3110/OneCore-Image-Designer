@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <RuntimeIdentifiers>win-x86;win-x64;win-arm64;linux-x64;linux-arm64;osx-x64</RuntimeIdentifiers>
+    <OutputPath>$(SolutionDir)build\$(Platform)\$(Configuration)\UUPDownload\</OutputPath>
+    <IntermediateOutputPath>$(SolutionDir)intermediate\$(Platform)\$(Configuration)\UUPDownload\</IntermediateOutputPath>
+    <CodeAnalysisRuleSet>MinimumRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <Platforms>AnyCPU;x64;x86;arm64</Platforms>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\Cabinet\Cabinet.csproj" />
+    <ProjectReference Include="..\..\UnifiedUpdatePlatform.Services.WindowsUpdate.Downloads\UnifiedUpdatePlatform.Services.WindowsUpdate.Downloads.csproj" />
+    <ProjectReference Include="..\..\CompDB\UnifiedUpdatePlatform.Services.Composition.Database.csproj" />
+    <ProjectReference Include="..\..\UnifiedUpdatePlatform.Media.Creator.Planning\UnifiedUpdatePlatform.Media.Creator.Planning.csproj" />
+    <ProjectReference Include="..\..\TempManager\UnifiedUpdatePlatform.Services.Temp.csproj" />
+    <ProjectReference Include="..\..\UnifiedUpdatePlatform.Services.WindowsUpdate\UnifiedUpdatePlatform.Services.WindowsUpdate.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="CommandLineParser" Version="2.9.1" />
+  </ItemGroup>
+</Project>

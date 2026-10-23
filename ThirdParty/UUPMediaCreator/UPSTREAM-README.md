@@ -1,3 +1,15 @@
+## Vendored source tree
+
+This directory retains the UUPMediaCreator source, project files, and documentation from the local
+upstream checkout, including the `src/Applications/UUPDownload` source project. Generated `bin`,
+`obj`, `build`, and `intermediate` outputs and precompiled application binaries are not imported.
+
+OCID builds its UUP bridge against the vendored C# project references; it does not depend on a
+prebuilt UUPMediaCreator DLL checked into the source tree. OCID-specific compatibility and safety
+changes are maintained in the referenced source projects.
+
+The original upstream project overview follows.
+
 <p align="center">
   <img src="Assets/logo.png" width="176"><br>
   <b>An utility to convert Unified Update Platform file sets into Windows Media files</b><br>

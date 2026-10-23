@@ -2,8 +2,8 @@
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
     <Platforms>AnyCPU;x64;x86;arm64</Platforms>
-    <OutputPath>$(SolutionDir)build\$(Platform)\$(Configuration)\UnifiedUpdatePlatform.Services.WindowsUpdate.Downloads\</OutputPath>
-    <IntermediateOutputPath>$(SolutionDir)intermediate\$(Platform)\$(Configuration)\UnifiedUpdatePlatform.Services.WindowsUpdate.Downloads\</IntermediateOutputPath>
+    <OutputPath>$(SolutionDir)build\$(Platform)\$(Configuration)\UUPDownloads\</OutputPath>
+    <IntermediateOutputPath>$(SolutionDir)intermediate\$(Platform)\$(Configuration)\UUPDownloads\</IntermediateOutputPath>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="System.Text.Json" Version="9.0.4" />

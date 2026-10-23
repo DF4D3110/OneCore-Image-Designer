@@ -9,5 +9,17 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\OneCore Image Designer.csproj" />
+    <ProjectReference Include="..\ThirdParty\UUPMediaCreator\src\Cabinet\Cabinet.csproj" />
+    <ProjectReference Include="..\ThirdParty\UUPMediaCreator\src\UnifiedUpdatePlatform.Services.WindowsUpdate\UnifiedUpdatePlatform.Services.WindowsUpdate.csproj" />
   </ItemGroup>
+  <Target Name="AliasVendoredCabinetForTests" BeforeTargets="CoreCompile">
+    <ItemGroup>
+      <ReferencePath Update="@(ReferencePath)" Condition="'%(Filename)' == 'Cabinet'">
+        <Aliases>UupCabinet</Aliases>
+      </ReferencePath>
+      <ReferencePathWithRefAssemblies Update="@(ReferencePathWithRefAssemblies)" Condition="'%(Filename)' == 'Cabinet'">
+        <Aliases>UupCabinet</Aliases>
+      </ReferencePathWithRefAssemblies>
+    </ItemGroup>
+  </Target>
 </Project>

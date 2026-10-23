@@ -43,6 +43,13 @@
     <ProjectReference Include="UupShared\UupShared.csproj" />
   </ItemGroup>
 
+  <PropertyGroup>
+    <UupMediaConverterBuildRoot Condition="'$(UupMediaConverterBuildRoot)' == '' and '$(SolutionDir)' != '' and '$(SolutionDir)' != '*Undefined*'">$(SolutionDir)</UupMediaConverterBuildRoot>
+    <UupMediaConverterBuildRoot Condition="'$(UupMediaConverterBuildRoot)' == ''">$(MSBuildProjectDirectory)\obj\UUPMediaConverterBuild\</UupMediaConverterBuildRoot>
+    <UupMediaConverterPlatform Condition="'$(Platform)' == 'ARM64'">arm64</UupMediaConverterPlatform>
+    <UupMediaConverterPlatform Condition="'$(UupMediaConverterPlatform)' == ''">$(Platform)</UupMediaConverterPlatform>
+  </PropertyGroup>
+
   <ItemGroup>
     <Compile Remove="MobilePackageGen\**\*.cs" />
     <Compile Remove="Source\**\*.cs" />
@@ -84,11 +91,50 @@
   </Target>
 
   <Target Name="CopyUupBridgeToOutput" AfterTargets="Build">
-    <ItemGroup>
+    <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)\UupBridge\bin\$(Platform)\$(Configuration)\net8.0')">
+      <UupBridgeOutput Include="$(MSBuildProjectDirectory)\UupBridge\bin\$(Platform)\$(Configuration)\net8.0\**\*.*" />
+    </ItemGroup>
+    <ItemGroup Condition="!Exists('$(MSBuildProjectDirectory)\UupBridge\bin\$(Platform)\$(Configuration)\net8.0')">
       <UupBridgeOutput Include="$(MSBuildProjectDirectory)\UupBridge\bin\$(Configuration)\net8.0\**\*.*" />
     </ItemGroup>
     <Copy SourceFiles="@(UupBridgeOutput)"
           DestinationFiles="@(UupBridgeOutput->'$(OutDir)UupBridge\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyUupBridgeToPublish" AfterTargets="Publish">
+    <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)\UupBridge\bin\$(Platform)\$(Configuration)\net8.0')">
+      <UupBridgePublishOutput Include="$(MSBuildProjectDirectory)\UupBridge\bin\$(Platform)\$(Configuration)\net8.0\**\*.*" />
+    </ItemGroup>
+    <ItemGroup Condition="!Exists('$(MSBuildProjectDirectory)\UupBridge\bin\$(Platform)\$(Configuration)\net8.0')">
+      <UupBridgePublishOutput Include="$(MSBuildProjectDirectory)\UupBridge\bin\$(Configuration)\net8.0\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(UupBridgePublishOutput)"
+          DestinationFiles="@(UupBridgePublishOutput->'$(PublishDir)UupBridge\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="BuildBundledUupMediaConverter" BeforeTargets="Build">
+    <MSBuild Projects="$(MSBuildProjectDirectory)\ThirdParty\UUPMediaCreator\src\Applications\UUPMediaConverter\UUPMediaConverter.csproj"
+             Targets="Restore;Build"
+             Properties="Configuration=$(Configuration);Platform=$(UupMediaConverterPlatform);SolutionDir=$(UupMediaConverterBuildRoot)" />
+  </Target>
+
+  <Target Name="CopyUupMediaConverterToOutput" AfterTargets="Build">
+    <ItemGroup>
+      <UupMediaConverterOutput Include="$(UupMediaConverterBuildRoot)build\$(UupMediaConverterPlatform)\$(Configuration)\UUPMediaConverter\net10.0\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(UupMediaConverterOutput)"
+          DestinationFiles="@(UupMediaConverterOutput->'$(OutDir)UUPMediaConverter\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyUupMediaConverterToPublish" AfterTargets="Publish">
+    <ItemGroup>
+      <UupMediaConverterPublishOutput Include="$(UupMediaConverterBuildRoot)build\$(UupMediaConverterPlatform)\$(Configuration)\UUPMediaConverter\net10.0\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(UupMediaConverterPublishOutput)"
+          DestinationFiles="@(UupMediaConverterPublishOutput->'$(PublishDir)UUPMediaConverter\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
   </Target>
 

@@ -5,7 +5,6 @@ using System.Text;
 namespace OneCore_Image_Designer.Services
 {
     public sealed record UupMediaConversionRequest(
-        string ToolPath,
         string UupDirectory,
         string IsoPath,
         string TemporaryDirectory,
@@ -23,14 +22,16 @@ namespace OneCore_Image_Designer.Services
     public static class UupMediaConversionService
     {
         private const long MinimumWorkingSpace = 20L * 1024 * 1024 * 1024;
+        private const string BundledConverterRelativePath = "UUPMediaConverter\\UUPMediaConverter.exe";
 
         public static UupMediaConversionPreflight Preflight(
             UupMediaConversionRequest request,
-            Func<string, long>? availableFreeSpace = null)
+            Func<string, long>? availableFreeSpace = null,
+            string? converterPathOverride = null)
         {
             try
             {
-                return PreflightCore(request, availableFreeSpace);
+                return PreflightCore(request, availableFreeSpace, converterPathOverride);
             }
             catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException or OverflowException)
             {
@@ -43,18 +44,25 @@ namespace OneCore_Image_Designer.Services
 
         private static UupMediaConversionPreflight PreflightCore(
             UupMediaConversionRequest request,
-            Func<string, long>? availableFreeSpace)
+            Func<string, long>? availableFreeSpace,
+            string? converterPathOverride)
         {
             var errors = new List<string>();
             var warnings = new List<string>();
             long inputBytes = 0;
 
-            if (!File.Exists(request.ToolPath) ||
-                !string.Equals(Path.GetExtension(request.ToolPath), ".exe", StringComparison.OrdinalIgnoreCase))
-                errors.Add("Select an existing UUPMediaConverter.exe.");
+            var converterPath = converterPathOverride ?? GetBundledConverterPath();
+            if (!File.Exists(converterPath))
+                errors.Add($"The built-in UUP media converter is missing: {converterPath}");
+            else
+            {
+                var cdImagePath = Path.Combine(Path.GetDirectoryName(converterPath)!, "CDImage", "cdimage.exe");
+                if (!File.Exists(cdImagePath))
+                    errors.Add($"The required CDImage utility is missing: {cdImagePath}");
+            }
 
             if (!HasDotnet10Runtime())
-                errors.Add(".NET 10 runtime was not found by 'dotnet --list-runtimes'.");
+                errors.Add(".NET 10 runtime was not found by 'dotnet --list-runtimes'. Install the .NET 10 Runtime to use the built-in converter.");
 
             if (!Directory.Exists(request.UupDirectory))
                 errors.Add("The downloaded UUP input directory does not exist.");
@@ -122,6 +130,7 @@ namespace OneCore_Image_Designer.Services
             }
             warnings.Add("Space estimate is a conservative preflight heuristic (max of 20 GiB or twice the input size per destination), not a guarantee.");
             warnings.Add("The upstream converter does not integrate downloaded update packages into the ISO.");
+            warnings.Add("The built-in UUP converter requires the .NET 10 runtime.");
 
             return new UupMediaConversionPreflight(errors, warnings, estimate);
         }
@@ -160,12 +169,15 @@ namespace OneCore_Image_Designer.Services
             return process.ExitCode;
         }
 
-        public static ProcessStartInfo CreateStartInfo(UupMediaConversionRequest request)
+        public static ProcessStartInfo CreateStartInfo(
+            UupMediaConversionRequest request,
+            string? converterPathOverride = null)
         {
+            var converterPath = converterPathOverride ?? GetBundledConverterPath();
             var start = new ProcessStartInfo
             {
-                FileName = Path.GetFullPath(request.ToolPath),
-                WorkingDirectory = Path.GetDirectoryName(Path.GetFullPath(request.ToolPath))!,
+                FileName = Path.GetFullPath(converterPath),
+                WorkingDirectory = Path.GetDirectoryName(Path.GetFullPath(converterPath))!,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -189,6 +201,9 @@ namespace OneCore_Image_Designer.Services
 
             return start;
         }
+
+        public static string GetBundledConverterPath() =>
+            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, BundledConverterRelativePath);
 
         private static async Task PumpAsync(StreamReader reader, IProgress<string>? progress, string? prefix)
         {

@@ -26,7 +26,6 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
@@ -132,11 +131,6 @@ namespace UnifiedUpdatePlatform.Services.WindowsUpdate.Downloads
             if (proxy != null || !useSystemProxy)
             {
                 filter.Proxy = proxy;
-            }
-
-            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                filter.ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator; //For Linux, MS cert isn't trusted lol ¯\_(ツ)_/¯
             }
 
             _hc = new HttpClient(filter)
@@ -567,8 +561,13 @@ namespace UnifiedUpdatePlatform.Services.WindowsUpdate.Downloads
                     return true;
                 }
             }
-            catch //(Exception ex)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Download failed for {downloadFile.FileName}: {ex.Message}");
                 downloadProgress?.Report(new FileDownloadStatus(downloadFile)
                 {
                     DownloadedBytes = totalBytesRead,

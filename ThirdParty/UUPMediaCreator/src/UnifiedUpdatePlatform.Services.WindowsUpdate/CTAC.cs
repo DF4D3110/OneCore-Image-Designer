@@ -423,7 +423,7 @@ namespace UnifiedUpdatePlatform.Services.WindowsUpdate
                                     "SdbVer_20H1=2000000000&" +
                                     "UpgEx_CO21H2=Green&" +
                                     //$"OSArchitecture={MachineType.ToString().ToUpper()}&" +
-                                    $"OSArchitecture=AMD64&" +
+                                    $"OSArchitecture={MachineType.ToString().ToUpperInvariant()}&" +
                                     "DefaultUserRegion=244&" +
                                     $"ReleaseType={ReleaseType}&" +
                                     "UpdateManagementGroup=2&" +
@@ -468,7 +468,7 @@ namespace UnifiedUpdatePlatform.Services.WindowsUpdate
                                     "UpgradeEligible=1&" +
                                     "Version_RS5=2000000000&" +
                                     $"IsRetailOS={FlightRing == "Retail"}&" +
-                                    $"MediaVersion={ReportingVersion}" +
+                                    $"MediaVersion={ReportingVersion}&" +
                                     $"IsVbsEnabled={(IsVbsEnabled ? 1 : 0)}";
 
             if (ReportingSku is OSSkuId.EnterpriseS or OSSkuId.EnterpriseSN || ReportingSku.ToString().Contains("Server", StringComparison.InvariantCultureIgnoreCase))
