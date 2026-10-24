@@ -4898,11 +4898,25 @@ int CmdLayout(const std::vector<std::string>& args)
             };
             if (!layoutPath.empty() && !stagingDir.empty())
             {
+                // UpdateDLL ? imaging override 把 space 内容写在 staging 目录的 {GUID}.vhdx 覆盖盘里，
+                // 只有再次打开池、挂上 space 时服务才会把覆盖盘合并回 space；
+                // 因此必须先 mount 一次再 detach，最后才删覆盖错文件。
+                const std::string cleanupImage = vhdFile.empty() ? devicePath : vhdFile;
+                std::vector<std::string> mountChild;
+                mountChild.push_back("pool");
+                mountChild.push_back("mount");
+                mountChild.push_back("--vhd");
+                mountChild.push_back(cleanupImage);
+                mountChild.push_back("--layout");
+                mountChild.push_back(layoutPath);
+                mountChild.push_back("--dir");
+                mountChild.push_back(stagingDir);
+                runChild(mountChild, "合并 staging 覆盖盘");
                 std::vector<std::string> child;
                 child.push_back("pool");
                 child.push_back("detach");
                 child.push_back("--vhd");
-                child.push_back(devicePath);
+                child.push_back(cleanupImage);
                 child.push_back("--layout");
                 child.push_back(layoutPath);
                 child.push_back("--dir");
