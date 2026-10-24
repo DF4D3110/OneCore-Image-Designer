@@ -100,6 +100,10 @@ namespace imaging
                                   std::string& error);
 
     // 读回磁盘上的 GPT（用于验收：分区数、每段的 GUID/偏移/大小）。
+    OCID_VHD_API bool VhdSetPartitionType(const std::string& devicePath,
+                                     const std::string& partitionName,
+                                     const std::string& typeGuid,
+                                     std::string& error);
     OCID_VHD_API bool VhdReadGpt(const std::string& devicePath,
                                  std::string& diskId,
                                  std::vector<VhdPartition>& parts,

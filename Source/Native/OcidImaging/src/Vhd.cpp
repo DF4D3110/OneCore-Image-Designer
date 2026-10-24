@@ -1293,6 +1293,34 @@ namespace imaging
     }
 
 
+
+    bool VhdSetPartitionType(const std::string& devicePath,
+                                 const std::string& partitionName,
+                                 const std::string& typeGuid,
+                                 std::string& error)
+    {
+        std::string diskId;
+        std::vector<VhdPartition> parts;
+        std::uint32_t sector = 512;
+        if (!VhdReadGpt(devicePath, diskId, parts, sector, error))
+            return false;
+        bool found = false;
+        for (std::size_t i = 0; i < parts.size(); ++i)
+        {
+            if (_stricmp(parts[i].name.c_str(), partitionName.c_str()) == 0)
+            {
+                parts[i].type = typeGuid;
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+        {
+            error = "partition not found: " + partitionName;
+            return false;
+        }
+        return VhdWriteGpt(devicePath, diskId, parts, sector, error);
+    }
 }
 
 

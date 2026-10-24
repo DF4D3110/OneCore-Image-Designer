@@ -3316,6 +3316,15 @@ int CmdLayout(const std::vector<std::string>& args)
                     return 1;
                 }
                 OutLn("  池已建：space " + NumText(created.size()) + " 个");
+                {
+                    const std::string poolNameUtf8(widePool.begin(), widePool.end());
+                    const std::string canonicalPoolType = "{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}";
+                    std::string typeError;
+                    if (!VhdSetPartitionType(devicePath, poolNameUtf8, canonicalPoolType, typeError))
+                        OutLn("  池分区类型归一化失败：" + typeError);
+                    else
+                        OutLn("  池分区类型已归一化为 Storage Spaces 标准值");
+                }
             }
             if (plan.holdsPool)
             {
@@ -3357,6 +3366,7 @@ int CmdLayout(const std::vector<std::string>& args)
         }
         const std::string sub = LowerText(args[2]);
         std::string file, device, layout, diskId;
+        std::string partName, partType;
         std::uint64_t size = 0, block = 0;
         std::uint32_t sectorSize = 512;
         bool fixed = false, readOnly = false, dry = false, keepAttached = false, wantPartitions = false;
@@ -3388,6 +3398,8 @@ int CmdLayout(const std::vector<std::string>& args)
             else if (a == "--device") { if (!next(device)) { Err("--device 缺少值"); return 2; } }
             else if (a == "--layout") { if (!next(layout)) { Err("--layout 缺少值"); return 2; } }
             else if (a == "--disk-id") { if (!next(diskId)) { Err("--disk-id 缺少值"); return 2; } }
+            else if (a == "--name") { if (!next(partName)) { Err("--name missing value"); return 2; } }
+            else if (a == "--type") { if (!next(partType)) { Err("--type missing value"); return 2; } }
             else if (!a.empty() && a[0] == '-') { Err("未知参数：" + a); return 2; }
             else if (file.empty()) file = a;
             else { Err("多余的位置参数：" + a); return 2; }
@@ -3436,7 +3448,33 @@ int CmdLayout(const std::vector<std::string>& args)
             return 0;
         }
 
-        if (sub == "detach")
+        if (sub == "set-part-type")
+        {
+            if (partName.empty() || partType.empty())
+            {
+                Err("set-part-type requires --name and --type");
+                return 2;
+            }
+            std::string target = device;
+            if (target.empty())
+            {
+                if (!VhdAttach(wideFile, false, target, error))
+                {
+                    Err("attach failed: " + error);
+                    return 1;
+                }
+                OutLn("attached: " + target);
+            }
+            if (!VhdSetPartitionType(target, partName, partType, error))
+            {
+                Err("set partition type failed: " + error);
+                return 1;
+            }
+            OutLn("partition " + partName + " type set to " + partType);
+            return 0;
+        }
+
+                if (sub == "detach")
         {
             if (force || killHolders)
             {
@@ -3750,6 +3788,14 @@ int CmdLayout(const std::vector<std::string>& args)
         const std::wstring wideDevice(device.begin(), device.end());
         std::vector<std::string> created;
         const bool built = PoolBuild(wideDevice, widePool, poolVersion, Utf8ToWide(directory), spaces, created, error);
+        if (built)
+        {
+            const std::string poolNameUtf8(widePool.begin(), widePool.end());
+            const std::string canonicalPoolType = "{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}";
+            std::string typeError;
+            if (!VhdSetPartitionType(device, poolNameUtf8, canonicalPoolType, typeError))
+                OutLn("  池分区类型归一化失败：" + typeError);
+        }
         std::string detachError;
         const bool detached = VhdDetach(wideFile, detachError);
         for (const std::string& name : created) OutLn("  space 已建：" + name);
@@ -4803,8 +4849,6 @@ int CmdLayout(const std::vector<std::string>& args)
         for (const std::string& line : report) OutLn("  " + line);
         if (!keepOpen)
         {
-            const int stagingDetached = DetachStagingImages(stagingDir, true);
-            if (stagingDetached > 0) OutLn("  staging 覆盖盘已卸载：" + std::to_string(stagingDetached) + " 个");
             // 收尾统一走子进程 + 超时：服务侧调用可能在内核里挂死，父进程必须能强制结束它。
             auto runChild = [&](const std::vector<std::string>& childArgs, const char* what) -> bool
             {
@@ -4835,6 +4879,11 @@ int CmdLayout(const std::vector<std::string>& args)
                 child.push_back("--dir");
                 child.push_back(stagingDir);
                 runChild(child, "释放池 space");
+            }
+            // 先让服务把 staging 覆盖盘并回 space，再删覆盖文件；顺序反了会丢内容。
+            {
+                const int stagingDetached = DetachStagingImages(stagingDir, true);
+                if (stagingDetached > 0) OutLn("  staging 覆盖盘已卸载：" + std::to_string(stagingDetached) + " 个");
             }
             if (!vhdFile.empty())
             {
@@ -4987,6 +5036,151 @@ int CmdLayout(const std::vector<std::string>& args)
         return 0;
     }
 
+    // pool check：挂载池内 space 并直接读 MainOS 卷里的关键文件，验证产物可访问性。
+    static bool ProbeFile(const std::wstring& path, std::uint64_t& size)
+    {
+        WIN32_FILE_ATTRIBUTE_DATA data;
+        if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data) == 0) return false;
+        size = (static_cast<std::uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+        return true;
+    }
+
+    int CmdPoolCheck(const std::vector<std::string>& args)
+    {
+        std::string file;
+        std::string device;
+        std::string layoutPath;
+        std::string directory = "ocid_pool";
+        std::string onlySpace;
+        std::string poolName;
+        std::string versionText;
+        std::vector<std::string> extraFiles;
+        for (std::size_t i = 3; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            if (a == "--vhd" && i + 1 < args.size()) file = args[++i];
+            else if (a == "--device" && i + 1 < args.size()) device = args[++i];
+            else if (a == "--layout" && i + 1 < args.size()) layoutPath = args[++i];
+            else if (a == "--dir" && i + 1 < args.size()) directory = args[++i];
+            else if (a == "--space" && i + 1 < args.size()) onlySpace = args[++i];
+            else if (a == "--pool" && i + 1 < args.size()) poolName = args[++i];
+            else if (a == "--version" && i + 1 < args.size()) versionText = args[++i];
+            else if (a == "--file" && i + 1 < args.size()) extraFiles.push_back(args[++i]);
+            else { Err("pool check 未知选项：" + a); return 2; }
+        }
+        if ((file.empty() && device.empty()) || layoutPath.empty())
+        {
+            Err("pool check 需要 --vhd <虚拟磁盘>（或 --device）--layout <布局 XML>");
+            return 2;
+        }
+        LayoutModel model;
+        std::string loadError;
+        if (!LoadLayout(layoutPath, model, loadError)) { Err("读取布局失败：" + loadError); return 1; }
+        std::string poolError;
+        const LayoutPool* poolGroup = SelectLayoutPool(model, poolName, poolError);
+        if (poolGroup == nullptr) { Err(poolError); return 1; }
+        std::vector<std::pair<std::wstring, std::wstring> > spaces;
+        for (const LayoutStore& store : poolGroup->stores)
+        {
+            if (!onlySpace.empty() && !EqualsNoCase(store.storeType, onlySpace)) continue;
+            if (store.partitions.empty()) continue;
+            spaces.push_back(std::make_pair(Utf8ToWide(store.storeType), Utf8ToWide(store.partitions.front().name)));
+        }
+        if (spaces.empty()) { Err("所选存储池内没有可挂载的 space"); return 1; }
+        std::wstring imagePath;
+        if (!file.empty())
+        {
+            imagePath = Utf8ToWide(file);
+            std::error_code ec;
+            if (!std::filesystem::exists(std::filesystem::u8path(file), ec)) { Err("镜像文件不存在：" + file); return 1; }
+        }
+        else
+        {
+            imagePath = Utf8ToWide(device);
+        }
+        std::vector<std::vector<unsigned char> > storeIds;
+        std::vector<std::pair<std::wstring, std::wstring> > volumes;
+        std::vector<std::string> report;
+        std::string mountError;
+        OutLn("[check] mounting spaces ...");
+        const bool mounted = PoolMountSpaces(imagePath, Utf8ToWide(poolGroup->name), LayoutPoolVersion(poolGroup, 24),
+                                            Utf8ToWide(directory), spaces, storeIds, volumes, report, mountError);
+        for (const std::string& line : report) OutLn("  " + line);
+        if (!mounted) { Err("pool check 挂载失败：" + mountError); return 1; }
+        const std::wstring* mainOs = nullptr;
+        for (std::size_t i = 0; i < volumes.size() && i < spaces.size(); ++i)
+        {
+            if (EqualsNoCase(WideToUtf8(spaces[i].second), "MainOS")) mainOs = &volumes[i].second;
+        }
+        if (mainOs == nullptr)
+        {
+            for (const std::pair<std::wstring, std::wstring>& kv : volumes)
+            {
+                const std::string spaceName = WideToUtf8(kv.first);
+                if (spaceName.find("MainOS") != std::string::npos) mainOs = &kv.second;
+            }
+        }
+        if (mainOs == nullptr) { Err("没有找到 MainOS 卷"); return 1; }
+        OutLn("MainOS 卷 = " + WideToUtf8(*mainOs));
+        std::vector<std::string> checks;
+        checks.push_back("Windows\\System32\\ntoskrnl.exe");
+        checks.push_back("Windows\\System32\\config\\SYSTEM");
+        checks.push_back("Windows\\System32\\drivers\\tcpip.sys");
+        checks.push_back("Windows\\ImageUpdate\\OEMInput.xml");
+        checks.push_back("PROGRAMS\\UpdateOS\\UpdateOS.wim");
+        for (const std::string& rel : extraFiles) checks.push_back(rel);
+        int missing = 0;
+        for (const std::string& rel : checks)
+        {
+            std::wstring full = *mainOs;
+            if (!full.empty() && full.back() != L'\\') full += L'\\';
+            full += Utf8ToWide(rel);
+            std::uint64_t size = 0;
+            if (ProbeFile(full, size)) OutLn("  [ok] " + rel + "  (" + std::to_string(size) + " bytes)");
+            else { OutLn("  [缺少] " + rel); ++missing; }
+        }
+        {
+            std::wstring pattern = *mainOs;
+            if (!pattern.empty() && pattern.back() != L'\\') pattern += L'\\';
+            pattern += L"Windows\\System32\\*";
+            WIN32_FIND_DATAW fd;
+            HANDLE find = FindFirstFileW(pattern.c_str(), &fd);
+            int count = 0;
+            if (find != INVALID_HANDLE_VALUE)
+            {
+                do
+                {
+                    if (wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0) ++count;
+                } while (FindNextFileW(find, &fd) != 0);
+                FindClose(find);
+            }
+            OutLn("  System32 条目数 = " + std::to_string(count));
+        }
+        {
+            std::vector<std::wstring> spaceNames;
+            for (const std::pair<std::wstring, std::wstring>& kv : spaces) spaceNames.push_back(kv.first);
+            std::vector<std::string> detachReport;
+            std::string detachError;
+            if (PoolDetachSpaces(imagePath, Utf8ToWide(poolGroup->name), LayoutPoolVersion(poolGroup, 24),
+                                 Utf8ToWide(directory), spaceNames, detachReport, detachError))
+            {
+                OutLn("  已释放 " + std::to_string(spaceNames.size()) + " 个 space");
+            }
+            else
+            {
+                const int forced = DetachStagingImages(directory, false);
+                if (forced > 0) OutLn("  已强制卸载 staging 覆盖盘：" + std::to_string(forced) + " 个");
+                if (!file.empty())
+                {
+                    std::string detachError2;
+                    VhdForceDetach(Utf8ToWide(file), true, detachReport, detachError2);
+                }
+            }
+        }
+        OutLn("检查完成：缺少 " + std::to_string(missing) + " 个关键文件");
+        return missing == 0 ? 0 : 1;
+    }
+
     int CmdPool(const std::vector<std::string>& args)
     {
         const std::string sub = args.size() > 2 ? args[2] : std::string();
@@ -5001,6 +5195,7 @@ int CmdLayout(const std::vector<std::string>& args)
             OutLn("                                写物理 GPT（只含 BS_EFIESP）→ 建池 → 按布局 <StoragePool>/<Stores> 逐 store 建 space");
             OutLn("  pool prepare --vhd <vhdx> --layout <xml> [--space <名>] [--format] [--dir <临时目录>] [--dry]");
         OutLn("  pool detach --vhd <vhdx>|--device <\\\\.\\PhysicalDriveN> --layout <xml> [--dir <临时目录>] [--space <名>]");
+    OutLn("  pool check --vhd <vhdx>|--device <\\\\\\\\.\\\\PhysicalDriveN> --layout <xml> [--file <MainOS 内相对路径>]");
         OutLn("  pool finalize --vhd <vhdx> --layout <xml> [--pool <名>] [--space <名>] [--dir <临时目录>] [--drive-letter-config <xml>] [--no-wof] [--dry]");
     OutLn("");
     OutLn("  apply --vhd <vhdx>|--device <\\\\.\\PhysicalDriveN> --layout <xml> --packages <包目录> --action-list <ActionList.xml> --outdir <输出目录>");
@@ -5020,6 +5215,7 @@ int CmdLayout(const std::vector<std::string>& args)
         if (sub == "detach") return CmdPoolDetach(args);
         if (sub == "finalize") return CmdPoolFinalize(args);
         if (sub == "mount") return CmdPoolMount(args);
+        if (sub == "check") return CmdPoolCheck(args);
         if (sub == "close") return CmdPoolClose(args);
         if (sub == "probe")
         {
