@@ -125,6 +125,18 @@ foreach ($ov in $overlays) {
     Dismount-DiskImage -ImagePath $ov.FullName | Out-Null
 }
 if ($plan.Count -eq 0) { Say '没有可合并的覆盖盘'; exit 0 }
+
+# 同一 space 若有多份覆盖盘（历史残留），只保留文件最大的那份
+$dedup = @{}
+foreach ($item in $plan) {
+    if (-not $dedup.ContainsKey($item.Space)) { $dedup[$item.Space] = $item; continue }
+    $cur = $dedup[$item.Space]
+    if ((Get-Item -LiteralPath $item.File).Length -gt (Get-Item -LiteralPath $cur.File).Length) { $dedup[$item.Space] = $item }
+}
+if ($dedup.Count -ne $plan.Count) {
+    Say ("同一 space 存在重复覆盖盘，去重后 " + $dedup.Count + " 个")
+    $plan = @($dedup.Values)
+}
 Say ("覆盖盘 " + $plan.Count + " 个：" + (($plan | ForEach-Object { $_.Space }) -join ','))
 
 # 2) 把覆盖盘挪出 staging，让池打开时回落到镜像内的真实 space
@@ -193,7 +205,12 @@ foreach ($p in $plan) {
     $sd = Get-DiskImage -ImagePath $p.Keep -ErrorAction SilentlyContinue | Get-Disk -ErrorAction SilentlyContinue
     if (-not $sd) { Say ("挂不上覆盖盘：" + $p.Space); $failed++; continue }
     $sp = Get-Partition -DiskNumber $sd.Number -ErrorAction SilentlyContinue | Select-Object -First 1
-    $src = Ensure-Letter -disk $sd.Number -partition $sp.PartitionNumber -preferred (Free-DriveLetter)
+    $src = $null
+    for ($k = 0; $k -lt 24 -and -not $src; $k++) {
+        $src = Get-VolumeLetter -disk $sd.Number -partition $sp.PartitionNumber
+        if (-not $src) { Start-Sleep -Milliseconds 500 }
+    }
+    if (-not $src) { $src = Ensure-Letter -disk $sd.Number -partition $sp.PartitionNumber -preferred (Free-DriveLetter) }
     if (-not $src) { Say ("覆盖盘没有盘符：" + $p.Space); Dismount-DiskImage -ImagePath $p.Keep | Out-Null; $failed++; continue }
     robocopy ($src + ':\') ($dst.Letter + ':\') /E /B /COPY:DAT /DCOPY:T /SL /XJ /R:0 /W:0 /MT:8 /NFL /NDL /NP | Out-Null
     $rc = $LASTEXITCODE
