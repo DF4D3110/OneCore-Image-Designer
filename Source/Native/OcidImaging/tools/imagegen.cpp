@@ -5551,6 +5551,150 @@ int CmdLayout(const std::vector<std::string>& args)
         return 0;
     }
 
+
+    // ---- FFU 只读解析（B1）：安全头 + 镜像头 + INI manifest ----
+    static std::uint32_t ReadU32At(const std::vector<unsigned char>& buf, std::size_t off)
+    {
+        if (off + 4 > buf.size()) return 0;
+        return static_cast<std::uint32_t>(buf[off]) | (static_cast<std::uint32_t>(buf[off + 1]) << 8) |
+               (static_cast<std::uint32_t>(buf[off + 2]) << 16) | (static_cast<std::uint32_t>(buf[off + 3]) << 24);
+    }
+
+    static std::string TrimSpaceAscii(const std::string& s)
+    {
+        std::size_t b = 0;
+        std::size_t e = s.size();
+        while (b < e && (s[b] == ' ' || s[b] == '\t' || s[b] == '\r')) ++b;
+        while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\r')) --e;
+        return s.substr(b, e - b);
+    }
+
+    static int CmdFfu(const std::vector<std::string>& args)
+    {
+        if (args.size() < 4)
+        {
+            Err("用法：ffu info <file> | ffu manifest <file> --out <txt>");
+            return 2;
+        }
+        const std::string sub = args[2];
+        std::string file;
+        std::string outPath;
+        for (std::size_t i = 3; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            if (a == "--out" && i + 1 < args.size()) { outPath = args[++i]; }
+            else if (a.size() > 1 && a[0] == '-') { Err("ffu 未知选项：" + a); return 2; }
+            else if (file.empty()) { file = a; }
+            else { Err("ffu 多余的位置参数：" + a); return 2; }
+        }
+        if (file.empty()) { Err("ffu 缺少镜像文件"); return 2; }
+
+        std::ifstream in(Utf8ToWide(file).c_str(), std::ios::binary);
+        if (!in) { Err("ffu 打开失败：" + file); return 1; }
+        in.seekg(0, std::ios::end);
+        const std::uint64_t total = static_cast<std::uint64_t>(in.tellg());
+        in.seekg(0, std::ios::beg);
+        std::vector<unsigned char> head(4u * 1024u * 1024u, 0);
+        in.read(reinterpret_cast<char*>(head.data()), static_cast<std::streamsize>(head.size()));
+        const std::size_t got = static_cast<std::size_t>(in.gcount());
+        head.resize(got);
+
+        if (got < 0x20 || std::memcmp(head.data() + 4, "SignedImage ", 12) != 0)
+        {
+            Err("不是 FFU（缺少 SignedImage 签名）：" + file);
+            return 1;
+        }
+        const std::uint32_t secSize = ReadU32At(head, 0);
+        const std::uint32_t chunkKiB = ReadU32At(head, 0x10);
+        const std::uint32_t hashAlg = ReadU32At(head, 0x14);
+        const std::uint32_t catalogSize = ReadU32At(head, 0x18);
+        const std::uint32_t hashTableSize = ReadU32At(head, 0x1C);
+
+        std::size_t imgBase = 0;
+        {
+            const char sig[] = "ImageFlash  ";
+            for (std::size_t i = 4; i + 12 <= head.size(); ++i)
+            {
+                if (std::memcmp(head.data() + i, sig, 12) == 0) { imgBase = i - 4; break; }
+            }
+        }
+        if (imgBase == 0)
+        {
+            Err("FFU 里找不到 ImageFlash 镜像头");
+            return 1;
+        }
+        const std::uint32_t imgSize = ReadU32At(head, imgBase);
+        const std::uint32_t manifestLen = ReadU32At(head, imgBase + 0x10);
+        const std::uint32_t imgChunkKiB = ReadU32At(head, imgBase + 0x14);
+        const std::size_t manifestOff = imgBase + 0x18;
+        if (manifestOff + manifestLen > head.size())
+        {
+            Err("FFU manifest 超出读取窗口（ManifestLength 过大）");
+            return 1;
+        }
+        const std::string manifest(reinterpret_cast<const char*>(head.data() + manifestOff), manifestLen);
+
+        std::uint64_t payloadOff = manifestOff + manifestLen;
+        const std::uint64_t unit = static_cast<std::uint64_t>(imgChunkKiB ? imgChunkKiB : chunkKiB) * 1024ull;
+        if (unit > 0) { payloadOff = (payloadOff + unit - 1) / unit * unit; }
+
+        if (sub == "manifest")
+        {
+            if (outPath.empty()) { Err("ffu manifest 需要 --out <txt>"); return 2; }
+            std::ofstream mout(Utf8ToWide(outPath).c_str(), std::ios::binary | std::ios::trunc);
+            if (!mout) { Err("写 manifest 失败：" + outPath); return 1; }
+            mout.write(manifest.data(), static_cast<std::streamsize>(manifest.size()));
+            mout.close();
+            OutLn("manifest 已写出：" + outPath + "（" + std::to_string(manifestLen) + " 字节）");
+            return 0;
+        }
+        if (sub != "info")
+        {
+            Err("未知的 ffu 子命令：" + sub);
+            return 2;
+        }
+
+        char line[512];
+        OutLn("FFU：" + file + "（" + std::to_string(total) + " 字节）");
+        std::snprintf(line, sizeof(line), "  安全头：ByteCount=%u ChunkSize=%u KiB HashAlgorithm=0x%X CatalogSize=%u HashTableSize=%u",
+                      secSize, chunkKiB, hashAlg, catalogSize, hashTableSize);
+        OutLn(line);
+        std::snprintf(line, sizeof(line), "  镜像头：ByteCount=%u ManifestLength=%u ChunkSize=%u KiB",
+                      imgSize, manifestLen, imgChunkKiB);
+        OutLn(line);
+        std::snprintf(line, sizeof(line), "  manifest 偏移=0x%llX，payload 偏移=0x%llX，payload 大小=%llu",
+                      static_cast<unsigned long long>(manifestOff), static_cast<unsigned long long>(payloadOff),
+                      static_cast<unsigned long long>(total > payloadOff ? total - payloadOff : 0));
+        OutLn(line);
+
+        // 逐段统计（INI：[Section] + key=value）
+        std::size_t pos = 0;
+        std::string section;
+        std::size_t keys = 0;
+        int sections = 0;
+        while (pos <= manifest.size())
+        {
+            const std::size_t nlpos = manifest.find('\n', pos);
+            std::string raw = manifest.substr(pos, nlpos == std::string::npos ? std::string::npos : nlpos - pos);
+            if (!raw.empty() && raw.back() == '\r') raw.pop_back();
+            pos = (nlpos == std::string::npos) ? manifest.size() + 1 : nlpos + 1;
+            const std::string trimmed = TrimSpaceAscii(raw);
+            if (trimmed.empty() || trimmed[0] == ';') continue;
+            if (trimmed.front() == '[' && trimmed.back() == ']')
+            {
+                if (!section.empty()) { OutLn("    段 " + section + "：键 " + std::to_string(keys) + " 个"); }
+                section = trimmed.substr(1, trimmed.size() - 2);
+                keys = 0;
+                ++sections;
+                continue;
+            }
+            if (!section.empty() && trimmed.find('=') != std::string::npos) ++keys;
+        }
+        if (!section.empty()) { OutLn("    段 " + section + "：键 " + std::to_string(keys) + " 个"); }
+        OutLn("  manifest 段数：" + std::to_string(sections));
+        return 0;
+    }
+
 static int RunMain(int argc, wchar_t** wargv)
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -5598,6 +5742,7 @@ static int RunMain(int argc, wchar_t** wargv)
         return CmdDeviceDb(args);
     }
     if (command == "vhd") return CmdVhd(args);
+    if (command == "ffu") return CmdFfu(args);
     if (command == "disk") return CmdDisk(args);
     if (command == "pool") return CmdPool(args);
     if (command == "wim") return CmdWim(args);
