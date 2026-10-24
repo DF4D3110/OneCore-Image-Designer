@@ -1,4 +1,4 @@
-// OcidImaging / Pool 池层（薄封装 ImageStorageService.dll 的建池/建 space）
+﻿// OcidImaging / Pool 池层（薄封装 ImageStorageService.dll 的建池/建 space）
 //
 // 为什么单独一层：把“存储空间”这套私有 IOCTL / 服务句柄的调用关在一个 DLL 里，
 // 出问题时能立刻分辨是“池没建起来”还是“文件没写进去”。ImageStorageService.dll
@@ -96,6 +96,17 @@ struct SpacePrepareSpec
 // 打开已有池（OpenStoragePool）→ 逐个 space 挂上（AttachStorageSpace）→ 在 space 内写 GPT
 // → 按需 FormatPartition → 卸下（DetachStorageSpace）→ 关池。
 // 调用方负责先把虚拟磁盘挂上并过 VhdEnsureVirtualDisk。
+
+// 只读挂载：把每个 space 挂上并返回其设备路径（\\.\PhysicalDriveN），供打包（FFU）读原始扇区。
+OCID_POOL_API bool PoolAttachSpacesForRead(const std::wstring& imagePath,
+                                          const std::wstring& poolName,
+                                          unsigned int version,
+                                          const std::wstring& directory,
+                                          const std::vector<std::wstring>& spaceNames,
+                                          std::vector<std::wstring>& devices,
+                                          std::vector<std::vector<unsigned char> >& storeIds,
+                                          std::vector<std::string>& report,
+                                          std::string& error);
 
 // 关闭池：OpenVirtualHardDisk -> OpenStoragePool -> CloseStoragePool。detachSpaces=true 时
 // 顺带把 space 虚拟盘卸下（用于清场；成品镜像不需要这一步）。

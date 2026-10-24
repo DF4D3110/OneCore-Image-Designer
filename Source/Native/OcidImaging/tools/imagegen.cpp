@@ -5569,6 +5569,343 @@ int CmdLayout(const std::vector<std::string>& args)
         return s.substr(b, e - b);
     }
 
+// ---------------- FFU pack (v1: manifest + per-store block payload) ----------------
+static bool PackReadRange(const std::string& device, unsigned long long offset, unsigned int size,
+                          std::vector<unsigned char>& buffer, std::string& error)
+{
+    HANDLE handle = CreateFileW(Utf8ToWide(device).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                nullptr, OPEN_EXISTING, 0, nullptr);
+    if (handle == INVALID_HANDLE_VALUE)
+    {
+        error = "open device failed (win32=" + std::to_string(GetLastError()) + ").";
+        return false;
+    }
+    LARGE_INTEGER li;
+    li.QuadPart = static_cast<LONGLONG>(offset);
+    if (!SetFilePointerEx(handle, li, nullptr, FILE_BEGIN))
+    {
+        error = "SetFilePointerEx failed.";
+        CloseHandle(handle);
+        return false;
+    }
+    buffer.assign(size, 0);
+    DWORD read = 0;
+    const bool ok = ReadFile(handle, buffer.data(), size, &read, nullptr) != 0 && read == size;
+    if (!ok) error = "read device failed (win32=" + std::to_string(GetLastError()) + ").";
+    CloseHandle(handle);
+    return ok;
+}
+
+static bool PackBlockIsZero(const std::vector<unsigned char>& data)
+{
+    for (std::size_t i = 0; i < data.size(); ++i) if (data[i] != 0) return false;
+    return true;
+}
+
+static void PackU16(std::vector<unsigned char>& out, unsigned int v)
+{
+    out.push_back(static_cast<unsigned char>(v & 0xFF));
+    out.push_back(static_cast<unsigned char>((v >> 8) & 0xFF));
+}
+
+static void PackU32(std::vector<unsigned char>& out, std::uint32_t v)
+{
+    for (int i = 0; i < 4; ++i) out.push_back(static_cast<unsigned char>((v >> (8 * i)) & 0xFF));
+}
+
+static void PackU64(std::vector<unsigned char>& out, std::uint64_t v)
+{
+    for (int i = 0; i < 8; ++i) out.push_back(static_cast<unsigned char>((v >> (8 * i)) & 0xFF));
+}
+
+static bool PackCollectBlocks(const std::string& device, unsigned long long bytes, unsigned int bytesPerBlock,
+                              std::vector<unsigned long long>& blockIndices,
+                              std::string& error)
+{
+    const unsigned long long count = bytes / bytesPerBlock;
+    std::vector<unsigned char> buffer;
+    for (unsigned long long i = 0; i < count; ++i)
+    {
+        if (!PackReadRange(device, i * bytesPerBlock, bytesPerBlock, buffer, error)) return false;
+        if (PackBlockIsZero(buffer)) continue;
+        blockIndices.push_back(i);
+    }
+    return true;
+}
+
+static bool PackNum(const std::string& text, std::uint64_t& value)
+{
+    return ParseHexOrDec(text, value);
+}
+
+static int CmdFfuPack(const std::vector<std::string>& args)
+{
+    std::string image, layoutPath, outPath, arch = "arm64", osVersion = "10.0.20279.1002";
+    std::string description = "ocid_imagegen pack", poolName, dir;
+    unsigned int bytesPerBlock = 2u * 1024u * 1024u;
+    for (std::size_t i = 3; i < args.size(); ++i)
+    {
+        const std::string& a = args[i];
+        if (a == "--image" && i + 1 < args.size()) image = args[++i];
+        else if (a == "--layout" && i + 1 < args.size()) layoutPath = args[++i];
+        else if (a == "--out" && i + 1 < args.size()) outPath = args[++i];
+        else if (a == "--arch" && i + 1 < args.size()) arch = args[++i];
+        else if (a == "--os-version" && i + 1 < args.size()) osVersion = args[++i];
+        else if (a == "--description" && i + 1 < args.size()) description = args[++i];
+        else if (a == "--pool" && i + 1 < args.size()) poolName = args[++i];
+        else if (a == "--dir" && i + 1 < args.size()) dir = args[++i];
+        else if (a == "--bytes-per-block" && i + 1 < args.size()) bytesPerBlock = static_cast<unsigned int>(std::strtoul(args[++i].c_str(), nullptr, 0));
+        else { Err("ffu pack unknown option: " + a); return 2; }
+    }
+    if (image.empty() || layoutPath.empty() || outPath.empty())
+    {
+        Err("usage: ffu pack --image <vhd|device> --layout <xml> --out <ffu> [--arch arm64] [--pool OSPool] [--dir <tmp>]");
+        return 2;
+    }
+    if (dir.empty()) dir = "ocid_pack_tmp";
+
+    LayoutModel model;
+    std::string loadError;
+    if (!LoadLayout(layoutPath, model, loadError)) { Err("load layout failed: " + loadError); return 1; }
+    std::string poolError;
+    const LayoutPool* group = SelectLayoutPool(model, poolName, poolError);
+    if (group == nullptr) { Err(poolError); return 1; }
+    const std::wstring widePool = LayoutPoolName(group);
+    const unsigned int poolVersion = LayoutPoolVersion(group, 24);
+    const unsigned long long baseSector = model.hasSectorSize ? model.sectorSize : 512ull;
+
+    const bool fromFile = image.size() < 4 || image.compare(0, 4, "\\\\.\\") != 0;
+    std::string device = image;
+    std::string attachError;
+    if (fromFile)
+    {
+        std::string attached;
+        if (!VhdAttach(Utf8ToWide(image), false, attached, attachError)) { Err("attach failed: " + attachError); return 1; }
+        device = attached;
+    }
+
+    std::string gptError, diskId;
+    std::vector<VhdPartition> physicalParts;
+    std::uint32_t gptSector = 512;
+    if (!VhdReadGpt(device, diskId, physicalParts, gptSector, gptError))
+    {
+        Err("read physical gpt failed: " + gptError);
+        if (fromFile) { std::vector<std::string> rep; std::string err; VhdForceDetach(Utf8ToWide(image), false, rep, err); }
+        return 1;
+    }
+
+    std::vector<std::wstring> spaceNames;
+    for (const LayoutStore& s : group->stores) spaceNames.push_back(Utf8ToWide(s.storeType));
+    std::vector<std::wstring> spaceDevices;
+    std::vector<std::vector<unsigned char> > spaceIds;
+    std::vector<std::string> mountReport;
+    std::string mountError;
+    if (!spaceNames.empty() &&
+        !PoolAttachSpacesForRead(Utf8ToWide(device), widePool, poolVersion, Utf8ToWide(dir), spaceNames, spaceDevices,
+                                 spaceIds, mountReport, mountError))
+    {
+        Err("attach spaces failed: " + mountError);
+        if (fromFile) { std::vector<std::string> rep; std::string err; VhdForceDetach(Utf8ToWide(image), false, rep, err); }
+        return 1;
+    }
+    for (const std::string& line : mountReport) OutLn("  " + line);
+
+    std::vector<std::vector<unsigned long long> > storeBlockIndices;
+    for (std::size_t i = 0; i < spaceDevices.size(); ++i)
+    {
+        const LayoutStore& s = group->stores[i];
+        unsigned long long bytes = s.hasSizeBytes ? s.sizeInBytes : s.sizeInSectors * StoreSectorBytes(model, s);
+        if (bytes == 0) bytes = 42ull * 1024 * 1024 * 1024;
+        std::vector<unsigned long long> indices;
+        std::string scanError;
+        OutLn("  scanning space " + s.storeType + " (" + FormatBytes(bytes) + ") ...");
+        if (!PackCollectBlocks(WideToUtf8(spaceDevices[i]), bytes, bytesPerBlock, indices, scanError))
+        {
+            Err("scan space failed: " + scanError);
+            if (fromFile) { std::vector<std::string> rep; std::string err; VhdForceDetach(Utf8ToWide(image), false, rep, err); }
+            return 1;
+        }
+        OutLn("    nonzero blocks: " + std::to_string(indices.size()));
+        storeBlockIndices.push_back(indices);
+    }
+
+    std::vector<unsigned long long> usedSectorsByPartition;
+    std::vector<std::vector<unsigned long long> > physIndices;
+    physIndices.resize(physicalParts.size());
+    for (std::size_t pi = 0; pi < physicalParts.size(); ++pi)
+    {
+        const VhdPartition& part = physicalParts[pi];
+        if (LowerText(part.name) == "ospool")
+        {
+            usedSectorsByPartition.push_back(0);
+            continue;
+        }
+        std::vector<unsigned long long>& indices = physIndices[pi];
+        std::string scanError;
+        OutLn("  scanning physical partition " + part.name + " (" + FormatBytes(part.sizeBytes) + ") ...");
+        if (!PackCollectBlocks(device, part.sizeBytes, bytesPerBlock, indices, scanError))
+        {
+            Err("scan partition failed: " + scanError);
+            if (fromFile) { std::vector<std::string> rep; std::string err; VhdForceDetach(Utf8ToWide(image), false, rep, err); }
+            return 1;
+        }
+        OutLn("    nonzero blocks: " + std::to_string(indices.size()));
+        usedSectorsByPartition.push_back(static_cast<unsigned long long>(indices.size()) * (bytesPerBlock / 512ull));
+    }
+
+    std::string manifest;
+    manifest += "[FullFlash]\r\nAntiTheftVersion     = 1.1\r\nArchitecture         = " + UpperText(arch) +
+                "\r\nDescription          = " + description + "\r\n\r\nDevicePlatformId0    = *\r\nOSVersion            = " +
+                osVersion + "\r\nReleaseType          = Test\r\nStateSeparationLevel = " +
+                std::to_string(model.stateSeparation) + "\r\nUEFI                 = True\r\nVersion              = 2.0\r\n\r\n";
+    manifest += "[StoragePool]\r\nName = " + group->name + "\r\n\r\n";
+    for (std::size_t i = 0; i < group->stores.size(); ++i)
+    {
+        const LayoutStore& s = group->stores[i];
+        const unsigned long long storeSector = StoreSectorBytes(model, s);
+        manifest += "[StoragePoolStore]\r\n";
+        manifest += "IsMainOSStore                 = " + std::string(LowerText(s.storeType).find("mainos") != std::string::npos ? "True" : "False") + "\r\n";
+        manifest += "IsSpace                       = True\r\n";
+        manifest += "MinSectorCount                = " + std::to_string(s.hasSizeBytes ? s.sizeInBytes / (storeSector ? storeSector : 512) : s.sizeInSectors) + "\r\n";
+        manifest += "OnlyAllocateDefinedGptEntries = " + std::string(s.onlyAllocateDefinedGptEntries ? "True" : "False") + "\r\n";
+        manifest += "SectorSize                    = " + std::to_string(storeSector) + "\r\n";
+        manifest += "StoreId                       = " + s.id + "\r\n";
+        manifest += "StoreType                     = " + s.storeType + "\r\n\r\n";
+        for (const LayoutPartition& p : s.partitions)
+        {
+            std::uint64_t tmpValue = 0;
+            manifest += "[StoragePoolPartition]\r\n";
+            if (!p.byteAlignment.empty() && PackNum(p.byteAlignment, tmpValue)) manifest += "ByteAlignment      = " + std::to_string(tmpValue) + "\r\n";
+            if (!p.clusterSize.empty() && PackNum(p.clusterSize, tmpValue)) manifest += "ClusterSize        = " + std::to_string(tmpValue) + "\r\n";
+            manifest += "FileSystem         = " + (p.fileSystem.empty() ? std::string("NTFS") : p.fileSystem) + "\r\n";
+            manifest += "Name               = " + p.name + "\r\n";
+            manifest += "Primary            = " + p.name + "\r\n";
+            manifest += "Type               = " + p.type + "\r\n";
+            manifest += "UseAllSpace        = " + std::string(p.useAllSpace ? "True" : "False") + "\r\n\r\n";
+        }
+    }
+    const LayoutStore physStore = model.stores.empty() ? LayoutStore() : model.stores[0];
+    const unsigned long long physSector = physStore.hasSectorSize ? physStore.sectorSize : baseSector;
+    manifest += "[Store]\r\n";
+    if (!physStore.devicePath.empty()) manifest += "DevicePath                    = " + physStore.devicePath + "\r\n";
+    manifest += "IsMainOSStore                 = False\r\n";
+    manifest += "MinSectorCount                = " + std::to_string(physStore.hasSizeBytes ? physStore.sizeInBytes / (physSector ? physSector : 512) : physStore.sizeInSectors) + "\r\n";
+    manifest += "OnlyAllocateDefinedGptEntries = " + std::string(physStore.onlyAllocateDefinedGptEntries ? "True" : "False") + "\r\n";
+    manifest += "SectorSize                    = " + std::to_string(physSector) + "\r\n";
+    manifest += "StoreId                       = " + (physStore.id.empty() ? diskId : physStore.id) + "\r\n";
+    manifest += "StoreType                     = " + (physStore.storeType.empty() ? std::string("Default") : physStore.storeType) + "\r\n\r\n";
+    std::size_t scanned = 0;
+    for (const VhdPartition& part : physicalParts)
+    {
+        const LayoutPartition* layoutPart = nullptr;
+        for (const LayoutPartition& cand : physStore.partitions)
+            if (EqualsNoCase(cand.name, part.name)) { layoutPart = &cand; break; }
+        const std::string partType = (layoutPart != nullptr && !layoutPart->type.empty()) ? layoutPart->type : part.type;
+        manifest += "[Partition]\r\n";
+        if (layoutPart != nullptr && !layoutPart->fileSystem.empty()) manifest += "FileSystem   = " + layoutPart->fileSystem + "\r\n";
+        if (!part.id.empty()) manifest += "Id           = " + part.id + "\r\n";
+        manifest += "Name         = " + part.name + "\r\n";
+        manifest += "Primary      = " + part.name + "\r\n";
+        manifest += "TotalSectors = " + std::to_string(LowerText(part.name) == "ospool" ? 32ull : part.sizeBytes / 512ull) + "\r\n";
+        manifest += "Type         = " + partType + "\r\n";
+        manifest += "UsedSectors  = " + std::to_string(scanned < usedSectorsByPartition.size() ? usedSectorsByPartition[scanned] : 0) + "\r\n\r\n";
+        ++scanned;
+    }
+    OutLn("  manifest bytes: " + std::to_string(manifest.size()));
+
+    std::ofstream out(Utf8ToWide(outPath).c_str(), std::ios::binary | std::ios::trunc);
+    if (!out) { Err("create ffu failed: " + outPath); return 1; }
+
+    const unsigned int chunkBytes = 128u * 1024u;
+    std::vector<unsigned char> header;
+    PackU32(header, 32);
+    const char sig1[] = "SignedImage ";
+    header.insert(header.end(), sig1, sig1 + 12);
+    PackU32(header, chunkBytes);
+    PackU32(header, 0x800C);
+    PackU32(header, 0);
+    PackU32(header, 0);
+    while (header.size() % chunkBytes != 0) header.push_back(0);
+    PackU32(header, 24);
+    const char sig2[] = "ImageFlash  ";
+    header.insert(header.end(), sig2, sig2 + 12);
+    PackU32(header, static_cast<std::uint32_t>(manifest.size()));
+    PackU32(header, 128);
+    header.insert(header.end(), manifest.begin(), manifest.end());
+    while (header.size() % chunkBytes != 0) header.push_back(0);
+    out.write(reinterpret_cast<const char*>(header.data()), static_cast<std::streamsize>(header.size()));
+
+    for (std::size_t s = 0; s < spaceDevices.size(); ++s)
+    {
+        std::vector<unsigned char> meta;
+        PackU32(meta, 0);
+        PackU16(meta, 2);
+        PackU16(meta, 0);
+        PackU16(meta, 2);
+        PackU16(meta, 0);
+        for (int i = 0; i < 192; ++i) meta.push_back(0);
+        meta[12] = '*';
+        PackU32(meta, bytesPerBlock);
+        PackU32(meta, static_cast<std::uint32_t>(storeBlockIndices[s].size()));
+        PackU32(meta, static_cast<std::uint32_t>(storeBlockIndices[s].size() * 16));
+        PackU32(meta, 0);
+        PackU32(meta, 0);
+        PackU32(meta, 0);
+        PackU32(meta, 0);
+        PackU32(meta, 0);
+        PackU32(meta, 0);
+        PackU32(meta, 0);
+        PackU32(meta, 0);
+        PackU16(meta, static_cast<unsigned int>(spaceDevices.size()));
+        PackU16(meta, static_cast<unsigned int>(s + 1));
+        PackU64(meta, static_cast<std::uint64_t>(storeBlockIndices[s].size()) * bytesPerBlock);
+        PackU16(meta, 0);
+        for (std::size_t k = 0; k < storeBlockIndices[s].size(); ++k)
+        {
+            PackU32(meta, 1);
+            PackU32(meta, 1);
+            PackU32(meta, 0);
+            PackU32(meta, static_cast<std::uint32_t>(storeBlockIndices[s][k]));
+        }
+        while (meta.size() % bytesPerBlock != 0) meta.push_back(0);
+        out.write(reinterpret_cast<const char*>(meta.data()), static_cast<std::streamsize>(meta.size()));
+    }
+    for (std::size_t s = 0; s < spaceDevices.size(); ++s)
+    {
+        std::vector<unsigned char> block;
+        for (std::size_t k = 0; k < storeBlockIndices[s].size(); ++k)
+        {
+            std::string readError;
+            if (!PackReadRange(WideToUtf8(spaceDevices[s]), storeBlockIndices[s][k] * bytesPerBlock, bytesPerBlock, block, readError))
+            {
+                Err("read space block failed: " + readError);
+                return 1;
+            }
+            out.write(reinterpret_cast<const char*>(block.data()), static_cast<std::streamsize>(block.size()));
+        }
+    }
+    for (std::size_t p = 0; p < physicalParts.size(); ++p)
+    {
+        std::vector<unsigned char> block;
+        for (std::size_t k = 0; k < physIndices[p].size(); ++k)
+        {
+            const unsigned long long off = physicalParts[p].offsetBytes + physIndices[p][k] * bytesPerBlock;
+            std::string readError;
+            if (!PackReadRange(device, off, bytesPerBlock, block, readError))
+            {
+                Err("read physical block failed: " + readError);
+                return 1;
+            }
+            out.write(reinterpret_cast<const char*>(block.data()), static_cast<std::streamsize>(block.size()));
+        }
+    }
+    out.close();
+    OutLn("FFU written: " + outPath);
+
+    if (fromFile) { std::vector<std::string> rep; std::string err; VhdForceDetach(Utf8ToWide(image), false, rep, err); }
+    return 0;
+}
+
     static int CmdFfu(const std::vector<std::string>& args)
     {
         if (args.size() < 4)
@@ -5577,6 +5914,7 @@ int CmdLayout(const std::vector<std::string>& args)
             return 2;
         }
         const std::string sub = args[2];
+        if (sub == "pack") return CmdFfuPack(args);
         std::string file;
         std::string outPath;
         for (std::size_t i = 3; i < args.size(); ++i)
