@@ -3316,15 +3316,7 @@ int CmdLayout(const std::vector<std::string>& args)
                     return 1;
                 }
                 OutLn("  池已建：space " + NumText(created.size()) + " 个");
-                {
-                    const std::string poolNameUtf8(widePool.begin(), widePool.end());
-                    const std::string canonicalPoolType = "{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}";
-                    std::string typeError;
-                    if (!VhdSetPartitionType(devicePath, poolNameUtf8, canonicalPoolType, typeError))
-                        OutLn("  池分区类型归一化失败：" + typeError);
-                    else
-                        OutLn("  池分区类型已归一化为 Storage Spaces 标准值");
-                }
+
             }
             if (plan.holdsPool)
             {
@@ -3338,6 +3330,16 @@ int CmdLayout(const std::vector<std::string>& args)
                     return 1;
                 }
                 for (const std::string& line : detachReport) OutLn("  " + line);
+            }
+            if (plan.holdsPool)
+            {
+                const std::string poolNameUtf8(widePool.begin(), widePool.end());
+                const std::string canonicalPoolType = "{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}";
+                std::string typeError;
+                if (!VhdSetPartitionType(devicePath, poolNameUtf8, canonicalPoolType, typeError))
+                    OutLn("  池分区类型归一化失败：" + typeError);
+                else
+                    OutLn("  池分区类型已归一化为 Storage Spaces 标准值");
             }
             // 非永久挂载：进程退出后系统自动卸载；池载体盘显式 DetachVirtualDisk 会挂死。
             if (plan.holdsPool)
@@ -4121,17 +4123,44 @@ int CmdLayout(const std::vector<std::string>& args)
         std::string detachError;
         PoolDetachSpaces(wideDevice, widePool, poolVersion, Utf8ToWide(directory), spaceNames, detachReport, detachError);
         for (const std::string& line : detachReport) OutLn("  " + line);
+        {
+            const std::string poolNameUtf8(widePool.begin(), widePool.end());
+            const std::string canonicalPoolType = "{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}";
+            std::string typeError;
+            if (!VhdSetPartitionType(device, poolNameUtf8, canonicalPoolType, typeError))
+                OutLn("  池分区类型归一化失败：" + typeError);
+            else
+                OutLn("  池分区类型已归一化为 Storage Spaces 标准值");
+        }
         if (prepared)
         {
             // 物理盘上的分区（BS_EFIESP 等）也要按布局的 FileSystem 格式化，否则 UpdateDLL 提交阶段
             // 复制 bootmgr 到物理 ESP 会报 0x800703ED（此卷不包含可识别的文件系统）。
             std::vector<PhysicalFormatSpec> physicalFormats;
+            // 只格式化该磁盘上真正存在的分区：一个布局里的分区分散到多块磁盘上，
+            // 对单块磁盘做 prepare 时不应把别的磁盘分区当成错误。
+            std::vector<std::string> presentParts;
+            {
+                std::string gptGuid;
+                std::vector<VhdPartition> gptParts;
+                unsigned int gptSector = 512;
+                std::string gptError;
+                if (VhdReadGpt(device, gptGuid, gptParts, gptSector, gptError))
+                    for (const VhdPartition& part : gptParts) presentParts.push_back(part.name);
+            }
             for (const LayoutStore& store : model.stores)
             {
                 for (const LayoutPartition& p : store.partitions)
                 {
                     if (IsPoolPartition(p)) continue;
                     if (p.fileSystem.empty()) continue;
+                    if (!presentParts.empty())
+                    {
+                        bool onDisk = false;
+                        for (const std::string& nm : presentParts)
+                            if (EqualsNoCase(nm, p.name)) { onDisk = true; break; }
+                        if (!onDisk) continue;
+                    }
                     PhysicalFormatSpec fmtSpec;
                     fmtSpec.name = Utf8ToWide(p.name);
                     fmtSpec.fileSystem = Utf8ToWide(p.fileSystem);
@@ -4902,6 +4931,27 @@ int CmdLayout(const std::vector<std::string>& args)
             return 1;
         }
         OutLn("落包完成：UpdateOutput -> " + outDir + "\\UpdateOutput.xml");
+        // 服务每次打开池都会把池分区类型改回它自己的私有值，
+        // 所以必须在整个链路的最后一步归一化（Windows 才能识别成存储池）。
+        if (!vhdFile.empty())
+        {
+            std::string finalDevice = devicePath;
+            std::string attachError;
+            if (finalDevice.empty())
+            {
+                if (!VhdAttach(Utf8ToWide(vhdFile), false, finalDevice, attachError))
+                    OutLn("  装配最终归一化失败（无法打开）：" + attachError);
+            }
+            if (!finalDevice.empty())
+            {
+                const std::string canonicalPoolType = "{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}";
+                std::string typeError;
+                if (!VhdSetPartitionType(finalDevice, WideToUtf8(widePool), canonicalPoolType, typeError))
+                    OutLn("  池分区类型归一化失败：" + typeError);
+                else
+                    OutLn("  池分区类型已归一化为 Storage Spaces 标准值");
+            }
+        }
         return 0;
     }
 
