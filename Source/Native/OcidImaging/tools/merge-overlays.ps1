@@ -170,7 +170,14 @@ if ($dedup.Count -ne $plan.Count) {
 }
 $skipped = @($plan | Where-Object { $_.Space -eq 'VIRT_EFIESPDisk' })
 if ($skipped.Count -gt 0) {
-    Say 'VIRT_EFIESPDisk 跳过合并（移走覆盖盘后服务无法 attach，保留覆盖盘）'
+    Say 'VIRT_EFIESPDisk 跳过合并（移走覆盖盘后服务无法 attach），把覆盖盘备份到 overlays-keep'
+    $keepEarly = Join-Path (Split-Path -Parent $Dir) 'overlays-keep'
+    New-Item -ItemType Directory -Path $keepEarly -Force | Out-Null
+    foreach ($s in $skipped) {
+        $dst = Join-Path $keepEarly (Split-Path -Leaf $s.File)
+        Copy-Item -LiteralPath $s.File -Destination $dst -Force -ErrorAction SilentlyContinue
+        if (Test-Path $dst) { $s | Add-Member -NotePropertyName Keep -NotePropertyValue $dst -Force }
+    }
     $plan = @($plan | Where-Object { $_.Space -ne 'VIRT_EFIESPDisk' })
 }
 Say ("覆盖盘 " + $plan.Count + " 个：" + (($plan | ForEach-Object { $_.Space }) -join ','))
