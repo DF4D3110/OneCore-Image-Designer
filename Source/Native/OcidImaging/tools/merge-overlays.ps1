@@ -41,7 +41,7 @@ $spaceByType = @{
 function Invoke-Tool([string[]]$arguments) {
     $out = & $Tool @arguments 2>&1
     $code = $LASTEXITCODE
-    if ($Verbose2) { $out | ForEach-Object { Write-Output ("  " + $_) } }
+    if ($Verbose2) { $out | ForEach-Object { Write-Host ("  " + $_) } }
     return @{ Code = $code; Output = $out }
 }
 
@@ -112,6 +112,27 @@ if ($overlays.Count -eq 0) {
     exit 0
 }
 
+# 布局里每个 space 的尺寸（用于消歧：EFI 类型同时对应 EFIESPDisk 与 VIRT_EFIESPDisk）
+[System.Xml.XmlDocument] $layoutDoc = New-Object System.Xml.XmlDocument
+$layoutDoc.Load($Layout)
+$spaceSize = @{}
+foreach ($poolNode in $layoutDoc.SelectNodes("//*[local-name()='StoragePool']")) {
+    foreach ($storeNode in $poolNode.SelectNodes("./*[local-name()='Stores']/*[local-name()='Store']")) {
+        $nm = $storeNode.SelectSingleNode("./*[local-name()='StoreType']")
+        $sz = $storeNode.SelectSingleNode("./*[local-name()='SizeInSectors']")
+        $sb = $storeNode.SelectSingleNode("./*[local-name()='SizeInBytes']")
+        if ($nm -and ($sz -or $sb)) {
+            if ($sb) { $spaceSize[$nm.InnerText] = [uint64]$sb.InnerText }
+            else {
+                $sec = $storeNode.SelectSingleNode("./*[local-name()='SectorSize']")
+                $ss = 512
+                if ($sec) { $ss = [uint64]$sec.InnerText }
+                $spaceSize[$nm.InnerText] = [uint64]$sz.InnerText * $ss
+            }
+        }
+    }
+}
+
 $plan = @()
 foreach ($ov in $overlays) {
     Mount-DiskImage -ImagePath $ov.FullName -ErrorAction SilentlyContinue | Out-Null
@@ -120,6 +141,16 @@ foreach ($ov in $overlays) {
     $part = Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | Select-Object -First 1
     $space = $null
     if ($part) { $space = $spaceByType[$part.GptType] }
+    if ($part -and $disk) {
+        $diskSize = [uint64]$disk.Size
+        $mappedSize = $null
+        if ($space -and $spaceSize.ContainsKey($space)) { $mappedSize = [uint64]$spaceSize[$space] }
+        if ($null -eq $mappedSize -or $mappedSize -ne $diskSize) {
+            foreach ($k in $spaceSize.Keys) {
+                if ([uint64]$spaceSize[$k] -eq $diskSize) { $space = $k; break }
+            }
+        }
+    }
     if (-not $space) { Say ("跳过（未知分区类型）：" + $ov.Name); Dismount-DiskImage -ImagePath $ov.FullName | Out-Null; continue }
     $plan += [pscustomobject]@{ File = $ov.FullName; Space = $space }
     Dismount-DiskImage -ImagePath $ov.FullName | Out-Null
@@ -149,9 +180,26 @@ foreach ($p in $plan) {
     $p | Add-Member -NotePropertyName Keep -NotePropertyValue $target -Force
 }
 
-# 3) 真正 detach 基座盘，再挂池（此时 space 都是镜像内的空 space）
+# 3) 先用 CLI 永久挂载基座盘拿设备路径：服务对 VHD 的 OpenVirtualHardDisk 不支持（VHDX 才行），
+#    走设备路径时服务用 CreateFile 打开，VHD/VHDX 都可用。
 Invoke-Tool @('vhd', 'detach', $Image, '--force', '--kill') | Out-Null
-$mount = Invoke-Tool @('pool', 'mount', '--vhd', $Image, '--layout', $Layout, '--dir', $Dir)
+# 清掉上一轮遗留的 space 挂载，否则 AttachStorageSpace 会报 0x80070006
+Invoke-Tool @('pool', 'detach', '--vhd', $Image, '--layout', $Layout, '--dir', $Dir) | Out-Null
+$attach = Invoke-Tool @('vhd', 'attach', $Image)
+$device = $null
+foreach ($line in @($attach.Output)) {
+    if ([string]$line -match 'PhysicalDrive([0-9]+)') { $device = '\\.\PhysicalDrive' + $Matches[1]; break }
+}
+if ($attach.Code -ne 0 -or -not $device) {
+    Say '基座盘挂载失败，恢复覆盖盘后退出'
+    foreach ($p in $plan) { Move-Item -LiteralPath $p.Keep -Destination $p.File -Force -ErrorAction SilentlyContinue }
+    exit 1
+}
+Say ('基座盘设备：' + $device)
+$mount = Invoke-Tool @('pool', 'mount', '--device', $device, '--layout', $Layout, '--dir', $Dir)
+if ($mount.Code -ne 0) {
+    $mount = Invoke-Tool @('pool', 'mount', '--vhd', $Image, '--layout', $Layout, '--dir', $Dir)
+}
 if ($mount.Code -ne 0) {
     Say '池挂载失败，恢复覆盖盘后退出'
     foreach ($p in $plan) { Move-Item -LiteralPath $p.Keep -Destination $p.File -Force -ErrorAction SilentlyContinue }
