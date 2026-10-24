@@ -4556,25 +4556,20 @@ int CmdLayout(const std::vector<std::string>& args)
 
         if (!noApply && !packagesDir.empty())
         {
-            OutLn("=== 3.5/4 合并 staging 覆盖盘 ===");
-            child = { "vhd", "detach", imageFile, "--force" };
-            RunSelfWithTimeout(child, 120000ul, code, error);
-            child = { "vhd", "set-part-type", imageFile, "--name", "OSPool", "--type", "{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}" };
-            RunSelfWithTimeout(child, 120000ul, code, error);
-            { const int stagingOnly = DetachStagingImages(stagingDir, false);
-              if (stagingOnly > 0) OutLn("  staging ?????????????" + std::to_string(stagingOnly) + " ?"); }
-            child = { "pool", "check", "--vhd", imageFile, "--layout", layoutPath, "--dir", stagingDir };
-            unsigned long mergeCode = 1;
-            if (!RunSelfWithTimeout(child, 900000ul, mergeCode, error)) Err("合并覆盖盘未完成：" + error);
-            if (mergeCode == 0)
-            {
-                const int stagingDetached = DetachStagingImages(stagingDir, !keepOverlays);
-                if (stagingDetached > 0) OutLn("  staging 覆盖盘已卸载：" + std::to_string(stagingDetached) + " 个");
-            }
-            else
-            {
-                Err("合并失败（退出码 " + std::to_string(mergeCode) + "）：保留 staging 覆盖盘以供重试");
-            }
+            OutLn("=== 3.5/4 合并 staging 覆盖盘（搬回镜像内 space）===");
+            wchar_t selfPath[MAX_PATH * 4];
+            const DWORD selfPathLen = GetModuleFileNameW(nullptr, selfPath, static_cast<DWORD>(sizeof(selfPath) / sizeof(selfPath[0])));
+            std::wstring exeDir = (selfPathLen > 0) ? std::wstring(selfPath, selfPathLen) : std::wstring();
+            const std::size_t slashPos = exeDir.find_last_of(L"\\/");
+            if (slashPos != std::wstring::npos) { exeDir.resize(slashPos); }
+            const std::wstring mergeScript = exeDir + L"\\..\\..\\OcidImaging\\tools\\merge-overlays.ps1";
+            std::wstring mergeCmd = L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"" + mergeScript + L"\"";
+            mergeCmd += L" -Image \"" + Utf8ToWide(imageFile) + L"\"";
+            mergeCmd += L" -Layout \"" + Utf8ToWide(layoutPath) + L"\"";
+            mergeCmd += L" -Dir \"" + Utf8ToWide(stagingDir) + L"\"";
+            mergeCmd += L" -Tool \"" + exeDir + L"\\ocid_imagegen.exe\"";
+            if (!RunCommandWithTimeout(mergeCmd, (applyTimeout + 1800ul) * 1000ul, code, error)) { Err("合并覆盖盘失败：" + error); return 1; }
+            if (code != 0) { Err("合并覆盖盘退出码 " + std::to_string(code)); return 1; }
             child = { "vhd", "set-part-type", imageFile, "--name", "OSPool", "--type", "{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}" };
             RunSelfWithTimeout(child, 120000ul, code, error);
             child = { "vhd", "detach", imageFile, "--force", "--kill" };
@@ -4634,6 +4629,7 @@ int CmdLayout(const std::vector<std::string>& args)
         bool noSpaceOverride = false;
         bool dry = false;
         bool worker = false;
+        bool keepOverlays = false;
         bool ti = false;
         unsigned long timeoutSec = 1800;
 
@@ -4668,6 +4664,7 @@ int CmdLayout(const std::vector<std::string>& args)
             }
             else if (a == "--store-style") { if (!next(storeStyle)) { Err("--store-style 缺少值"); return 2; } }
             else if (a == "--worker") worker = true;
+            else if (a == "--keep-overlays") keepOverlays = true;
             else if (a == "--ti") ti = true;
             else if (a == "--timeout")
             {
@@ -4787,7 +4784,7 @@ int CmdLayout(const std::vector<std::string>& args)
                     }
                     else
                     {
-                        const int stagingDetached = DetachStagingImages(stagingDir, true);
+                        const int stagingDetached = DetachStagingImages(stagingDir, !keepOverlays);
                         if (stagingDetached > 0) OutLn("  staging 覆盖盘已卸载：" + std::to_string(stagingDetached) + " 个");
                     }
                 }
@@ -4987,7 +4984,7 @@ int CmdLayout(const std::vector<std::string>& args)
             }
             // 先让服务把 staging 覆盖盘并回 space，再删覆盖文件；顺序反了会丢内容。
             {
-                const int stagingDetached = DetachStagingImages(stagingDir, true);
+                const int stagingDetached = DetachStagingImages(stagingDir, !keepOverlays);
                 if (stagingDetached > 0) OutLn("  staging 覆盖盘已卸载：" + std::to_string(stagingDetached) + " 个");
             }
             if (!vhdFile.empty())
