@@ -5902,6 +5902,12 @@ static int CmdFfuPack(const std::vector<std::string>& args)
     out.close();
     OutLn("FFU written: " + outPath);
 
+    {
+        std::vector<std::string> detachReport;
+        std::string detachError;
+        PoolDetachSpaces(Utf8ToWide(device), widePool, poolVersion, Utf8ToWide(dir), spaceNames, detachReport, detachError);
+        for (const std::string& line : detachReport) OutLn("  " + line);
+    }
     if (fromFile) { std::vector<std::string> rep; std::string err; VhdForceDetach(Utf8ToWide(image), false, rep, err); }
     return 0;
 }

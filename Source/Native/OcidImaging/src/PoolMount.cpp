@@ -1,4 +1,4 @@
-// PoolMount.cpp — 把池内 space 挂到宿主盘符，返回 MainOS 分区路径。
+﻿// PoolMount.cpp — 把池内 space 挂到宿主盘符，返回 MainOS 分区路径。
 //
 // ImageApp 在建 UpdateOS.wim 之前会先 AssignMountPoints 把各 store 的卷挂出来，
 // 然后往 <MainOS>\PROGRAMS\UpdateOS\UPDATEOS.wim 里捕一个空 WIM。这里做同一件事：
@@ -488,6 +488,144 @@ bool PoolMountSpaces(const std::wstring& imagePath, const std::wstring& poolName
     }
     if (closePool != nullptr) closePool(service, pool, 0);
     if (closeService != nullptr) closeService(service);
+    FreeLibrary(module);
+    return ok;
+}
+
+bool PoolAttachSpacesForRead(const std::wstring& imagePath,
+                             const std::wstring& poolName,
+                             unsigned int version,
+                             const std::wstring& directory,
+                             const std::vector<std::wstring>& spaceNames,
+                             std::vector<std::wstring>& devices,
+                             std::vector<std::vector<unsigned char> >& storeIds,
+                             std::vector<std::string>& report,
+                             std::string& error)
+{
+    (void)version;
+    devices.clear();
+    storeIds.clear();
+    report.clear();
+    error.clear();
+
+    std::wstring dllPath;
+    if (!PoolFindAdkDll(L"ImageStorageService.dll", "AttachStorageSpace", dllPath, error)) return false;
+    HMODULE module = LoadLibraryExW(dllPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (module == nullptr)
+    {
+        error = "LoadLibraryExW(ImageStorageService) failed (win32=" + std::to_string(GetLastError()) + ").";
+        return false;
+    }
+    CreateServiceFn createService = reinterpret_cast<CreateServiceFn>(GetProcAddress(module, "CreateStorageService"));
+    CloseServiceFn closeService = reinterpret_cast<CloseServiceFn>(GetProcAddress(module, "CloseImageStorageService"));
+    OpenVhdFn openVhd = reinterpret_cast<OpenVhdFn>(GetProcAddress(module, "OpenVirtualHardDisk"));
+    GetDiskNameFn getDiskName = reinterpret_cast<GetDiskNameFn>(GetProcAddress(module, "GetDiskName"));
+    GetStoreIdFn getStoreId = reinterpret_cast<GetStoreIdFn>(GetProcAddress(module, "GetStoreId"));
+    OpenPoolFn openPool = reinterpret_cast<OpenPoolFn>(GetProcAddress(module, "OpenStoragePool"));
+    ClosePoolFn closePool = reinterpret_cast<ClosePoolFn>(GetProcAddress(module, "CloseStoragePool"));
+    AttachSpaceFn attachSpace = reinterpret_cast<AttachSpaceFn>(GetProcAddress(module, "AttachStorageSpace"));
+    if (createService == nullptr || closeService == nullptr || openVhd == nullptr || getDiskName == nullptr ||
+        getStoreId == nullptr || openPool == nullptr || closePool == nullptr || attachSpace == nullptr)
+    {
+        FreeLibrary(module);
+        error = "ImageStorageService exports missing (PoolAttachSpacesForRead).";
+        return false;
+    }
+
+    std::string dirError;
+    if (!EnsureDirectoryTree(directory, dirError))
+    {
+        FreeLibrary(module);
+        error = dirError;
+        return false;
+    }
+
+    void* service = nullptr;
+    long rc = createService(&service, MountLog, 0, nullptr, 1);
+    if (rc < 0 || service == nullptr)
+    {
+        FreeLibrary(module);
+        error = "CreateStorageService failed (" + Hex(rc) + ").";
+        return false;
+    }
+
+    const bool fromDevice = imagePath.size() > 4 && imagePath.compare(0, 4, L"\\\\.\\") == 0;
+    wchar_t diskName[512] = { 0 };
+    void* baseDisk = nullptr;
+    if (fromDevice)
+    {
+        baseDisk = CreateFileW(imagePath.c_str(), GENERIC_READ | GENERIC_WRITE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (baseDisk == INVALID_HANDLE_VALUE)
+        {
+            closeService(service);
+            FreeLibrary(module);
+            error = "Open device failed (win32=" + std::to_string(GetLastError()) + ").";
+            return false;
+        }
+    }
+    else
+    {
+        unsigned char baseStore[20] = { 0 };
+        rc = openVhd(service, imagePath.c_str(), 0, baseStore, &baseDisk);
+        if (rc < 0 || baseDisk == nullptr)
+        {
+            closeService(service);
+            FreeLibrary(module);
+            error = "OpenVirtualHardDisk failed (" + Hex(rc) + ").";
+            return false;
+        }
+    }
+    rc = getDiskName(baseDisk, diskName, 511);
+    if (rc < 0)
+    {
+        if (!fromDevice) CloseHandle(baseDisk);
+        closeService(service);
+        FreeLibrary(module);
+        error = "GetDiskName failed (" + Hex(rc) + ").";
+        return false;
+    }
+    void* pool = nullptr;
+    rc = openPool(service, diskName, directory.c_str(), 1, &pool);
+    if (rc < 0 || pool == nullptr)
+    {
+        if (!fromDevice) CloseHandle(baseDisk);
+        closeService(service);
+        FreeLibrary(module);
+        error = "OpenStoragePool failed (" + Hex(rc) + ").";
+        return false;
+    }
+
+    bool ok = true;
+    for (std::size_t i = 0; i < spaceNames.size(); ++i)
+    {
+        void* spaceDisk = nullptr;
+        const long attachRc = attachSpace(service, pool, spaceNames[i].c_str(), 0, &spaceDisk);
+        if (attachRc < 0 || spaceDisk == nullptr)
+        {
+            error = "space attach failed: " + WideToLocal(spaceNames[i].c_str()) + " (" + Hex(attachRc) + ").";
+            ok = false;
+            break;
+        }
+        wchar_t spaceName[512] = { 0 };
+        const long nameRc = getDiskName(spaceDisk, spaceName, 511);
+        if (nameRc < 0)
+        {
+            error = "GetDiskName(space) failed (" + Hex(nameRc) + ").";
+            ok = false;
+            break;
+        }
+        devices.push_back(std::wstring(spaceName));
+        std::vector<unsigned char> id(20, 0);
+        const long idRc = getStoreId(service, spaceDisk, &id[0]);
+        if (idRc < 0) id.clear();
+        storeIds.push_back(id);
+        report.push_back(WideToLocal(spaceNames[i].c_str()) + " -> " + WideToLocal(spaceName));
+    }
+
+    closePool(service, pool, 0);
+    closeService(service);
+    if (!fromDevice) CloseHandle(baseDisk);
     FreeLibrary(module);
     return ok;
 }
