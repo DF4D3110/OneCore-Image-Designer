@@ -493,7 +493,16 @@ std::vector<PackageRef> ExpandPackage(const FmPackage& package, PackageSection s
     std::vector<std::string> langs{std::string()};
     if (package.language == "*")
     {
-        langs.insert(langs.end(), languages.begin(), languages.end());
+        // UpdateOS 产品包只跑默认语言（en-US），不跑 OEM 语言（与 imageapp 一致）。
+        const std::string lowerId = Lower(package.id);
+        if (lowerId.find("updateos-product-package") != std::string::npos)
+        {
+            langs.push_back("en-US");
+        }
+        else
+        {
+            langs.insert(langs.end(), languages.begin(), languages.end());
+        }
     }
     for (const std::string& language : langs)
     {
