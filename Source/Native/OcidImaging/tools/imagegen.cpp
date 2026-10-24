@@ -4459,6 +4459,7 @@ int CmdLayout(const std::vector<std::string>& args)
     //   2) pool prepare --format（建池、池内 GPT、space/物理分区格式化）
     //   3) apply（可选：UpdateDLL 暂存 + 提交）
     //   4) disk verify（把完整磁盘摊开打印）
+    static int DetachStagingImages(const std::string& dir, bool removeFiles);
     static int CmdImageBuild(const std::vector<std::string>& args)
     {
         std::string layoutPath, outDir, packagesDir, packagesRoot, actionList, oemInput, fmDir, arch = "arm64";
@@ -4467,6 +4468,7 @@ int CmdLayout(const std::vector<std::string>& args)
         std::uint64_t sizeOption = 0;
         unsigned long applyTimeout = 3600;
         bool noApply = false;
+        bool noSpaceOverride = false;
         for (std::size_t i = 3; i < args.size(); ++i)
         {
             const std::string& a = args[i];
@@ -4486,6 +4488,7 @@ int CmdLayout(const std::vector<std::string>& args)
             else if (a == "--timeout") { std::string v; if (!next(v)) { Err("--timeout 缺少值"); return 2; } applyTimeout = static_cast<unsigned long>(std::strtoul(v.c_str(), nullptr, 0)); }
             else if (a == "--format") { if (!next(formatName)) { Err("--format 缺少值"); return 2; } }
             else if (a == "--no-apply") noApply = true;
+            else if (a == "--no-space-override") noSpaceOverride = true;
             else if (!a.empty() && a[0] == '-') { Err("未知参数：" + a); return 2; }
             else { Err("多余的位置参数：" + a); return 2; }
         }
@@ -4531,7 +4534,7 @@ int CmdLayout(const std::vector<std::string>& args)
         if (!noApply && !packagesDir.empty())
         {
             OutLn("=== 3/4 落包（更新暂存 + 提交）===");
-            child = { "apply", "--vhd", imageFile, "--layout", layoutPath, "--packages", packagesDir,
+            child = { "apply", "--vhd", imageFile, "--keep-open", "--layout", layoutPath, "--packages", packagesDir,
                       "--arch", arch, "--outdir", outDir + "\\out", "--dir", stagingDir,
                       "--timeout", std::to_string(applyTimeout) };
             if (!packagesRoot.empty()) { child.push_back("--packages-root"); child.push_back(packagesRoot); }
@@ -4539,12 +4542,41 @@ int CmdLayout(const std::vector<std::string>& args)
             if (!oemInput.empty()) { child.push_back("--oem-input"); child.push_back(oemInput); }
             if (!fmDir.empty()) { child.push_back("--fm-dir"); child.push_back(fmDir); }
             if (!poolName.empty()) { child.push_back("--pool"); child.push_back(poolName); }
+            if (noSpaceOverride) child.push_back("--no-space-override");
             if (!RunSelfWithTimeout(child, (applyTimeout + 600ul) * 1000ul, code, error)) { Err("apply 失败：" + error); return 1; }
             if (code != 0) { Err("apply 退出码 " + std::to_string(code)); return 1; }
         }
         else
         {
             OutLn("=== 3/4 跳过落包（未给 --packages 或指定了 --no-apply）===");
+        }
+
+
+        if (!noApply && !packagesDir.empty())
+        {
+            OutLn("=== 3.5/4 合并 staging 覆盖盘 ===");
+            child = { "vhd", "detach", imageFile, "--force" };
+            RunSelfWithTimeout(child, 120000ul, code, error);
+            child = { "vhd", "set-part-type", imageFile, "--name", "OSPool", "--type", "{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}" };
+            RunSelfWithTimeout(child, 120000ul, code, error);
+            { const int stagingOnly = DetachStagingImages(stagingDir, false);
+              if (stagingOnly > 0) OutLn("  staging ?????????????" + std::to_string(stagingOnly) + " ?"); }
+            child = { "pool", "check", "--vhd", imageFile, "--layout", layoutPath, "--dir", stagingDir };
+            unsigned long mergeCode = 1;
+            if (!RunSelfWithTimeout(child, 900000ul, mergeCode, error)) Err("合并覆盖盘未完成：" + error);
+            if (mergeCode == 0)
+            {
+                const int stagingDetached = DetachStagingImages(stagingDir, true);
+                if (stagingDetached > 0) OutLn("  staging 覆盖盘已卸载：" + std::to_string(stagingDetached) + " 个");
+            }
+            else
+            {
+                Err("合并失败（退出码 " + std::to_string(mergeCode) + "）：保留 staging 覆盖盘以供重试");
+            }
+            child = { "vhd", "set-part-type", imageFile, "--name", "OSPool", "--type", "{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}" };
+            RunSelfWithTimeout(child, 120000ul, code, error);
+            child = { "vhd", "detach", imageFile, "--force", "--kill" };
+            RunSelfWithTimeout(child, 120000ul, code, error);
         }
 
         OutLn("=== 4/4 校验完整磁盘 ===");
@@ -4597,6 +4629,7 @@ int CmdLayout(const std::vector<std::string>& args)
         unsigned int version = 0;
         bool stageOnly = false;
         bool keepOpen = false;
+        bool noSpaceOverride = false;
         bool dry = false;
         bool worker = false;
         bool ti = false;
@@ -4642,6 +4675,7 @@ int CmdLayout(const std::vector<std::string>& args)
             }
             else if (a == "--stage-only") stageOnly = true;
             else if (a == "--keep-open") keepOpen = true;
+            else if (a == "--no-space-override") noSpaceOverride = true;
             else if (a == "--dry") dry = true;
             else if (WantsHelp(args)) { OutLn("apply 用法见 imagegen help"); return 0; }
             else { Err("apply 未知选项：" + a); return 2; }
@@ -4719,23 +4753,42 @@ int CmdLayout(const std::vector<std::string>& args)
                 std::string line;
                 if (std::getline(in, line)) deviceFromChild = line;
             }
-            if (!deviceFromChild.empty() && !layoutPath.empty())
+            // 子进程退出后基座盘已自动卸载；先再保证一次，再用服务打开池、
+            // 挂上 space 触发覆盖盘合并，最后才删覆盖盘。
+            if (!keepOpen)
             {
-                std::vector<std::string> child;
-                child.push_back("pool");
-                child.push_back("detach");
-                child.push_back("--vhd");
-                child.push_back(deviceFromChild);
-                child.push_back("--layout");
-                child.push_back(layoutPath);
-                child.push_back("--dir");
-                child.push_back(stagingDir);
+            std::string baseVhdForCleanup = imagePath;
+            if (baseVhdForCleanup.size() > 4 && baseVhdForCleanup.compare(0, 4, "\\\\.\\") == 0) baseVhdForCleanup.clear();
+            auto runCleanup = [&](const std::vector<std::string>& childArgs, const char* what)
+            {
                 unsigned long cleanupExit = 0;
                 std::string cleanupError;
-                if (!RunSelfWithTimeout(child, 60000, cleanupExit, cleanupError))
-                    Err("\u6536\u5c3e\uff08\u91ca\u653e\u6c60 space\uff09\uff1a" + cleanupError);
+                if (!RunSelfWithTimeout(childArgs, 120000, cleanupExit, cleanupError))
+                    Err(std::string("收尾（") + what + "）：" + cleanupError);
                 else if (cleanupExit != 0)
-                    Err("\u6536\u5c3e\uff08\u91ca\u653e\u6c60 space\uff09\u9000\u51fa\u7801 " + std::to_string(cleanupExit));
+                    Err(std::string("收尾（") + what + "）退出码 " + std::to_string(cleanupExit));
+            };
+            if (!baseVhdForCleanup.empty())
+                runCleanup(std::vector<std::string>{"vhd", "detach", baseVhdForCleanup, "--force", "--kill"}, "先卸载基座盘");
+            if (!layoutPath.empty() && !stagingDir.empty())
+            {
+                const std::string cleanupImage = baseVhdForCleanup.empty() ? deviceFromChild : baseVhdForCleanup;
+                if (!cleanupImage.empty())
+                {
+                    runCleanup(std::vector<std::string>{"vhd", "set-part-type", cleanupImage, "--name", "OSPool", "--type", "{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}"}, "归一化池分区类型");
+                    unsigned long mergeExit = 1;
+                    std::string mergeError;
+                    const bool merged = RunSelfWithTimeout(std::vector<std::string>{"pool", "check", "--vhd", cleanupImage, "--layout", layoutPath, "--dir", stagingDir}, 900000, mergeExit, mergeError);
+                    if (!merged || mergeExit != 0)
+                    {
+                        Err("合并 staging 覆盖盘失败：保留覆盖盘以供重试");
+                    }
+                    else
+                    {
+                        const int stagingDetached = DetachStagingImages(stagingDir, true);
+                        if (stagingDetached > 0) OutLn("  staging 覆盖盘已卸载：" + std::to_string(stagingDetached) + " 个");
+                    }
+                }
             }
             std::string baseVhd = imagePath;
             if (baseVhd.size() > 4 && baseVhd.compare(0, 4, "\\\\.\\") == 0) baseVhd.clear();
@@ -4753,6 +4806,7 @@ int CmdLayout(const std::vector<std::string>& args)
                     Err("\u6536\u5c3e\uff08\u5f3a\u5236\u5378\u8f7d\uff09\uff1a" + cleanupError);
                 else if (cleanupExit != 0)
                     Err("\u6536\u5c3e\uff08\u5f3a\u5236\u5378\u8f7d\uff09\u9000\u51fa\u7801 " + std::to_string(cleanupExit));
+            }
             }
             if (!finished) return 1;
             return childExit == 0 ? 0 : 1;
@@ -4832,6 +4886,7 @@ int CmdLayout(const std::vector<std::string>& args)
         request.updateHistoryFile = Utf8ToWide(outDir + "\\UpdateHistory.xml");
         request.logFile = Utf8ToWide(outDir + "\\imagegen-update.log");
         request.stageOnly = stageOnly;
+        request.noSpaceOverride = noSpaceOverride;
         request.storeStyle = storeStyle;
     {
         std::string archName = arch.empty() ? std::string("amd64") : LowerText(arch);
@@ -4876,7 +4931,12 @@ int CmdLayout(const std::vector<std::string>& args)
         std::vector<std::string> report;
         const bool applied = UpdateApply(request, report, error);
         for (const std::string& line : report) OutLn("  " + line);
-        if (!keepOpen)
+        if (applied && worker)
+        {
+            const int stagingDetached = DetachStagingImages(stagingDir, false);
+            if (stagingDetached > 0) OutLn("  staging ?????????????" + std::to_string(stagingDetached) + " ?");
+        }
+        if (!keepOpen && !worker)
         {
             // 收尾统一走子进程 + 超时：服务侧调用可能在内核里挂死，父进程必须能强制结束它。
             auto runChild = [&](const std::vector<std::string>& childArgs, const char* what) -> bool

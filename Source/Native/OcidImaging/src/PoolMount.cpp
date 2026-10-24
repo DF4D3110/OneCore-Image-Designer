@@ -356,6 +356,14 @@ bool PoolMountForUpdate(const std::wstring& imagePath,
 }
 // 挂载池内全部 space 并解析每个 space 内指定分区的卷路径（供 CLI 的 pool mount 使用）；
 // 调用方负责随后 PoolDetachSpaces 或让进程退出时自动卸载。
+namespace {
+static std::string HrHexLocal(long rc)
+{
+    char buffer[16] = {0};
+    wsprintfA(buffer, "%08X", static_cast<unsigned int>(rc));
+    return std::string(buffer);
+}
+}
 bool PoolMountSpaces(const std::wstring& imagePath, const std::wstring& poolName,
                      unsigned int version, const std::wstring& directory,
                      const std::vector<std::pair<std::wstring, std::wstring> >& spaces,
@@ -406,7 +414,29 @@ bool PoolMountSpaces(const std::wstring& imagePath, const std::wstring& poolName
     unsigned char baseId[20] = { 0 };
     void* imageDisk = nullptr;
     wchar_t diskName[512] = { 0 };
-    if (openVhd(service, imagePath.c_str(), 0, baseId, &imageDisk) < 0 || imageDisk == nullptr)
+    const bool byDevice = imagePath.size() > 4 && imagePath.compare(0, 4, L"\\\\.\\") == 0;
+    if (byDevice)
+    {
+        HANDLE diskHandle = CreateFileW(imagePath.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (diskHandle == INVALID_HANDLE_VALUE)
+        {
+            if (closeService != nullptr) closeService(service);
+            FreeLibrary(module);
+            error = "CreateFileW(device) failed (win32=" + std::to_string(GetLastError()) + ").";
+            return false;
+        }
+        imageDisk = diskHandle;
+        if (getStoreId(service, imageDisk, baseId) < 0)
+        {
+            CloseHandle(diskHandle);
+            if (closeService != nullptr) closeService(service);
+            FreeLibrary(module);
+            error = "GetStoreId(base) failed.";
+            return false;
+        }
+    }
+    else if (openVhd(service, imagePath.c_str(), 0, baseId, &imageDisk) < 0 || imageDisk == nullptr)
     {
         if (closeService != nullptr) closeService(service);
         FreeLibrary(module);
@@ -426,9 +456,10 @@ bool PoolMountSpaces(const std::wstring& imagePath, const std::wstring& poolName
     for (std::size_t i = 0; i < spaces.size(); ++i)
     {
         void* spaceDisk = nullptr;
-        if (attachSpace(service, pool, spaces[i].first.c_str(), 0, &spaceDisk) < 0 || spaceDisk == nullptr)
+        const long attachRc = attachSpace(service, pool, spaces[i].first.c_str(), 0, &spaceDisk);
+        if (attachRc < 0 || spaceDisk == nullptr)
         {
-            report.push_back("space " + WideToLocal(spaces[i].first.c_str()) + ": attach failed");
+            report.push_back("space " + WideToLocal(spaces[i].first.c_str()) + ": attach failed (hr=0x" + HrHexLocal(attachRc) + ")");
             ok = false;
             continue;
         }

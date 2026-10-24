@@ -518,9 +518,12 @@ bool UpdateApply(const UpdateRequest& request, std::vector<std::string>& report,
             }
             report.push_back(std::string("storeId[") + std::to_string(si) + "]=" + hex);
         }
-        for (const std::vector<unsigned char>& id : storeIds)
+        if (!request.noSpaceOverride)
         {
-            if (id.size() == 20) addSpace(context, id.data());
+            for (const std::vector<unsigned char>& id : storeIds)
+            {
+                if (id.size() == 20) addSpace(context, id.data());
+            }
         }
         if (!request.overlapFile.empty() && setOverlapList != nullptr)
         {
@@ -574,9 +577,12 @@ bool UpdateApply(const UpdateRequest& request, std::vector<std::string>& report,
             return false;
         }
         if (!request.updateHistoryFile.empty()) setHistoryPath(context, request.updateHistoryFile.c_str());
-        for (const std::vector<unsigned char>& id : storeIds)
+        if (!request.noSpaceOverride)
         {
-            if (id.size() == 20) addSpace(context, id.data());
+            for (const std::vector<unsigned char>& id : storeIds)
+            {
+                if (id.size() == 20) addSpace(context, id.data());
+            }
         }
         if (!layoutPointers.empty() && setLayouts != nullptr)
         {

@@ -50,7 +50,8 @@ struct UpdateRequest
     std::wstring logFile;
     std::wstring storeArch;
     std::wstring overlapFile;           // 可为空
-    bool stageOnly = false;             // true = 只跑 PrepareUpdate（暂存）
+    bool stageOnly = false;
+    bool noSpaceOverride = false;      // true = 不给 space 加 imaging override             // true = 只跑 PrepareUpdate（暂存）
 };
 
 // 跑完整落包（暂存 + 提交）。report 是给人看的进度行。
