@@ -1504,7 +1504,7 @@ bool PoolDetachSpaces(const std::wstring& imagePath, const std::wstring& poolNam
 namespace {
     std::string ProbeVolumeFileSystem(const std::string& device, std::uint64_t offset)
     {
-        unsigned char head[512] = { 0 };
+        unsigned char head[4096] = { 0 };
         std::string readError;
         if (!VhdReadBytes(device, offset, head, static_cast<std::size_t>(sizeof(head)), readError)) return "读失败";
         bool allZero = true;
