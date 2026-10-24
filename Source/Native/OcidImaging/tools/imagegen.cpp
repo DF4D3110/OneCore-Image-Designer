@@ -4469,6 +4469,7 @@ int CmdLayout(const std::vector<std::string>& args)
         unsigned long applyTimeout = 3600;
         bool noApply = false;
         bool noSpaceOverride = false;
+        bool keepOverlays = false;
         for (std::size_t i = 3; i < args.size(); ++i)
         {
             const std::string& a = args[i];
@@ -4489,6 +4490,7 @@ int CmdLayout(const std::vector<std::string>& args)
             else if (a == "--format") { if (!next(formatName)) { Err("--format 缺少值"); return 2; } }
             else if (a == "--no-apply") noApply = true;
             else if (a == "--no-space-override") noSpaceOverride = true;
+            else if (a == "--keep-overlays") keepOverlays = true;
             else if (!a.empty() && a[0] == '-') { Err("未知参数：" + a); return 2; }
             else { Err("多余的位置参数：" + a); return 2; }
         }
@@ -4566,7 +4568,7 @@ int CmdLayout(const std::vector<std::string>& args)
             if (!RunSelfWithTimeout(child, 900000ul, mergeCode, error)) Err("合并覆盖盘未完成：" + error);
             if (mergeCode == 0)
             {
-                const int stagingDetached = DetachStagingImages(stagingDir, true);
+                const int stagingDetached = DetachStagingImages(stagingDir, !keepOverlays);
                 if (stagingDetached > 0) OutLn("  staging 覆盖盘已卸载：" + std::to_string(stagingDetached) + " 个");
             }
             else
