@@ -168,7 +168,13 @@ if ($dedup.Count -ne $plan.Count) {
     Say ("同一 space 存在重复覆盖盘，去重后 " + $dedup.Count + " 个")
     $plan = @($dedup.Values)
 }
+$skipped = @($plan | Where-Object { $_.Space -eq 'VIRT_EFIESPDisk' })
+if ($skipped.Count -gt 0) {
+    Say 'VIRT_EFIESPDisk 跳过合并（移走覆盖盘后服务无法 attach，保留覆盖盘）'
+    $plan = @($plan | Where-Object { $_.Space -ne 'VIRT_EFIESPDisk' })
+}
 Say ("覆盖盘 " + $plan.Count + " 个：" + (($plan | ForEach-Object { $_.Space }) -join ','))
+if ($plan.Count -eq 0) { Say '没有需要合并的覆盖盘'; exit 0 }
 
 # 2) 把覆盖盘挪出 staging，让池打开时回落到镜像内的真实 space
 $keep = Join-Path (Split-Path -Parent $Dir) 'overlays-keep'
@@ -287,6 +293,7 @@ Invoke-Tool @('vhd', 'detach', $Image, '--force', '--kill') | Out-Null
 if (-not $KeepOverlays -and $failed -eq 0) {
     foreach ($p in $plan) { Remove-Item -LiteralPath $p.Keep -Force -ErrorAction SilentlyContinue }
 }
+foreach ($s in $skipped) { Say ('保留覆盖盘（未合并）：' + $s.Space + ' -> ' + $s.File) }
 
 if ($failed -gt 0) { Say ("完成，但有 " + $failed + " 个 space 未完全合并"); exit 1 }
 Say '完成：所有 space 已合并回镜像'
