@@ -17,7 +17,8 @@ public sealed record MicrosoftCatalogSearchOptions(
     string? UpdateType = null,
     DateTime? FromDate = null,
     DateTime? ToDate = null,
-    bool IncludePreview = false);
+    bool IncludePreview = false,
+    string? ProductFamily = null);
 
 public sealed record MicrosoftCatalogFile(
     string Name,
@@ -135,7 +136,12 @@ public sealed class MicrosoftCatalogService
     private static string BuildQuery(MicrosoftCatalogSearchOptions options)
     {
         var parts = new List<string> { options.Search.Trim() };
-        if (!string.IsNullOrWhiteSpace(options.OperatingSystem)) parts.Add(options.OperatingSystem.Trim());
+        if (!string.IsNullOrWhiteSpace(options.ProductFamily) &&
+            !string.Equals(options.ProductFamily, "全部产品", StringComparison.OrdinalIgnoreCase))
+            parts.Add(options.ProductFamily.Trim());
+        if (!string.IsNullOrWhiteSpace(options.OperatingSystem) &&
+            !string.Equals(options.OperatingSystem, "全部系统", StringComparison.OrdinalIgnoreCase))
+            parts.Add(options.OperatingSystem.Trim());
         if (!string.IsNullOrWhiteSpace(options.Version)) parts.Add(options.Version.Trim());
         if (!string.Equals(options.Architecture, "All", StringComparison.OrdinalIgnoreCase))
             parts.Add(options.Architecture.Trim());
