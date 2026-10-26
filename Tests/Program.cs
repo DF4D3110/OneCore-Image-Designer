@@ -22,6 +22,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("UUP payload lookup and safe path", () => { PayloadLookup(); return Task.CompletedTask; }),
     ("UUP bridge cancellation and errors", BridgeCancellationAndErrors),
     ("UUP media conversion preflight blocks unsafe targets", () => { MediaConversionPreflight(); return Task.CompletedTask; }),
+    ("Microsoft Catalog HTML parsing and deduplication", () => { CatalogParsing(); return Task.CompletedTask; }),
+    ("Microsoft Catalog optional query filters", () => { CatalogOptionalQueryFilters(); return Task.CompletedTask; }),
+    ("Microsoft Catalog download metadata parsing", () => { CatalogDownloadMetadata(); return Task.CompletedTask; }),
     ("artifact registry and preflight", () => { ArtifactPreflight(); return Task.CompletedTask; }),
     ("SxS preview is non-executing and blocks unsafe scripts", () => { SxsPreview(); return Task.CompletedTask; }),
     ("OS generation XML regressions", () => { GenerationRegression(); return Task.CompletedTask; }),
@@ -61,6 +64,71 @@ static void QueryParsing()
         new[] { "AMD64", "ARM64", "x86", "ARM" }.Select(UupQueryParser.ParseArchitecture));
     Throws<ArgumentException>(() => UupQueryParser.ParseFilters(Array.Empty<string>()));
     Throws<ArgumentException>(() => UupQueryParser.ParseFilters(new[] { "unexpected" }));
+}
+
+static void CatalogParsing()
+{
+    const string html = """
+        <table id="searchResult">
+          <tr><td>header</td></tr>
+          <tr>
+            <td>1</td><td>2026-10 Cumulative Update for Windows 11 (KB5065426)</td>
+            <td>Windows 11</td><td>Security Updates</td><td>10/20/2026</td>
+            <td>26100.1</td><td>4200 MB</td>
+            <td><input id="11111111-1111-1111-1111-111111111111" /></td>
+          </tr>
+          <tr>
+            <td>2</td><td>duplicate</td><td>Windows 11</td><td>Updates</td><td>10/20/2026</td>
+            <td>26100.1</td><td>4200 MB</td>
+            <td><input value="11111111-1111-1111-1111-111111111111" /></td>
+          </tr>
+        </table>
+        """;
+    var updates = MicrosoftCatalogService.ParseSearchHtml(html);
+    Equal(1, updates.Count);
+    Equal("11111111-1111-1111-1111-111111111111", updates[0].Guid);
+    Equal("2026-10 Cumulative Update for Windows 11 (KB5065426)", updates[0].Title);
+    Equal("Security Updates", updates[0].Classification);
+    Equal("KB5065426", updates[0].KbNumber);
+    Equal("Windows 11", updates[0].Platform);
+}
+
+static void CatalogOptionalQueryFilters()
+{
+    var broad = MicrosoftCatalogService.BuildQuery(new MicrosoftCatalogSearchOptions(
+        ProductFamily: "Windows Phone / Mobile"));
+    Equal("Windows Phone / Mobile", broad);
+
+    var detailed = MicrosoftCatalogService.BuildQuery(new MicrosoftCatalogSearchOptions(
+        Search: "Defender",
+        Version: "1.427.3.0",
+        KbNumber: "KB2267602",
+        Architecture: "ARM64",
+        Language: "English"));
+    Equal("Defender KB2267602 1.427.3.0 ARM64 English", detailed);
+
+    var empty = MicrosoftCatalogService.BuildQuery(new MicrosoftCatalogSearchOptions());
+    Equal(string.Empty, empty);
+}
+
+static void CatalogDownloadMetadata()
+{
+    const string html = """
+        <script>
+        var downloadInformation = [{
+          "updateID":"11111111-1111-1111-1111-111111111111",
+          "files":[
+            {"fileName":"update-x64.msu","url":"http://download.windowsupdate.com/c/msdownload/update/software/secu/2026/update-x64.msu","digest":"abc"},
+            {"fileName":"blocked.exe","url":"https://example.invalid/blocked.exe","digest":"def"}
+          ]
+        }];
+        </script>
+        """;
+    var files = MicrosoftCatalogService.ParseDownloadInformation(html);
+    Equal(1, files.Count);
+    Equal("update-x64.msu", files[0].Name);
+    True(files[0].Url.StartsWith("https://download.windowsupdate.com/", StringComparison.Ordinal),
+        "Microsoft download URLs should be upgraded to HTTPS.");
 }
 
 static void QueryProfilePlanning()

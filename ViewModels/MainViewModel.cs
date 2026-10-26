@@ -51,6 +51,7 @@ namespace OneCore_Image_Designer.ViewModels
         private SxsViewModel? _sxsVM;
         private AddonKitViewModel? _addonKitVM;
         private UpdateAppViewModel? _updateAppVM;
+        private CatalogDownloadViewModel? _catalogDownloadVM;
 
         public void NavigateToUup()
         {
@@ -71,6 +72,16 @@ namespace OneCore_Image_Designer.ViewModels
         }
 
         [RelayCommand] public void OpenUup() => NavigateToUup();
+        public void NavigateToCatalogDownload()
+        {
+            OpenTab("catalog-download", "Microsoft 更新目录下载", () =>
+            {
+                _catalogDownloadVM ??= new CatalogDownloadViewModel();
+                return ((object)_catalogDownloadVM, null);
+            });
+        }
+
+        [RelayCommand] public void OpenCatalogDownload() => NavigateToCatalogDownload();
         [RelayCommand] public void OpenSxs() => NavigateToSxs();
 
         /// <summary>打开（或激活）内置 addonkit 工作区标签页。</summary>

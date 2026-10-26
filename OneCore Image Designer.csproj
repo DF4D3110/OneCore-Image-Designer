@@ -19,6 +19,7 @@
   <ItemGroup>
     <Resource Include="Assets\app.ico" />
     <Resource Include="Assets\banner.png" />
+    <None Include="Tools\aria2c\**\*.*" CopyToOutputDirectory="PreserveNewest" Condition="Exists('Tools\aria2c')" />
     <!-- 设备布局内置模板 + 按 Windows 系统 build 归档的官方校验规则（非 ADK 版本）：随输出目录发布，运行时按路径加载 -->
     <None Include="Assets\Templates\**\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Assets\ValidationRules\**\*.xml" CopyToOutputDirectory="PreserveNewest" />
@@ -87,6 +88,15 @@
     </ItemGroup>
     <Copy SourceFiles="@(AddonKitSource)"
           DestinationFiles="@(AddonKitSource->'$(OutDir)addonkit\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyAria2ToPublish" AfterTargets="Publish" Condition="Exists('$(MSBuildProjectDirectory)\Tools\aria2c')">
+    <ItemGroup>
+      <Aria2PublishOutput Include="$(MSBuildProjectDirectory)\Tools\aria2c\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(Aria2PublishOutput)"
+          DestinationFiles="@(Aria2PublishOutput->'$(PublishDir)Tools\aria2c\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
   </Target>
 
