@@ -76,6 +76,9 @@
         <DataTemplate DataType="{x:Type vm:UpdateAppViewModel}">
             <views:UpdateAppView/>
         </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:CatalogDownloadViewModel}">
+            <views:CatalogDownloadView/>
+        </DataTemplate>
     </Window.Resources>
     <Window.DataContext>
         <vm:MainViewModel/>
@@ -109,6 +112,7 @@
                 <MenuItem Header="FFU 文件浏览器" Command="{Binding GotoFfuBrowserCommand}"/>
                 <Separator/>
                 <MenuItem Header="UUP 更新查询与下载" Command="{Binding OpenUupCommand}"/>
+                <MenuItem Header="Microsoft 更新目录下载" Command="{Binding OpenCatalogDownloadCommand}"/>
                 <MenuItem Header="SxS / CBS 工具" Command="{Binding OpenSxsCommand}"/>
                 <MenuItem Header="addonkit 工作区" Command="{Binding OpenAddonKitCommand}"/>
                 <MenuItem Header="updateapp 更新调度" Command="{Binding OpenUpdateAppCommand}"/>

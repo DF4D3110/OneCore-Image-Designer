@@ -34,6 +34,8 @@ C++（见[自带服务栈](#自带服务栈进行中)）。
   否则转换预检会明确阻止启动（见[第三方代码与许可](#第三方代码与许可)）。
 
 UUP 的查询与下载只会在用户主动发起时进行；启动时不查询、不下载任何东西。
+Microsoft 更新目录下载器同样只在用户主动查询/下载时联网；若发布包包含经过许可审查的
+`Tools\aria2c\aria2c.exe`，会优先使用 aria2 的分段/断点下载，否则自动回退内置 HttpClient 下载。
 
 ## 构建与运行
 
@@ -90,6 +92,7 @@ dotnet run --project ".\Tests\OneCore.Image.Designer.OfflineTests.csproj" --conf
 | CBS | `Views/Cbs/` | 对已挂载镜像做 CBS 服务。 |
 | FFU 浏览 | `Views/FFUBrowser/` | 浏览 FFU 分区，带十六进制查看器。 |
 | updateapp | `Views/UpdateAppView.xaml` | 派发各版本专属的 `updateapp.exe` 命令：按该版本的官方用法文本逐版本渲染，每个命令带参数模板、分类与风险等级。 |
+| Microsoft 更新目录 | `Views/CatalogDownloadView.xaml` | 原生查询 Microsoft Update Catalog，按系统/架构筛选更新，读取 MSU/CAB 文件明细并下载到本地；aria2 可用时优先分段/断点下载，失败自动回退内置下载器。 |
 | UUP | `Views/UupView.xaml` | 按 SKU/架构查询微软 UUP（AMD64、ARM64、x86、ARM）；高级选项允许填写设备版本、通道和分支，不填分支时自动扫描一组已知 Retail/Insider 分支组合。目标 NT Build 与标题关键词用于本地筛选，下载语言从更新元数据读取并可选择，支持快照和源码构建的 ISO 转换器。查询、下载和转换均在后台进程执行，日志显示在单独窗口。 |
 | SxS | `Views/SxsView.xaml` | 对选定镜像与输出目录做**不执行**的预检/预览：不跑脚本，不产生输出。 |
 | addonkit | `Views/AddonKitView.xaml` | 微软 `iot-adk-addonkit` 前端：模块/ADK 状态、示例工作区发现、预检门禁，以及提权的一键构建命令并实时回传日志。 |
@@ -400,6 +403,7 @@ Release 上，标签为 `adktool`。
 | MobilePackageGen（fork） | [MobileTooling/MobilePackageGen](https://github.com/MobileTooling/MobilePackageGen) → [DF4D3110/MobilePackageGen](https://github.com/DF4D3110/MobilePackageGen) | `MobilePackageGen/` —— CLI、WinForms GUI、`CbsxCli`、`SxSFounderCli`、各类镜像适配器、CAB/DCM 压缩、cat/签名重建 | MIT。完整组件表见 `MobilePackageGen/readme.md`，许可正文见 `MobilePackageGen/license.md`。 |
 | WSK Tools v1.0.4 | [gus33000/WSK](https://github.com/gus33000/WSK) | MobilePackageGen fork 的原始基线 | MIT |
 | UUPMediaCreator | [OSTooling/UUPMediaCreator](https://github.com/OSTooling/UUPMediaCreator) | `ThirdParty/UUPMediaCreator/` —— UUP 桥接与媒体转换器的源码及所需工程，保留上游许可与 README；转换器从源码构建，不签入其预编译输出 | MIT。`src/Cabinet/Xna/LzxDecoder.cs` 为 LGPL-2.1 或 MS-PL 双许可，保留其原始文件头。上游 `cdimage.exe` 不签入仓库；本地构建/运行需自行提供。 |
+| aria2 | [aria2/aria2](https://github.com/aria2/aria2) | `Tools/aria2c/` —— 可选的发布运行时资产；应用检测到经过审查的 `aria2c.exe` 后用于高效下载，缺失时回退原生下载 | GPL-2.0；发布二进制前必须随发布物提供对应许可证、来源、版本、架构和 SHA-256，仓库当前仅保留接入说明，未签入未经审查的二进制。 |
 | NSudo（提权） | [M2TeamArchived/NSudo](https://github.com/M2TeamArchived/NSudo)（已归档；`NSudoAPI.dll` 用 [UUP-Project/NSudo](https://github.com/UUP-Project/NSudo) 分支构建） | C# 绑定位于 `MobilePackageGen/MobilePackageGen.Common/NSudo`；DLL 本身**不**随仓库分发 | MIT |
 | wcpex | [smx-smx/wcpex](https://github.com/smx-smx/wcpex) | `Tools/wcpex/wcpex.exe` + `wcp.dll`，以内嵌资源方式打包、运行期释放，用于解压 DCM 压缩的清单 | 预编译二进制；上游未随附许可文件，因此这里按原样保留、不参与构建。 |
 | DevImgGen | [mediaexplorer74/DevImgGen](https://github.com/mediaexplorer74/DevImgGen)（fork：[DF4D3110/DevImgGen](https://github.com/DF4D3110/DevImgGen)） | 镜像构建页入口的**设计参考**，记录在 `ViewModels/ImageBuild/ImageBuildViewModel.cs` 的文件头注释里 | MIT。未复制任何代码，也未分发其中任何内容。 |

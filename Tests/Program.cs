@@ -22,6 +22,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("UUP payload lookup and safe path", () => { PayloadLookup(); return Task.CompletedTask; }),
     ("UUP bridge cancellation and errors", BridgeCancellationAndErrors),
     ("UUP media conversion preflight blocks unsafe targets", () => { MediaConversionPreflight(); return Task.CompletedTask; }),
+    ("Microsoft Catalog HTML parsing and deduplication", () => { CatalogParsing(); return Task.CompletedTask; }),
     ("artifact registry and preflight", () => { ArtifactPreflight(); return Task.CompletedTask; }),
     ("SxS preview is non-executing and blocks unsafe scripts", () => { SxsPreview(); return Task.CompletedTask; }),
     ("OS generation XML regressions", () => { GenerationRegression(); return Task.CompletedTask; }),
@@ -61,6 +62,31 @@ static void QueryParsing()
         new[] { "AMD64", "ARM64", "x86", "ARM" }.Select(UupQueryParser.ParseArchitecture));
     Throws<ArgumentException>(() => UupQueryParser.ParseFilters(Array.Empty<string>()));
     Throws<ArgumentException>(() => UupQueryParser.ParseFilters(new[] { "unexpected" }));
+}
+
+static void CatalogParsing()
+{
+    const string html = """
+        <table id="searchResult">
+          <tr><td>header</td></tr>
+          <tr>
+            <td>1</td><td>2026-10 Cumulative Update for Windows 11</td>
+            <td>Windows 11</td><td>Security Updates</td><td>10/20/2026</td>
+            <td>26100.1</td><td>4200 MB</td>
+            <td><input id="11111111-1111-1111-1111-111111111111" /></td>
+          </tr>
+          <tr>
+            <td>2</td><td>duplicate</td><td>Windows 11</td><td>Updates</td><td>10/20/2026</td>
+            <td>26100.1</td><td>4200 MB</td>
+            <td><input value="11111111-1111-1111-1111-111111111111" /></td>
+          </tr>
+        </table>
+        """;
+    var updates = MicrosoftCatalogService.ParseSearchHtml(html);
+    Equal(1, updates.Count);
+    Equal("11111111-1111-1111-1111-111111111111", updates[0].Guid);
+    Equal("2026-10 Cumulative Update for Windows 11", updates[0].Title);
+    Equal("Security Updates", updates[0].Classification);
 }
 
 static void QueryProfilePlanning()
