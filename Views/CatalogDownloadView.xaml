@@ -50,7 +50,7 @@
                     <ComboBox ItemsSource="{Binding ProductFamilyChoices}" SelectedItem="{Binding ProductFamily}" Margin="0,3,0,0"/>
                 </StackPanel>
                 <StackPanel Grid.Row="1" Grid.Column="1" Margin="4,8,8,0">
-                    <TextBlock Text="系统 / 产品版本" Foreground="{StaticResource ICDSubtle}"/>
+                    <TextBlock Text="详细产品线" Foreground="{StaticResource ICDSubtle}"/>
                     <ComboBox ItemsSource="{Binding OperatingSystemChoices}" SelectedItem="{Binding OperatingSystem}" Margin="0,3,0,0"/>
                 </StackPanel>
                 <StackPanel Grid.Row="1" Grid.Column="2" Margin="4,8,8,0">

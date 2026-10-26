@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace OneCore_Image_Designer.Services;
@@ -66,8 +67,14 @@ public sealed class MicrosoftCatalogService
 {
     private static readonly HttpClient Http = CreateClient();
     private static readonly Regex RowRegex = new(
-        "<tr[^>]*>\\s*<td[^>]*>.*?</td>\\s*<td[^>]*>(?<title>.*?)</td>\\s*<td[^>]*>(?<products>.*?)</td>\\s*<td[^>]*>(?<classification>.*?)</td>\\s*<td[^>]*>(?<date>.*?)</td>\\s*<td[^>]*>(?<version>.*?)</td>\\s*<td[^>]*>(?<size>.*?)</td>\\s*<td[^>]*>.*?(?:id=\\\"(?<guid>[0-9a-f-]{20,})\\\"|value=\\\"(?<guid2>[0-9a-f-]{20,})\\\").*?</tr>",
+        "<tr\\b(?<attrs>[^>]*)>(?<body>.*?)</tr>",
         RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+    private static readonly Regex CellRegex = new(
+        "<td\\b[^>]*>(?<value>.*?)</td>",
+        RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+    private static readonly Regex GuidRegex = new(
+        "(?<guid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex LinkRegex = new(
         "<a[^>]+href=[\\\"'](?<url>[^\\\"']+)[\\\"'][^>]*>(?<name>[^<]+)</a>",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -98,19 +105,23 @@ public sealed class MicrosoftCatalogService
         var list = new List<MicrosoftCatalogUpdate>();
         foreach (Match row in RowRegex.Matches(html))
         {
-            var guid = First(row, "guid", "guid2");
+            var cells = CellRegex.Matches(row.Groups["body"].Value);
+            if (cells.Count < 7) continue;
+            var guidMatch = GuidRegex.Match(row.Groups["attrs"].Value);
+            if (!guidMatch.Success) guidMatch = GuidRegex.Match(row.Groups["body"].Value);
+            var guid = guidMatch.Success ? guidMatch.Groups["guid"].Value : string.Empty;
             if (string.IsNullOrWhiteSpace(guid)) continue;
-            var title = Clean(row.Groups["title"].Value);
+            var title = Clean(cells[1].Groups["value"].Value);
             if (title.Length == 0) continue;
-            var platform = Clean(row.Groups["products"].Value);
+            var platform = Clean(cells[2].Groups["value"].Value);
             list.Add(new MicrosoftCatalogUpdate(
                 guid,
                 title,
                 platform,
-                Clean(row.Groups["classification"].Value),
-                ParseDate(Clean(row.Groups["date"].Value)),
-                Clean(row.Groups["version"].Value),
-                Clean(row.Groups["size"].Value),
+                Clean(cells[3].Groups["value"].Value),
+                ParseDate(Clean(cells[4].Groups["value"].Value)),
+                Clean(cells[5].Groups["value"].Value),
+                Clean(cells[6].Groups["value"].Value),
                 Array.Empty<MicrosoftCatalogFile>(),
                 KbNumber: ExtractKb(title),
                 Platform: platform));
@@ -125,22 +136,112 @@ public sealed class MicrosoftCatalogService
         MicrosoftCatalogUpdate update,
         CancellationToken ct = default)
     {
-        using var response = await Http.GetAsync(
-            $"https://www.catalog.update.microsoft.com/DownloadDialog.aspx?updateid={Uri.EscapeDataString(update.Guid)}",
-            HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
+        var payload = $"[{{\"size\":0,\"languages\":\"\",\"uidInfo\":\"{update.Guid}\",\"updateID\":\"{update.Guid}\"}}]";
+        using var response = await Http.PostAsync(
+            "https://www.catalog.update.microsoft.com/DownloadDialog.aspx",
+            new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["updateIDs"] = payload,
+                ["updateIDsBlockedForImport"] = string.Empty,
+                ["contentImport"] = string.Empty,
+                ["sku"] = string.Empty,
+                ["serverName"] = string.Empty,
+                ["ssl"] = string.Empty,
+                ["portNumber"] = string.Empty,
+                ["version"] = string.Empty,
+                ["protocol"] = string.Empty
+            }), ct).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         var html = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-        var files = new List<MicrosoftCatalogFile>();
+        var files = ParseDownloadInformation(html).ToList();
         foreach (Match match in LinkRegex.Matches(html))
         {
             var url = WebUtility.HtmlDecode(match.Groups["url"].Value).Trim();
             var name = WebUtility.HtmlDecode(match.Groups["name"].Value).Trim();
-            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
-                !uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
-                string.IsNullOrWhiteSpace(name)) continue;
-            files.Add(new MicrosoftCatalogFile(name, uri.ToString()));
+            if (string.IsNullOrWhiteSpace(name)) continue;
+            var normalized = NormalizeDownloadUri(url);
+            if (normalized is not null) files.Add(new MicrosoftCatalogFile(name, normalized));
         }
         return update with { Files = files.DistinctBy(x => x.Url).ToList() };
+    }
+
+    public static IReadOnlyList<MicrosoftCatalogFile> ParseDownloadInformation(string html)
+    {
+        var files = new List<MicrosoftCatalogFile>();
+        var jsFiles = new Dictionary<int, (string? Name, string? Url, string? Sha256)>();
+        foreach (Match match in Regex.Matches(html,
+                     @"downloadInformation\[\d+\]\.files\[(?<index>\d+)\]\.(?<property>url|fileName|sha256)\s*=\s*['""](?<value>.*?)['""]\s*;",
+                     RegexOptions.IgnoreCase | RegexOptions.Singleline))
+        {
+            var index = int.Parse(match.Groups["index"].Value, CultureInfo.InvariantCulture);
+            jsFiles.TryGetValue(index, out var current);
+            var value = WebUtility.HtmlDecode(match.Groups["value"].Value);
+            current = match.Groups["property"].Value.ToLowerInvariant() switch
+            {
+                "filename" => (value, current.Url, current.Sha256),
+                "url" => (current.Name, value, current.Sha256),
+                _ => (current.Name, current.Url, value)
+            };
+            jsFiles[index] = current;
+        }
+        foreach (var file in jsFiles.OrderBy(x => x.Key).Select(x => x.Value))
+        {
+            var normalized = NormalizeDownloadUri(file.Url);
+            if (!string.IsNullOrWhiteSpace(file.Name) && normalized is not null)
+                files.Add(new MicrosoftCatalogFile(file.Name, normalized, Sha256: file.Sha256));
+        }
+
+        var assignment = Regex.Match(html, @"downloadInformation\s*=\s*\[",
+            RegexOptions.IgnoreCase);
+        if (!assignment.Success) return files;
+        var json = ExtractBalancedArray(html, html.IndexOf('[', assignment.Index));
+        if (json is null) return files;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            foreach (var update in document.RootElement.EnumerateArray())
+            {
+                if (!update.TryGetProperty("files", out var updateFiles)) continue;
+                foreach (var file in updateFiles.EnumerateArray())
+                {
+                    var name = GetJsonString(file, "fileName");
+                    var normalized = NormalizeDownloadUri(GetJsonString(file, "url"));
+                    if (string.IsNullOrWhiteSpace(name) || normalized is null) continue;
+                    var digest = GetJsonString(file, "digest");
+                    if (!files.Any(existing => existing.Url.Equals(normalized, StringComparison.OrdinalIgnoreCase)))
+                        files.Add(new MicrosoftCatalogFile(name, normalized, Sha256: digest));
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            // The Catalog occasionally emits a JavaScript object rather than strict JSON.
+        }
+        return files;
+    }
+
+    private static string? ExtractBalancedArray(string text, int start)
+    {
+        if (start < 0 || start >= text.Length || text[start] != '[') return null;
+        var depth = 0;
+        var quoted = false;
+        var escaped = false;
+        for (var index = start; index < text.Length; index++)
+        {
+            var current = text[index];
+            if (quoted)
+            {
+                if (escaped) escaped = false;
+                else if (current == '\\') escaped = true;
+                else if (current == '"') quoted = false;
+                continue;
+            }
+            if (current == '"') { quoted = true; continue; }
+            if (current == '[') depth++;
+            else if (current == ']' && --depth == 0)
+                return text[start..(index + 1)];
+        }
+        return null;
     }
 
     public static string BuildQuery(MicrosoftCatalogSearchOptions options)
@@ -206,8 +307,24 @@ public sealed class MicrosoftCatalogService
         return client;
     }
 
-    private static string First(Match match, params string[] names) =>
-        names.Select(name => match.Groups[name].Value).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? string.Empty;
+    private static string? GetJsonString(JsonElement element, string property) =>
+        element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static string? NormalizeDownloadUri(string? value)
+    {
+        if (!Uri.TryCreate(value?.Trim(), UriKind.Absolute, out var uri)) return null;
+        var host = uri.Host.TrimEnd('.').ToLowerInvariant();
+        if (!host.Equals("download.windowsupdate.com", StringComparison.Ordinal) &&
+            !host.EndsWith(".download.windowsupdate.com", StringComparison.Ordinal) &&
+            !host.Equals("download.microsoft.com", StringComparison.Ordinal) &&
+            !host.EndsWith(".download.microsoft.com", StringComparison.Ordinal) &&
+            !host.EndsWith(".delivery.mp.microsoft.com", StringComparison.Ordinal))
+            return null;
+        var builder = new UriBuilder(uri) { Scheme = Uri.UriSchemeHttps, Port = -1 };
+        return builder.Uri.ToString();
+    }
 
     private static string Clean(string value) =>
         Regex.Replace(WebUtility.HtmlDecode(value), "<.*?>", " ").Replace("&nbsp;", " ", StringComparison.OrdinalIgnoreCase).Trim();

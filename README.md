@@ -39,7 +39,11 @@ Microsoft 更新目录下载器同样只在用户主动查询/下载时联网；
 查询条件中的关键词、KB 和版本均为可选项；也可以只选择产品/平台、系统版本或架构。
 目录筛选覆盖 Windows 历史版本、Windows Phone/Mobile、Windows CE/Embedded、IoT、HoloLens，
 以及 Office、SQL Server、Exchange、Visual Studio、.NET、Edge、Defender 和驱动等 Microsoft 产品。
+产品线选项会随产品族联动，Windows 可细分到历史版本/分支，Office、SQL、Phone/Mobile、
+CE/Embedded、IoT 和 HoloLens 使用各自的产品线，不会把非 Windows 产品强行套用 Windows 版本。
 不填写版本或 KB 时不会默认限制到当前 Windows 版本，而是返回在线目录可提供的全部匹配版本。
+文件明细通过 Microsoft Catalog 官方 `DownloadDialog.aspx` POST 流程读取，支持其脚本返回的
+文件名、下载地址和校验字段；下载地址仅接受 Microsoft 官方域名，并将历史 HTTP 地址升级为 HTTPS。
 
 ## 构建与运行
 

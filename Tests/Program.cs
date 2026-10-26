@@ -24,6 +24,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("UUP media conversion preflight blocks unsafe targets", () => { MediaConversionPreflight(); return Task.CompletedTask; }),
     ("Microsoft Catalog HTML parsing and deduplication", () => { CatalogParsing(); return Task.CompletedTask; }),
     ("Microsoft Catalog optional query filters", () => { CatalogOptionalQueryFilters(); return Task.CompletedTask; }),
+    ("Microsoft Catalog download metadata parsing", () => { CatalogDownloadMetadata(); return Task.CompletedTask; }),
     ("artifact registry and preflight", () => { ArtifactPreflight(); return Task.CompletedTask; }),
     ("SxS preview is non-executing and blocks unsafe scripts", () => { SxsPreview(); return Task.CompletedTask; }),
     ("OS generation XML regressions", () => { GenerationRegression(); return Task.CompletedTask; }),
@@ -108,6 +109,26 @@ static void CatalogOptionalQueryFilters()
 
     var empty = MicrosoftCatalogService.BuildQuery(new MicrosoftCatalogSearchOptions());
     Equal(string.Empty, empty);
+}
+
+static void CatalogDownloadMetadata()
+{
+    const string html = """
+        <script>
+        var downloadInformation = [{
+          "updateID":"11111111-1111-1111-1111-111111111111",
+          "files":[
+            {"fileName":"update-x64.msu","url":"http://download.windowsupdate.com/c/msdownload/update/software/secu/2026/update-x64.msu","digest":"abc"},
+            {"fileName":"blocked.exe","url":"https://example.invalid/blocked.exe","digest":"def"}
+          ]
+        }];
+        </script>
+        """;
+    var files = MicrosoftCatalogService.ParseDownloadInformation(html);
+    Equal(1, files.Count);
+    Equal("update-x64.msu", files[0].Name);
+    True(files[0].Url.StartsWith("https://download.windowsupdate.com/", StringComparison.Ordinal),
+        "Microsoft download URLs should be upgraded to HTTPS.");
 }
 
 static void QueryProfilePlanning()

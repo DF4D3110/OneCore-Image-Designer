@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Collections.Generic;
 using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -12,6 +13,7 @@ public partial class CatalogDownloadViewModel : ObservableObject
 {
     private readonly MicrosoftCatalogService _catalog = new();
     private CancellationTokenSource? _cts;
+    private CancellationTokenSource? _fileCts;
     private UpdateDownloader _downloader = new();
     private TaskLogSink? _taskSink;
     private Views.TaskLogWindow? _taskWindow;
@@ -27,7 +29,7 @@ public partial class CatalogDownloadViewModel : ObservableObject
     private string _architecture = "All";
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SearchCatalogCommand))]
-    private string _operatingSystem = "全部系统";
+    private string _operatingSystem = "全部产品线";
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SearchCatalogCommand))]
     private string _productFamily = "全部产品";
@@ -65,14 +67,15 @@ public partial class CatalogDownloadViewModel : ObservableObject
          "Windows IoT", "HoloLens", "OneCore / UUP", "Office", "SQL Server",
          "Exchange", "Visual Studio", ".NET", "Microsoft Edge", "Defender",
          "Drivers", "Other Microsoft Software"];
-    public string[] OperatingSystemChoices { get; } =
-        ["全部系统", "Windows 2000", "Windows XP", "Windows Server 2003", "Windows Vista",
-         "Windows 7", "Windows 8", "Windows 8.1", "Windows 10", "Windows 11",
-         "Windows Server 2008", "Windows Server 2012", "Windows Server 2016",
-         "Windows Server 2019", "Windows Server 2022", "Windows Server 2025",
-         "Windows Phone 7", "Windows Phone 8", "Windows Phone 8.1", "Windows 10 Mobile",
-         "Windows CE", "Windows Embedded", "Windows 10 IoT Core", "Windows 10 IoT Enterprise",
-         "Windows 11 IoT Enterprise", "HoloLens", "HoloLens 2"];
+    public ObservableCollection<string> OperatingSystemChoices { get; } =
+        new(["全部产品线", "Windows 2000", "Windows XP / XP x64", "Windows Server 2003",
+             "Windows Vista", "Windows Server 2008", "Windows 7", "Windows Server 2008 R2",
+             "Windows 8", "Windows Server 2012", "Windows 8.1", "Windows Server 2012 R2",
+             "Windows 10 1507/1511", "Windows 10 1607", "Windows 10 1703/1709",
+             "Windows 10 1803/1809", "Windows 10 1903/1909", "Windows 10 2004/20H2",
+             "Windows 10 21H1/21H2", "Windows 10 22H2", "Windows 11 21H2/22H2",
+             "Windows 11 23H2", "Windows 11 24H2/25H2", "Windows Server 2016",
+             "Windows Server 2019", "Windows Server 2022", "Windows Server 2025"]);
     public string[] UpdateTypeChoices { get; } =
         ["", "Security Updates", "Updates", "Critical Updates", "Feature Packs",
          "Service Packs", "Tools", "Update Rollups", "Cumulative Updates",
@@ -84,11 +87,23 @@ public partial class CatalogDownloadViewModel : ObservableObject
     public string ResultCountText => $"{Updates.Count} 条更新";
     public bool HasUpdates => Updates.Count > 0;
 
+    partial void OnProductFamilyChanged(string value)
+    {
+        var choices = GetProductLineChoices(value);
+        OperatingSystemChoices.Clear();
+        foreach (var choice in choices) OperatingSystemChoices.Add(choice);
+        OperatingSystem = choices[0];
+    }
+
     partial void OnSelectedUpdateChanged(MicrosoftCatalogUpdate? value)
     {
+        _fileCts?.Cancel();
+        _fileCts?.Dispose();
+        _fileCts = value is null ? null : new CancellationTokenSource();
         Files.Clear();
+        DownloadCommand.NotifyCanExecuteChanged();
         if (value is null) return;
-        _ = LoadFilesAsync(value);
+        _ = LoadFilesAsync(value, _fileCts.Token);
     }
 
     [RelayCommand(CanExecute = nameof(CanSearch))]
@@ -140,18 +155,24 @@ public partial class CatalogDownloadViewModel : ObservableObject
         });
     }
 
-    private async Task LoadFilesAsync(MicrosoftCatalogUpdate update)
+    private async Task LoadFilesAsync(MicrosoftCatalogUpdate update, CancellationToken token)
     {
         try
         {
             Status = "正在读取文件明细…";
-            var loaded = await _catalog.LoadFilesAsync(update);
+            var loaded = await _catalog.LoadFilesAsync(update, token);
             if (!ReferenceEquals(SelectedUpdate, update)) return;
             foreach (var file in loaded.Files) Files.Add(file);
             Status = $"已读取 {Files.Count} 个文件";
             DownloadCommand.NotifyCanExecuteChanged();
         }
-        catch (Exception ex) { AppendLog($"读取文件明细失败：{ex.Message}"); }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            AppendLog($"读取文件明细失败：{ex.Message}");
+            Status = "文件明细读取失败";
+            DownloadCommand.NotifyCanExecuteChanged();
+        }
     }
 
     private async Task RunAsync(Func<CancellationToken, Task> action)
@@ -184,6 +205,40 @@ public partial class CatalogDownloadViewModel : ObservableObject
             Language: Language == "全部语言" ? null : Language)));
     private bool CanCancel() => IsBusy;
     private bool CanDownload() => !IsBusy && Files.Count > 0;
+
+    private static IReadOnlyList<string> GetProductLineChoices(string family) =>
+        family switch
+        {
+            "Windows Phone / Mobile" => ["全部产品线", "Windows Phone 7", "Windows Phone 7.5/7.8",
+                "Windows Phone 8", "Windows Phone 8.1", "Windows 10 Mobile"],
+            "Windows CE / Embedded" => ["全部产品线", "Windows CE 5.0", "Windows CE 6.0",
+                "Windows Embedded Compact 7", "Windows Embedded Standard 7", "Windows Embedded 8/8.1",
+                "Windows Embedded POSReady", "Windows Embedded Handheld"],
+            "Windows IoT" => ["全部产品线", "Windows 10 IoT Core", "Windows 10 IoT Enterprise",
+                "Windows 11 IoT Enterprise", "Azure Sphere"],
+            "HoloLens" => ["全部产品线", "HoloLens", "HoloLens 2", "HoloLens 2 Industrial Edition"],
+            "Office" => ["全部产品线", "Office 2000", "Office XP/2003", "Office 2007",
+                "Office 2010", "Office 2013", "Office 2016", "Office 2019", "Office 2021",
+                "Microsoft 365 Apps"],
+            "SQL Server" => ["全部产品线", "SQL Server 2000", "SQL Server 2005", "SQL Server 2008/R2",
+                "SQL Server 2012", "SQL Server 2014", "SQL Server 2016", "SQL Server 2017",
+                "SQL Server 2019", "SQL Server 2022"],
+            "Exchange" => ["全部产品线", "Exchange 2007", "Exchange 2010", "Exchange 2013",
+                "Exchange 2016", "Exchange 2019"],
+            "Visual Studio" => ["全部产品线", "Visual Studio 2005", "Visual Studio 2008",
+                "Visual Studio 2010", "Visual Studio 2012", "Visual Studio 2013",
+                "Visual Studio 2015", "Visual Studio 2017", "Visual Studio 2019", "Visual Studio 2022"],
+            ".NET" => ["全部产品线", ".NET Framework 2.0/3.5", ".NET Framework 4.x",
+                ".NET Core", ".NET 5", ".NET 6", ".NET 7", ".NET 8", ".NET 9"],
+            _ => ["全部产品线", "Windows 2000", "Windows XP / XP x64", "Windows Server 2003",
+                "Windows Vista", "Windows Server 2008", "Windows 7", "Windows Server 2008 R2",
+                "Windows 8", "Windows Server 2012", "Windows 8.1", "Windows Server 2012 R2",
+                "Windows 10 1507/1511", "Windows 10 1607", "Windows 10 1703/1709",
+                "Windows 10 1803/1809", "Windows 10 1903/1909", "Windows 10 2004/20H2",
+                "Windows 10 21H1/21H2", "Windows 10 22H2", "Windows 11 21H2/22H2",
+                "Windows 11 23H2", "Windows 11 24H2/25H2", "Windows Server 2016",
+                "Windows Server 2019", "Windows Server 2022", "Windows Server 2025"]
+        };
     [RelayCommand]
     private void ShowLog()
     {
