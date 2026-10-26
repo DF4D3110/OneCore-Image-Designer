@@ -1,4 +1,4 @@
-﻿// OcidImaging / Pool 池层（薄封装 ImageStorageService.dll 的建池/建 space）
+// OcidImaging / Pool 池层（薄封装 ImageStorageService.dll 的建池/建 space）
 //
 // 为什么单独一层：把“存储空间”这套私有 IOCTL / 服务句柄的调用关在一个 DLL 里，
 // 出问题时能立刻分辨是“池没建起来”还是“文件没写进去”。ImageStorageService.dll
@@ -150,7 +150,8 @@ OCID_POOL_API bool PoolMountSpaces(const std::wstring& imagePath, const std::wst
                                   const std::vector<std::pair<std::wstring, std::wstring> >& spaces,
                                   std::vector<std::vector<unsigned char> >& storeIds,
                                   std::vector<std::pair<std::wstring, std::wstring> >& volumes,
-                                  std::vector<std::string>& report, std::string& error);
+                                  std::vector<std::string>& report, std::string& error,
+                                  std::wstring* baseDevice = nullptr);
 
 OCID_POOL_API bool PoolMountForUpdate(const std::wstring& imagePath,
                                       const std::wstring& poolName,

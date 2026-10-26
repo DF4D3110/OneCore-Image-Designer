@@ -23,6 +23,33 @@
 namespace ocid::imaging {
 namespace {
 
+// 阶段隔离：exe 启动时会把本阶段 ADK 根写进 OCID_ADK_ROOT。只要该变量存在，
+// ADK DLL 候选就只允许来自这个根——绝不允许回落到注册表/Program Files 里的另一套 ADK
+// （FE 与 RS5 的 imagestorageservice.dll 同名但导出完全不同，混用会让报错点漂移）。
+void RestrictCandidatesToAdkRoot(std::vector<std::string>& candidates)
+{
+    const char* env = std::getenv("OCID_ADK_ROOT");
+    if (env == nullptr || env[0] == 0) return;
+    const std::string prefix(env);
+    candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&prefix](const std::string& item) {
+        return item.size() < prefix.size() || _stricmp(item.substr(0, prefix.size()).c_str(), prefix.c_str()) != 0;
+    }), candidates.end());
+}
+
+void RestrictCandidatesToAdkRoot(std::vector<std::wstring>& candidates)
+{
+    const char* env = std::getenv("OCID_ADK_ROOT");
+    if (env == nullptr || env[0] == 0) return;
+    const int need = MultiByteToWideChar(CP_UTF8, 0, env, -1, nullptr, 0);
+    if (need <= 0) return;
+    std::wstring prefix(static_cast<std::size_t>(need - 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, env, -1, &prefix[0], need);
+    candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&prefix](const std::wstring& item) {
+        return item.size() < prefix.size() || _wcsnicmp(item.c_str(), prefix.c_str(), prefix.size()) != 0;
+    }), candidates.end());
+}
+
+
 const char* const kExpected[] = {
     // M1 造盘真正要用的子集（从 68 个导出里挑出来的）。
     "CreateStorageService",
@@ -80,6 +107,7 @@ bool PoolProbe(std::string& dllPath,
             const std::string base(adkRoot);
             candidates.push_back(base + "\\Windows Kits\\10\\Tools\\bin\\i386\\ImageStorageService.dll");
             candidates.push_back(base + "\\Tools\\bin\\i386\\ImageStorageService.dll");
+            candidates.push_back(base + "\\bin\\i386\\ImageStorageService.dll");
         }
     }
     {
@@ -159,6 +187,7 @@ bool PoolProbe(std::string& dllPath,
     std::vector<std::string> bestFound;
     std::vector<std::string> bestMissing;
     std::size_t tried = 0;
+    RestrictCandidatesToAdkRoot(candidates);
     for (const std::string& candidate : candidates)
     {
         if (!FileExists(candidate)) continue;
@@ -892,6 +921,7 @@ std::wstring LocateAdkDll(const wchar_t* fileName, const char* requiredExport)
         const std::string base(adkRoot);
         candidates.emplace_back(std::wstring(base.begin(), base.end()) + L"\\Windows Kits\\10\\Tools\\bin\\i386\\" + fileName);
         candidates.emplace_back(std::wstring(base.begin(), base.end()) + L"\\Tools\\bin\\i386\\" + fileName);
+        candidates.emplace_back(std::wstring(base.begin(), base.end()) + L"\\bin\\i386\\" + fileName);
     }
     {
         wchar_t kits[MAX_PATH] = { 0 };
@@ -950,6 +980,7 @@ std::wstring LocateAdkDll(const wchar_t* fileName, const char* requiredExport)
     }
     std::wstring fallback;
     const std::wstring wideName(fileName);
+    RestrictCandidatesToAdkRoot(candidates);
     for (const std::wstring& candidate : candidates)
     {
         if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
@@ -1172,6 +1203,7 @@ bool PoolFindAdkDll(const std::wstring& fileName, const std::string& requiredExp
         const std::string base(adkRoot);
         candidates.push_back(std::wstring(base.begin(), base.end()) + L"\\Windows Kits\\10\\Tools\\bin\\i386\\" + fileName);
         candidates.push_back(std::wstring(base.begin(), base.end()) + L"\\Tools\\bin\\i386\\" + fileName);
+        candidates.push_back(std::wstring(base.begin(), base.end()) + L"\\bin\\i386\\" + fileName);
     }
     wchar_t kits[MAX_PATH] = { 0 };
     DWORD size = static_cast<DWORD>(sizeof(kits));
@@ -1219,6 +1251,7 @@ bool PoolFindAdkDll(const std::wstring& fileName, const std::string& requiredExp
         }
     }
     std::wstring fallback;
+    RestrictCandidatesToAdkRoot(candidates);
     for (const std::wstring& candidate : candidates)
     {
         if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES) continue;

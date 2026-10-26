@@ -19,13 +19,14 @@ param(
     [Parameter(Mandatory = $true)][string]$Layout,
     [Parameter(Mandatory = $true)][string]$Dir,
     [Parameter(Mandatory = $true)][string]$Tool,
+    [string]$OemDevicePlatform = '',
     [switch]$KeepOverlays,
     [switch]$Verbose2
 )
 
 $ErrorActionPreference = 'Continue'
 
-function Say([string]$text) { Write-Output ("[merge] " + $text) }
+function Say([string]$text) { Write-Output ("[merge " + (Get-Date -Format 'HH:mm:ss') + "] " + $text) }
 
 # GPT 分区类型 -> 布局 space 名（10X 布局固定映射）
 $spaceByType = @{
@@ -38,11 +39,62 @@ $spaceByType = @{
     '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}' = 'VIRT_EFIESPDisk'
 }
 
-function Invoke-Tool([string[]]$arguments) {
-    $out = & $Tool @arguments 2>&1
-    $code = $LASTEXITCODE
-    if ($Verbose2) { $out | ForEach-Object { Write-Host ("  " + $_) } }
-    return @{ Code = $code; Output = $out }
+# 调 ocid_imagegen 的统一入口：带超时，超时就杀掉子进程，避免整个流水线被内核挂死的调用拖住。
+function Invoke-Tool([string[]]$arguments, [int]$timeoutSeconds = 900) {
+    $tmpRoot = Join-Path (Split-Path -Parent $Dir) 'tmp'
+    if (-not (Test-Path -LiteralPath $tmpRoot)) { New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null }
+    $stamp = [guid]::NewGuid().ToString('N')
+    $outFile = Join-Path $tmpRoot ("tool_" + $stamp + ".out")
+    $errFile = Join-Path $tmpRoot ("tool_" + $stamp + ".err")
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $Tool
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    # Windows PowerShell 5.1 的 ProcessStartInfo 没有 ArgumentList，只能自己拼引号。
+    $psi.Arguments = (($arguments | ForEach-Object { '"' + ([string]$_).Replace('"', '\"') + '"' }) -join ' ')
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    [void]$proc.Start()
+    $stdout = $proc.StandardOutput.ReadToEndAsync()
+    $stderr = $proc.StandardError.ReadToEndAsync()
+    $exited = $proc.WaitForExit($timeoutSeconds * 1000)
+    if (-not $exited) {
+        Say ("工具调用超时 " + $timeoutSeconds + "s，杀掉进程：" + ($arguments -join ' '))
+        try { $proc.Kill() } catch { }
+        Start-Sleep -Milliseconds 500
+        return @{ Code = 124; Output = @(); TimedOut = $true }
+    }
+    $out = @()
+    try { $out = @($stdout.Result -split "`r?`n" | Where-Object { $_ -ne '' }) } catch { }
+    $errText = ''
+    try { $errText = $stderr.Result } catch { }
+    if ($Verbose2) {
+        $out | ForEach-Object { Write-Host ("  " + $_) }
+        if ($errText) { Write-Host ("  ERR " + $errText) }
+    }
+    return @{ Code = $proc.ExitCode; Output = $out; TimedOut = $false }
+}
+
+# 基座盘当前是否已挂载；挂载时返回 \\.\PhysicalDriveN（服务只认设备路径时要用）。
+function Get-BaseDevice {
+    $di = Get-DiskImage -ImagePath $Image -ErrorAction SilentlyContinue
+    if (-not $di) { return $null }
+    $d = $di | Get-Disk -ErrorAction SilentlyContinue
+    if ($d) { return ('\\.\PhysicalDrive' + $d.Number) }
+    return $null
+}
+
+# 服务对"已挂载的 VHD 文件"调 OpenVirtualHardDisk 会失败（0x800700E0），
+# 所以清理 space 挂载一律走 --device；拿不到设备路径才退回 --vhd。
+function Detach-PoolSpaces {
+    $device = Get-BaseDevice
+    if ($device) {
+        $r = Invoke-Tool @('pool', 'detach', '--device', $device, '--layout', $Layout, '--dir', $Dir) 300
+        if ($r.Code -eq 0) { return $r }
+    }
+    return Invoke-Tool @('pool', 'detach', '--vhd', $Image, '--layout', $Layout, '--dir', $Dir) 300
 }
 
 function Free-DriveLetter {
@@ -56,9 +108,9 @@ function Free-DriveLetter {
     throw 'no free drive letter'
 }
 function Wait-Volume([string]$letter) {
-    for ($i = 0; $i -lt 30; $i++) {
+    for ($i = 0; $i -lt 20; $i++) {
         if (Test-Path ($letter + ':\')) { return $true }
-        Start-Sleep -Milliseconds 300
+        Start-Sleep -Milliseconds 250
     }
     return $false
 }
@@ -75,7 +127,7 @@ function Get-VolumeLetter([int]$disk, [int]$partition) {
 function Ensure-Letter([int]$disk, [int]$partition, [string]$preferred) {
     $efi = '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
     $basic = '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}'
-    for ($i = 0; $i -lt 25; $i++) {
+    for ($i = 0; $i -lt 15; $i++) {
         $existing = Get-VolumeLetter -disk $disk -partition $partition
         if ($existing -and (Wait-Volume $existing)) { return $existing }
         if ($preferred -and (Wait-Volume $preferred)) { return $preferred }
@@ -88,7 +140,10 @@ function Ensure-Letter([int]$disk, [int]$partition, [string]$preferred) {
         if (-not $existing) {
             Add-PartitionAccessPath -DiskNumber $disk -PartitionNumber $partition -AccessPath ($preferred + ':\') -ErrorAction SilentlyContinue
             if (-not (Get-VolumeLetter -disk $disk -partition $partition)) {
-                $script = Join-Path $env:TEMP ("dp_" + $disk + "_" + $partition + ".txt")
+                # 用户要求：临时文件都留在工作目录，不用 %TEMP%
+                $tmpDir = Join-Path (Split-Path -Parent $Dir) 'tmp'
+                if (-not (Test-Path -LiteralPath $tmpDir)) { New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null }
+                $script = Join-Path $tmpDir ("dp_" + $disk + "_" + $partition + ".txt")
                 @("select disk " + $disk, "select partition " + $partition, "assign letter=" + $preferred) | Set-Content -Path $script -Encoding ASCII
                 & diskpart.exe /s $script | Out-Null
             }
@@ -195,10 +250,12 @@ foreach ($p in $plan) {
 
 # 3) 先用 CLI 永久挂载基座盘拿设备路径：服务对 VHD 的 OpenVirtualHardDisk 不支持（VHDX 才行），
 #    走设备路径时服务用 CreateFile 打开，VHD/VHDX 都可用。
-Invoke-Tool @('vhd', 'detach', $Image, '--force', '--kill') | Out-Null
-# 清掉上一轮遗留的 space 挂载，否则 AttachStorageSpace 会报 0x80070006
-Invoke-Tool @('pool', 'detach', '--vhd', $Image, '--layout', $Layout, '--dir', $Dir) | Out-Null
-$attach = Invoke-Tool @('vhd', 'attach', $Image)
+# 清掉上一轮遗留的 space 挂载（必须在卸基座盘之前做，否则服务拿不到设备路径），
+# 否则 AttachStorageSpace 会报 0x80070006。
+$preDetach = Detach-PoolSpaces
+if ($preDetach.Code -ne 0) { Say ("清理残留 space 挂载返回 " + $preDetach.Code + "（继续）") }
+Invoke-Tool @('vhd', 'detach', $Image, '--force', '--kill') 180 | Out-Null
+$attach = Invoke-Tool @('vhd', 'attach', $Image) 180
 $device = $null
 foreach ($line in @($attach.Output)) {
     if ([string]$line -match 'PhysicalDrive([0-9]+)') { $device = '\\.\PhysicalDrive' + $Matches[1]; break }
@@ -287,15 +344,71 @@ foreach ($p in $plan) {
     Dismount-DiskImage -ImagePath $p.Keep | Out-Null
 }
 
-# 5) 收尾：卸 space、卸基座盘、删覆盖盘
+# 4.5) space 目录骨架：ImageApp 会留下这些空目录（Data 是它的 staging 根，OSData 有 SystemData 日志目录），
+#      并往 MainOS 的 Windows\ImageUpdate 写 DeviceLayout.xml / OEMDevicePlatform.xml。照参照镜像补齐。
+$seedBySpace = @{
+    'DataDisk' = @(
+        'sandbox',
+        'USERS', 'USERS\System', 'USERS\System\AppData', 'USERS\System\AppData\Local',
+        'USERS\System\AppData\Local\UpdateStagingRoot',
+        'USERS\System\AppData\Local\UpdateStagingRoot\SharedData',
+        'USERS\System\AppData\Local\UpdateStagingRoot\SharedData\DuShared'
+    )
+    'OSDataDisk' = @('SystemData', 'SystemData\ETW', 'SystemData\NonETWLogs')
+    'MainOSDisk' = @(
+        'Data', 'Data\sandbox',
+        'Data\USERS', 'Data\USERS\System', 'Data\USERS\System\AppData', 'Data\USERS\System\AppData\Local',
+        'Data\USERS\System\AppData\Local\UpdateStagingRoot',
+        'Data\USERS\System\AppData\Local\UpdateStagingRoot\SharedData',
+        'Data\USERS\System\AppData\Local\UpdateStagingRoot\SharedData\DuShared'
+    )
+}
+foreach ($space in $seedBySpace.Keys) {
+    $dst = $destLetter[$space]
+    if (-not $dst) { continue }
+    $root = $dst.Letter + ':\'
+    $made = 0
+    foreach ($rel in $seedBySpace[$space]) {
+        $full = $root + $rel
+        if (-not (Test-Path -LiteralPath $full)) {
+            New-Item -ItemType Directory -Path $full -Force | Out-Null
+            if (Test-Path -LiteralPath $full) { $made++ }
+        }
+    }
+    Say ("{0}: 目录骨架 +{1}" -f $space, $made)
+}
+
+# 4.6) MainOS\Windows\ImageUpdate：DeviceLayout.xml / OEMDevicePlatform.xml
+$mainDst = $destLetter['MainOSDisk']
+if ($mainDst) {
+    $imageUpdate = $mainDst.Letter + ':\Windows\ImageUpdate'
+    New-Item -ItemType Directory -Path $imageUpdate -Force | Out-Null
+    $platformXml = $OemDevicePlatform
+    if (-not $platformXml) { $platformXml = Join-Path (Split-Path -Parent $Layout) 'OEMDevicePlatform.xml' }
+    $copied = @()
+    foreach ($src in @($Layout, $platformXml)) {
+        if ($src -and (Test-Path -LiteralPath $src)) {
+            $target = Join-Path $imageUpdate (Split-Path -Leaf $src)
+            Copy-Item -LiteralPath $src -Destination $target -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $target) { $copied += (Split-Path -Leaf $src) }
+        }
+    }
+    Say ("MainOSDisk: Windows\ImageUpdate 写入 " + ($copied -join ','))
+}
+
+# 5) 收尾：卸 space（走设备路径）、卸基座盘、删覆盖盘
 foreach ($k in $destLetter.Keys) {
     $v = $destLetter[$k]
     if ($v) { Remove-Letter -disk $v.Disk -partition $v.Part -letter $v.Letter }
 }
-Invoke-Tool @('vhd', 'detach', $Image, '--force', '--kill') | Out-Null
-$detach = Invoke-Tool @('pool', 'detach', '--vhd', $Image, '--layout', $Layout, '--dir', $Dir)
-if ($detach.Code -ne 0) { $detach = Invoke-Tool @('pool', 'detach', '--device', '', '--layout', $Layout, '--dir', $Dir) }
-Invoke-Tool @('vhd', 'detach', $Image, '--force', '--kill') | Out-Null
+$finalDetach = Detach-PoolSpaces
+if ($finalDetach.Code -ne 0) {
+    Say ("卸载 space 返回 " + $finalDetach.Code + "，重试一次")
+    Start-Sleep -Seconds 3
+    $finalDetach = Detach-PoolSpaces
+}
+Invoke-Tool @('vhd', 'detach', $Image, '--force', '--kill') 180 | Out-Null
+Invoke-Tool @('vhd', 'detach', $Image, '--force', '--kill') 180 | Out-Null
 
 if (-not $KeepOverlays -and $failed -eq 0) {
     foreach ($p in $plan) { Remove-Item -LiteralPath $p.Keep -Force -ErrorAction SilentlyContinue }

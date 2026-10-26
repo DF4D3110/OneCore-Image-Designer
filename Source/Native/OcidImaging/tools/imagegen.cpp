@@ -13,6 +13,9 @@
 #include "ocid/imaging/Common.h"
 #include "ocid/imaging/Plan.h"
 #include "ocid/imaging/Vhd.h"
+#include "ocid/imaging/Ffu.h"
+#include "ocid/imaging/Appx.h"
+#include "ocid/imaging/Stage.h"
 #include "ocid/imaging/Pool.h"
 #include "ocid/imaging/Update.h"
 
@@ -27,6 +30,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <winioctl.h>
 
 using namespace ocid::imaging;
 
@@ -821,11 +825,195 @@ static std::string NormalizePartition(const std::string& text)
     return text;
 }
 
+// ── BSP 驱动集（参照里的 BASE-DRIVERSET）────────────────────────────────────
+// 参照 Falsh.DeviceDB.xml 里驱动包 ID 形如 `Red_Hat,_Inc.-balloon.inf`：
+// INF 的 [Version] 段 Provider 值（空格换成下划线）+ "-" + INF 文件名。
+// 本机没有 BSP 驱动树（参照里的 D:\BSP-QEMU-10X 不存在），所以只能按规则实现，用 --drivers 指目录。
+static std::string TrimAsciiSpace(const std::string& text)
+{
+    const char* ws = " \t\r\n";
+    const std::size_t first = text.find_first_not_of(ws);
+    if (first == std::string::npos) return std::string();
+    const std::size_t last = text.find_last_not_of(ws);
+    return text.substr(first, last - first + 1);
+}
+
+struct DriverInfo
+{
+    std::string id;
+    std::string version;
+    std::string partition = "BSP";
+};
+
+// 读 INF 的 [Version] Provider / DriverVer。[Version] 里的 Provider 常见写法是字符串令牌
+// （`%VENDOR%`），真值在 [Strings] 段（`VENDOR = "Red Hat, Inc."`），必须先解析再拼包名，
+// 否则包名会变成 `%VENDOR%-balloon.inf`。DriverVer 形如 `07/22/2026,100.103.104.30200`，
+// KeyForm 只取逗号后的版本号（参照：`Red_Hat,_Inc.-balloon.inf~arm64~100.103.104.30200~BSP`）。
+static bool ParseInfDriver(const std::string& infPath, std::string& provider, std::string& version)
+{
+    std::vector<std::uint8_t> bytes;
+    std::string error;
+    if (!ReadFileBytes(Utf8ToWide(infPath), bytes, error)) return false;
+    const std::string text(bytes.begin(), bytes.end());
+    std::string section;
+    std::vector<std::pair<std::string, std::string>> strings;
+    std::size_t pos = 0;
+    while (pos < text.size())
+    {
+        std::size_t lineEnd = text.find('\n', pos);
+        if (lineEnd == std::string::npos) lineEnd = text.size();
+        std::string line = TrimAsciiSpace(text.substr(pos, lineEnd - pos));
+        pos = lineEnd + 1;
+        if (line.empty() || line[0] == ';') continue;
+        if (line.front() == '[')
+        {
+            const std::size_t close = line.find(']');
+            section = (close == std::string::npos) ? line : line.substr(0, close + 1);
+            continue;
+        }
+        const std::size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = TrimAsciiSpace(line.substr(0, eq));
+        std::string value = TrimAsciiSpace(line.substr(eq + 1));
+        if (EqualsNoCase(section, "[Strings]"))
+        {
+            if (value.size() >= 2 && value.front() == '"' && value.back() == '"')
+                value = value.substr(1, value.size() - 2);
+            strings.push_back(std::make_pair(key, value));
+            continue;
+        }
+        if (!EqualsNoCase(section, "[Version]")) continue;
+        if (EqualsNoCase(key, "Provider")) provider = value;
+        else if (EqualsNoCase(key, "DriverVer"))
+        {
+            const std::size_t comma = value.find(',');
+            version = TrimAsciiSpace(comma == std::string::npos ? value : value.substr(comma + 1));
+        }
+    }
+    if (provider.size() >= 2 && provider.front() == '%' && provider.back() == '%')
+    {
+        const std::string token = provider.substr(1, provider.size() - 2);
+        for (const auto& entry : strings)
+        {
+            if (!EqualsNoCase(entry.first, token)) continue;
+            provider = entry.second;
+            break;
+        }
+    }
+    if (provider.size() >= 2 && provider.front() == '"' && provider.back() == '"')
+        provider = provider.substr(1, provider.size() - 2);
+    return !provider.empty();
+}
+
+// 包名 = Provider 里的空格换下划线 + '-' + INF 文件名（参照 ImageApp 的 <Provider>-<inf>）
+static std::string DriverPackageIdFor(const std::string& provider, const std::string& infPath)
+{
+    const std::size_t slash = infPath.find_last_of("\\/");
+    const std::string fileName = (slash == std::string::npos) ? infPath : infPath.substr(slash + 1);
+    std::string id;
+    for (char c : provider) id.push_back(c == ' ' ? '_' : c);
+    if (!id.empty()) id.push_back('-');
+    return id + fileName;
+}
+
+static void CollectDriverPackages(const std::string& directory, std::vector<DriverInfo>& packages)
+{
+    std::error_code ec;
+    std::filesystem::recursive_directory_iterator it(Utf8ToWide(directory),
+        std::filesystem::directory_options::skip_permission_denied, ec);
+    if (ec) return;
+    for (; !ec && it != std::filesystem::end(it); it.increment(ec))
+    {
+        if (!it->is_regular_file(ec)) continue;
+        const std::string extension = WideToUtf8(it->path().extension());
+        if (!EqualsNoCase(extension, ".inf")) continue;
+        const std::string path = WideToUtf8(it->path().wstring());
+        std::string provider;
+        std::string version;
+        if (!ParseInfDriver(path, provider, version)) continue;
+        DriverInfo info;
+        info.id = DriverPackageIdFor(provider, path);
+        info.version = version;
+        packages.push_back(info);
+    }
+    std::stable_sort(packages.begin(), packages.end(), [](const DriverInfo& a, const DriverInfo& b) {
+        return LowerText(a.id) < LowerText(b.id);
+    });
+}
+
+// 驱动包（DriverPackage）的一行 UpdateInput 输入：ImageApp 用
+//   <PackageFile>DriverPackage|&lt;INF 绝对路径&gt;|&lt;KeyForm&gt;|0</PackageFile>
+// KeyForm 形如 `Red_Hat,_Inc.-balloon.inf~arm64~100.103.104.30200~BSP`（名称~架构~版本~分区）。
+// UpdateDLL 拿到 INF 后自己读同目录的 .sys/.cat，把文件铺到 BSP 分区并写 BSP 的
+// Windows\System32\config\{SYSTEM,SOFTWARE,DRIVERS} —— 与我们手工拷文件的做法不同，这是官方路径。
+struct DriverInput
+{
+    std::string infPath;
+    std::string keyform;
+    std::string id;
+};
+
+static bool CollectDriverInputs(const std::string& directory, const std::string& arch,
+                                std::vector<DriverInput>& out, std::string& error)
+{
+    out.clear();
+    if (directory.empty()) return true;
+    std::error_code ec;
+    if (!std::filesystem::is_directory(Utf8ToWide(directory), ec))
+    {
+        error = "驱动目录不存在或不是目录：" + directory;
+        return false;
+    }
+    const std::string archText = LowerText(arch.empty() ? std::string("arm64") : arch);
+    std::filesystem::recursive_directory_iterator it(Utf8ToWide(directory),
+        std::filesystem::directory_options::skip_permission_denied, ec);
+    if (ec)
+    {
+        error = "遍历驱动目录失败：" + directory;
+        return false;
+    }
+    for (; !ec && it != std::filesystem::end(it); it.increment(ec))
+    {
+        if (!it->is_regular_file(ec)) continue;
+        const std::string extension = WideToUtf8(it->path().extension());
+        if (!EqualsNoCase(extension, ".inf")) continue;
+        const std::string path = WideToUtf8(it->path().wstring());
+        std::string provider;
+        std::string version;
+        if (!ParseInfDriver(path, provider, version)) continue;
+        DriverInput input;
+        input.infPath = path;
+        input.id = DriverPackageIdFor(provider, path);
+        input.keyform = input.id + "~" + archText + "~" + version + "~BSP";
+        out.push_back(input);
+    }
+    std::stable_sort(out.begin(), out.end(), [](const DriverInput& a, const DriverInput& b) {
+        return LowerText(a.id) < LowerText(b.id);
+    });
+    return true;
+}
+
 static std::string IdentityText(const std::string& name, const std::string& pkt,
                                 const std::string& arch, const std::string& lang)
 {
     // 语言段保留 mum 里的写法（参照里 en-US 与 zh-cn 并存）；架构与 pkt 用小写。
     return name + "~" + LowerText(pkt) + "~" + LowerText(arch) + "~" + lang + "~";
+}
+
+// 同一个 FMID 组内特性的排序键：参照产物对 `MS_WCOS_TEST_COMPONENTS` / `MS_WCOS_TESTSIGNING_ON`
+// 的次序与纯 ordinal 比较相反，只有"忽略非字母数字（'_' 等）后按不区分大小写比较"能同时解释 48 条样本
+// （.NET 的 culture-aware CompareTo 把下划线当可忽略标点，imageapp 大概率就是这么排的）。
+static std::string FeatureSortKey(const std::string& text)
+{
+    std::string key;
+    key.reserve(text.size());
+    for (char c : text)
+    {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if ((u >= '0' && u <= '9') || (u >= 'a' && u <= 'z')) { key.push_back(c); continue; }
+        if (u >= 'A' && u <= 'Z') { key.push_back(static_cast<char>(u - 'A' + 'a')); continue; }
+    }
+    return key;
 }
 
 static std::string MumKey(const std::string& name, const std::string& arch, const std::string& lang)
@@ -906,6 +1094,7 @@ int CmdDeviceDb(const std::vector<std::string>& args)
     std::string buildInfo = "fe_release_10x";
     std::string buildBranch = "fe_release_10x";
     std::string osVersion;
+    std::string driversDir;
     std::vector<std::string> fmFiles;
 
     for (std::size_t i = 2; i < args.size(); ++i)
@@ -913,7 +1102,7 @@ int CmdDeviceDb(const std::vector<std::string>& args)
         const std::string& a = args[i];
         if (a == "--oem-input" || a == "--fm-dir" || a == "--fm" || a == "--arch" ||
             a == "--cabs" || a == "--out" || a == "--log" || a == "--build-info" ||
-            a == "--build-branch" || a == "--os-version")
+            a == "--build-branch" || a == "--os-version" || a == "--drivers")
         {
             if (i + 1 >= args.size())
             {
@@ -930,10 +1119,18 @@ int CmdDeviceDb(const std::vector<std::string>& args)
             else if (a == "--log") logPath = value;
             else if (a == "--build-info") buildInfo = value;
             else if (a == "--build-branch") buildBranch = value;
+            else if (a == "--drivers") driversDir = value;
             else osVersion = value;
             continue;
         }
         Err("未知参数：" + a);
+        return 2;
+    }
+    if (oemInput.empty() || cabsDir.empty() || outPath.empty())
+    {
+        Err("用法：ocid_imagegen devicedb --oem-input <OEMInput.xml> --cabs <cab 目录> "
+            "--out <DeviceDB.xml> [--arch arm64] [--fm-dir <目录>] [--build-info <文本>] "
+            "[--build-branch <分支>] [--os-version <版本>] [--drivers <BSP 驱动目录>] [--log <文件>]");
         return 2;
     }
     if (oemInput.empty() || cabsDir.empty() || outPath.empty())
@@ -1072,8 +1269,13 @@ int CmdDeviceDb(const std::vector<std::string>& args)
         std::vector<std::string> keyForms;
         std::vector<std::string> partitions;
         std::string satelliteLang;
+        // BSP 驱动集（对照参照里的 BASE-DRIVERSET）：Type=DriverSet，包条目带 PackageType=DriverPackage，
+        // 且顶层 <Packages> 里同名条目是裸 <Package ID="..."/>（无 KeyForm/Partition）。
+        bool driverSet = false;
     };
     std::vector<Feature> features;
+    // 驱动包信息（顶层 <Packages> 需要 KeyForm/Partition/Type），与特性里的 ID 共用同一份扫描结果。
+    std::vector<DriverInfo> driverPackages;
 
     std::vector<std::string> fmOrder;
     for (const Pkg& p : packages)
@@ -1154,19 +1356,64 @@ for (const std::string& fmFile : fmFiles)
         features.push_back(f);
     }
 
-    // 排序：FMID 不区分大小写升序（空 FMID 最后），同组内 BASE 在前、其余保持 plan 顺序。
-    // 实测参照就是这个次序：FOSMOBSFM → LANGUAGEPACKFM → MODERNPCEMULATOR → … → WCPFM → 空 FMID。
+    // BSP 驱动集（参照里的 BASE-DRIVERSET，FMID 为空 ⇒ 排特性列表最后）
+    if (!driversDir.empty())
+    {
+        Feature f;
+        f.featureId = "BASE-DRIVERSET";
+        f.group = "OEM";
+        f.driverSet = true;
+        CollectDriverPackages(driversDir, driverPackages);
+        for (const DriverInfo& info : driverPackages) f.ids.push_back(info.id);
+        if (f.ids.empty())
+        {
+            OutLn("[devicedb] --drivers 没找到 *.inf：" + driversDir);
+        }
+        else
+        {
+            OutLn("[devicedb] 驱动集 " + std::to_string(f.ids.size()) + " 个 INF（" + driversDir + "）");
+            features.push_back(f);
+        }
+    }
+
+    // 排序：FMID 不区分大小写升序（空 FMID 最后）；同一 FMID 组内按 FeatureSortKey
+    // （忽略 '_'、'.'、'-' 等标点、不区分大小写）升序——这一条能解释参照的全部 48 条样本。
     std::stable_sort(features.begin(), features.end(), [](const Feature& a, const Feature& b) {
         const bool ae = a.fmid.empty();
         const bool be = b.fmid.empty();
         if (ae != be) return be;
         // 用 ASCII 原样比较：参照里 MODERNPCEMULATOR 在 MODERNPC_CORE_OPTIONAL 之前（'E' < '_'）。
         if (a.fmid != b.fmid) return a.fmid < b.fmid;
-        const bool ab = (a.featureId == "BASE");
-        const bool bb = (b.featureId == "BASE");
-        if (ab != bb) return ab;
+        // 驱动集（Type=DriverSet）在同组里排其它特性之后：参照的空 FMID 组是
+        // BASE → MS_KDNETUSB_ON → MS_STATESEPARATION_ON → RELEASE_TEST → BASE-DRIVERSET。
+        if (a.driverSet != b.driverSet) return b.driverSet;
+        const std::string ka = FeatureSortKey(a.featureId);
+        const std::string kb = FeatureSortKey(b.featureId);
+        if (ka != kb) return ka < kb;
         return false;
     });
+
+    // 2.5) 同一特性里的同一包可能被重复收集（FIP 的 <featurePackage> 会既列依赖包又列自己），
+    // 参照产物里不重复 ⇒ 按 ID 去重（保留首次出现），keyForms/partitions 同步裁剪。
+    for (Feature& f : features)
+    {
+        if (f.ids.size() < 2) continue;
+        std::vector<std::string> ids;
+        std::vector<std::string> keys;
+        std::vector<std::string> parts;
+        for (std::size_t i = 0; i < f.ids.size(); ++i)
+        {
+            bool seen = false;
+            for (const std::string& known : ids) if (EqualsNoCase(known, f.ids[i])) { seen = true; break; }
+            if (seen) continue;
+            ids.push_back(f.ids[i]);
+            if (i < f.keyForms.size()) keys.push_back(f.keyForms[i]);
+            if (i < f.partitions.size()) parts.push_back(f.partitions[i]);
+        }
+        f.ids.swap(ids);
+        f.keyForms.swap(keys);
+        f.partitions.swap(parts);
+    }
 
     // 3) 顶层 Packages：特性包并集，按 ID 不区分大小写升序
     std::vector<std::string> unionIds;
@@ -1189,6 +1436,8 @@ for (const std::string& fmFile : fmFiles)
 
     std::map<std::string, const MumInfo*> byIdentity;
     for (const Pkg& p : packages) if (p.haveMum) byIdentity[LowerText(p.mum.identity)] = &p.mum;
+    std::map<std::string, const DriverInfo*> byDriverId;
+    for (const DriverInfo& info : driverPackages) byDriverId[LowerText(info.id)] = &info;
 
     // 4) 写 XML
     std::string xml;
@@ -1202,10 +1451,14 @@ for (const std::string& fmFile : fmFiles)
     xml += "\" Type=\"Device\">\r\n<Features>\r\n";
     for (const Feature& f : features)
     {
-        xml += "<Feature Type=\"MobileFeature\" FeatureID=\"";
+        xml += f.driverSet ? "<Feature Type=\"DriverSet\" FeatureID=\"" : "<Feature Type=\"MobileFeature\" FeatureID=\"";
         XmlEscapeTo(xml, f.featureId);
-        xml += "\" FMID=\"";
-        XmlEscapeTo(xml, f.fmid);
+        // 参照 Falsh.DeviceDB.xml：FMID 为空时不写该属性（ImageApp 只在有值时输出）。
+        if (!f.fmid.empty())
+        {
+            xml += "\" FMID=\"";
+            XmlEscapeTo(xml, f.fmid);
+        }
         xml += "\" Group=\"";
         XmlEscapeTo(xml, f.group);
         xml += "\">\r\n<Packages>\r\n";
@@ -1213,9 +1466,14 @@ for (const std::string& fmFile : fmFiles)
         {
             xml += "<Package ID=\"";
             XmlEscapeTo(xml, id);
-            xml += "\"/>\r\n";
+            xml += f.driverSet ? "\" PackageType=\"DriverPackage\"/>\r\n" : "\"/>\r\n";
         }
         xml += "</Packages>\r\n<Token value=\"INSTALLED\"/>\r\n<Intent value=\"PREINSTALL\"/>\r\n";
+        if (f.driverSet)
+        {
+            xml += "</Feature>\r\n";
+            continue;
+        }
         xml += (f.featureId.compare(0, 9, "Language.") == 0) ? "<Intent value=\"USER\"/>\r\n"
                                                               : "<Intent value=\"SYSTEM\"/>\r\n";
         if (!f.satelliteLang.empty())
@@ -1230,7 +1488,28 @@ for (const std::string& fmFile : fmFiles)
     for (const std::string& id : unionIds)
     {
         const auto it = byIdentity.find(LowerText(id));
-        if (it == byIdentity.end()) continue;
+        if (it == byIdentity.end())
+        {
+            // 驱动包没有 mum：参照里带 KeyForm="<id>~<arch>~<DriverVer 版本>~<分区>"、
+            // Partition="BSP"、Type="DriverPackage"（例：Red_Hat,_Inc.-balloon.inf~arm64~100.103.104.30200~BSP）。
+            const auto driver = byDriverId.find(LowerText(id));
+            if (driver == byDriverId.end())
+            {
+                xml += "<Package ID=\"";
+                XmlEscapeTo(xml, id);
+                xml += "\"/>\r\n";
+                continue;
+            }
+            xml += "<Package ID=\"";
+            XmlEscapeTo(xml, id);
+            xml += "\" KeyForm=\"";
+            XmlEscapeTo(xml, id + "~" + LowerText(arch) + "~" + driver->second->version + "~" +
+                                   driver->second->partition);
+            xml += "\" Partition=\"";
+            XmlEscapeTo(xml, driver->second->partition);
+            xml += "\" Type=\"DriverPackage\"/>\r\n";
+            continue;
+        }
         xml += "<Package ID=\"";
         XmlEscapeTo(xml, id);
         xml += "\" KeyForm=\"";
@@ -1241,14 +1520,36 @@ for (const std::string& fmFile : fmFiles)
     }
     xml += "</Packages>\r\n<EnumeratedPackages>\r\n";
     // 参照里 EnumeratedPackages 按 ID 不区分大小写升序。
+    // 产品包的语言变体：不是"OEMInput <Languages> 里有的都留"，而是只留**真正被选中的语言特性**
+    // （OEMInput 的 Language.* Feature，例如 Language.Basic.en-us）对应的语言——
+    // 参照 OEMInput 的 <Languages> 是 zh-CN + en-US，但 Feature 只点了 en-us，
+    // 于是 ActionList / EnumeratedPackages 里 UpdateOS-Product-Package 只有 en-US 那一份。
+    std::vector<std::string> effectiveLangs;
+    for (const std::string& feature : oem.features)
+    {
+        if (LowerText(feature).compare(0, 9, "language.") != 0) continue;
+        const std::size_t dot = feature.find_last_of('.');
+        if (dot == std::string::npos) continue;
+        const std::string lang = feature.substr(dot + 1);
+        if (lang.find_first_of("-.0123456789") != std::string::npos) continue;
+        bool seen = false;
+        for (const std::string& known : effectiveLangs) if (EqualsNoCase(known, lang)) { seen = true; break; }
+        if (!seen) effectiveLangs.push_back(lang);
+    }
+    if (effectiveLangs.empty()) effectiveLangs = oem.languages;
     std::vector<const Pkg*> enumerated;
     for (const Pkg& p : packages)
     {
         if (!p.haveMum) continue;
-        // 后续阶段会过滤掉产品包（参照里 194 个 cab 只剩 193）
+        // 后续阶段会过滤掉产品包的语言变体：参照里 194 个 cab 只剩 193。
         if (EqualsNoCase(p.mum.name, "Microsoft-OneCoreUpdateOS-Product-Package") && !p.mum.language.empty())
         {
-            continue;
+            bool selected = false;
+            for (const std::string& lang : effectiveLangs)
+            {
+                if (EqualsNoCase(p.mum.language, lang)) { selected = true; break; }
+            }
+            if (!selected) continue;
         }
         enumerated.push_back(&p);
     }
@@ -1300,6 +1601,21 @@ for (const std::string& fmFile : fmFiles)
     xml += "<Pair Name=\"WinREVersion\"/>\r\n";
     xml += "</ValuePair>\r\n</CompDB>\r\n";
 
+    {
+        // --out 的父目录不存在时先建（否则 WriteFileText 报"创建失败（错误码 3）"）。
+        const std::wstring outWide = Utf8ToWide(outPath);
+        std::size_t slash = outWide.find_last_of(L"\\/");
+        if (slash != std::wstring::npos && slash > 0)
+        {
+            std::string dirError;
+            if (!EnsureDirectory(outWide.substr(0, slash), dirError))
+            {
+                Err("创建输出目录失败：" + dirError);
+                LogClose();
+                return 1;
+            }
+        }
+    }
     if (!WriteFileText(Utf8ToWide(outPath), xml, error))
     {
         Err(error);
@@ -2253,7 +2569,7 @@ int CmdLayout(const std::vector<std::string>& args)
     {
         if (LowerText(p.name) == "ospool") return true;
         const std::string t = LowerText(p.type);
-        return t.find("e75caf8f-f680-4cee-afa3-b001e56efc2d") != std::string::npos;
+        return (t.find("f75caf8f-f680-4cee-afa3-b001e56efc2d") != std::string::npos || t.find("e75caf8f-f680-4cee-afa3-b001e56efc2d") != std::string::npos);
     }
 
     // 选一个存储池：布局里有多个池时必须用 --pool 指定。
@@ -3334,7 +3650,7 @@ int CmdLayout(const std::vector<std::string>& args)
             if (plan.holdsPool)
             {
                 const std::string poolNameUtf8(widePool.begin(), widePool.end());
-                const std::string canonicalPoolType = "{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}";
+                const std::string canonicalPoolType = "{F75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}";
                 std::string typeError;
                 if (!VhdSetPartitionType(devicePath, poolNameUtf8, canonicalPoolType, typeError))
                     OutLn("  池分区类型归一化失败：" + typeError);
@@ -3583,7 +3899,7 @@ int CmdLayout(const std::vector<std::string>& args)
                 parts.push_back(boot);
                 VhdPartition pool;
                 pool.name = "OSPool";
-                pool.type = "{e75caf8f-f680-4cee-afa3-b001e56efc2d}";
+                pool.type = "{f75caf8f-f680-4cee-afa3-b001e56efc2d}";
                 pool.offsetBytes = efiespOffset + efiespSize;
                 // 末尾要给备份 GPT 留位（至少 33 扇区），否则 SET_DRIVE_LAYOUT 报 87。
                 const std::uint64_t tail = 1 * mb;
@@ -3793,7 +4109,7 @@ int CmdLayout(const std::vector<std::string>& args)
         if (built)
         {
             const std::string poolNameUtf8(widePool.begin(), widePool.end());
-            const std::string canonicalPoolType = "{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}";
+            const std::string canonicalPoolType = "{F75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}";
             std::string typeError;
             if (!VhdSetPartitionType(device, poolNameUtf8, canonicalPoolType, typeError))
                 OutLn("  池分区类型归一化失败：" + typeError);
@@ -4125,7 +4441,7 @@ int CmdLayout(const std::vector<std::string>& args)
         for (const std::string& line : detachReport) OutLn("  " + line);
         {
             const std::string poolNameUtf8(widePool.begin(), widePool.end());
-            const std::string canonicalPoolType = "{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}";
+            const std::string canonicalPoolType = "{F75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}";
             std::string typeError;
             if (!VhdSetPartitionType(device, poolNameUtf8, canonicalPoolType, typeError))
                 OutLn("  池分区类型归一化失败：" + typeError);
@@ -4193,13 +4509,14 @@ int CmdLayout(const std::vector<std::string>& args)
 //   3) 调 UpdateDLL：Initialize(InitForInput) → PrepareUpdate → Initialize(InitForOutput) → ExecuteUpdate。
 // 包清单的决策规则不在这里重写——直接用 plan 那一层（BuildPlan）。
     static bool WriteUpdateInputXml(const PlanResult& plan, const std::string& packagesDir,
+                                    const std::vector<DriverInput>& drivers,
                                     const std::string& outPath, std::string& error)
     {
         std::string xml;
         xml += "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n";
-        xml += "<UpdateOSInput xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
-               "xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\" "
-               "xmlns=\"http://schemas.microsoft.com/embedded/2004/10/ImageUpdate\">\r\n";
+        xml += "<UpdateOSInput xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" ";
+        xml +=       "xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\" ";
+        xml +=       "xmlns=\"http://schemas.microsoft.com/embedded/2004/10/ImageUpdate\">\r\n";
         xml += "  <Description>ocid_imagegen apply</Description>\r\n";
         xml += "  <PackageFiles>\r\n";
         for (const PackageRef& ref : plan.packages)
@@ -4207,6 +4524,15 @@ int CmdLayout(const std::vector<std::string>& args)
             xml += "    <PackageFile>\\\\?\\";
             XmlEscapeTo(xml, packagesDir + "\\" + ref.cab);
             xml += "</PackageFile>\r\n";
+        }
+        // 驱动包：DriverPackage|<INF 绝对路径>|<KeyForm>|0（ImageApp 的 UpdateInput 就是这个形状）
+        for (const DriverInput& driver : drivers)
+        {
+            xml += "    <PackageFile>DriverPackage|";
+            XmlEscapeTo(xml, driver.infPath);
+            xml += "|";
+            XmlEscapeTo(xml, driver.keyform);
+            xml += "|0</PackageFile>\r\n";
         }
         xml += "  </PackageFiles>\r\n";
         xml += "</UpdateOSInput>\r\n";
@@ -4454,20 +4780,119 @@ int CmdLayout(const std::vector<std::string>& args)
         return 0;
     }
 
+    // ActionList 预检：`InstallPackage/@FilePath` 与 `Payload/@SourceName` 全都要在包根里。
+    // UpdateDLL 只有跑到暂存阶段才会发现缺包（返回 0x80188307），而那时造盘已经花掉几十分钟，
+    // 所以先在入口按同样的口径自检一遍，缺什么直接点名。
+    // 例外：`Type="Driver"` 的 InstallPackage 是驱动包（FilePath 是 .inf 文件名），它不在包根里，
+    // 由 --bsp-drivers 指的驱动树提供 ⇒ 单独收集、按「驱动树里有没有这个 INF」判定。
+    static void CollectActionListFileNames(const XmlNode* node, std::vector<std::string>& files,
+                                           std::set<std::string>& seen,
+                                           std::vector<std::string>* driverInfs = nullptr)
+    {
+        if (node == nullptr) return;
+        bool isDriverPackage = false;
+        for (const XmlAttr& attr : node->attrs)
+        {
+            if (attr.local == "Type" && EqualsNoCase(attr.value, "Driver")) isDriverPackage = true;
+        }
+        if (isDriverPackage)
+        {
+            for (const XmlAttr& attr : node->attrs)
+            {
+                if (attr.local != "FilePath" || attr.value.empty()) continue;
+                const std::string key = LowerText(attr.value);
+                if (!seen.insert(key).second) continue;
+                if (driverInfs != nullptr) driverInfs->push_back(attr.value);
+            }
+            return;
+        }
+        for (const XmlAttr& attr : node->attrs)
+        {
+            if (attr.local != "FilePath" && attr.local != "SourceName") continue;
+            if (attr.value.empty()) continue;
+            const std::string key = LowerText(attr.value);
+            if (!seen.insert(key).second) continue;
+            files.push_back(attr.value);
+        }
+        for (const std::unique_ptr<XmlNode>& kid : node->kids)
+            CollectActionListFileNames(kid.get(), files, seen, driverInfs);
+    }
+
+    static bool ValidateActionListFiles(const std::string& actionList, const std::string& packagesRoot,
+                                        const std::string& bspDrivers,
+                                        std::vector<std::string>& report, std::string& error)
+    {
+        if (actionList.empty() || packagesRoot.empty()) return true;
+        std::unique_ptr<XmlDoc> doc = XmlParseFile(Utf8ToWide(actionList), error);
+        if (!doc) return false;
+        std::vector<std::string> files;
+        std::vector<std::string> driverInfs;
+        std::set<std::string> seen;
+        CollectActionListFileNames(doc->Root(), files, seen, &driverInfs);
+        const std::wstring root = Utf8ToWide(packagesRoot);
+        std::vector<std::string> missing;
+        for (const std::string& name : files)
+        {
+            if (!FileExists(CombinePath(root, Utf8ToWide(name)))) missing.push_back(name);
+        }
+        // 驱动包：在驱动树里按文件名找（<bsp>\<驱动目录>\<inf>）
+        std::size_t driversFound = 0;
+        if (!driverInfs.empty())
+        {
+            std::vector<DriverInput> drivers;
+            std::string driverError;
+            if (!CollectDriverInputs(bspDrivers, "arm64", drivers, driverError))
+            {
+                error = "ActionList 里有 " + std::to_string(driverInfs.size()) +
+                        " 个驱动包，但没有可用的 --bsp-drivers：" + driverError;
+                return false;
+            }
+            for (const std::string& inf : driverInfs)
+            {
+                bool found = false;
+                for (const DriverInput& driver : drivers)
+                {
+                    const std::size_t slash = driver.infPath.find_last_of("\\/");
+                    const std::string name = (slash == std::string::npos) ? driver.infPath : driver.infPath.substr(slash + 1);
+                    if (!EqualsNoCase(name, inf)) continue;
+                    found = true;
+                    break;
+                }
+                if (found) ++driversFound; else missing.push_back(inf);
+            }
+        }
+        report.push_back("ActionList 预检：需要 " + std::to_string(files.size()) + " 个文件 + " +
+                         std::to_string(driverInfs.size()) + " 个驱动（驱动树里找到 " +
+                         std::to_string(driversFound) + " 个），缺 " + std::to_string(missing.size()) + " 个");
+        if (missing.empty()) return true;
+        std::string list;
+        const std::size_t show = missing.size() < 8 ? missing.size() : 8;
+        for (std::size_t i = 0; i < show; ++i) { if (i != 0) list += "、"; list += missing[i]; }
+        if (missing.size() > show) list += " 等";
+        error = "ActionList 里这 " + std::to_string(missing.size()) + " 个文件在包根里找不到：" + list;
+        return false;
+    }
+
     // image build：一条命令走完"先组装硬盘，再组装系统"——
     //   1) disk build（每块物理盘一个 VHDX，写 GPT/MBR）
     //   2) pool prepare --format（建池、池内 GPT、space/物理分区格式化）
     //   3) apply（可选：UpdateDLL 暂存 + 提交）
     //   4) disk verify（把完整磁盘摊开打印）
     static int DetachStagingImages(const std::string& dir, bool removeFiles);
+    // 定义在 CmdApply 之前（见 ValidateUpdateResult），image build 里先用先声明。
+    static bool ValidateUpdateResult(const std::string& outputPath, const std::string& actionList,
+                                     std::vector<std::string>& report, std::string& error);
+
     static int CmdImageBuild(const std::vector<std::string>& args)
     {
-        std::string layoutPath, outDir, packagesDir, packagesRoot, actionList, oemInput, fmDir, arch = "arm64";
+        std::string layoutPath, outDir, packagesDir, packagesRoot, actionList, oemInput, fmDir, appxRoot, appxFmDir, arch = "arm64";
+        std::string bspDrivers;
         std::string poolName, onlyStore, dirOverride;
         std::string formatName = "auto";
         std::uint64_t sizeOption = 0;
         unsigned long applyTimeout = 3600;
         bool noApply = false;
+        bool noAppx = false;
         bool noSpaceOverride = false;
         bool keepOverlays = false;
         for (std::size_t i = 3; i < args.size(); ++i)
@@ -4481,6 +4906,9 @@ int CmdLayout(const std::vector<std::string>& args)
             else if (a == "--action-list") { if (!next(actionList)) { Err("--action-list 缺少值"); return 2; } }
             else if (a == "--oem-input") { if (!next(oemInput)) { Err("--oem-input 缺少值"); return 2; } }
             else if (a == "--fm-dir") { if (!next(fmDir)) { Err("--fm-dir 缺少值"); return 2; } }
+            else if (a == "--appx-root") { if (!next(appxRoot)) { Err("--appx-root 缺少值"); return 2; } }
+            else if (a == "--appx-fm-dir") { if (!next(appxFmDir)) { Err("--appx-fm-dir 缺少值"); return 2; } }
+            else if (a == "--bsp-drivers") { if (!next(bspDrivers)) { Err("--bsp-drivers 缺少值"); return 2; } }
             else if (a == "--arch") { if (!next(arch)) { Err("--arch 缺少值"); return 2; } }
             else if (a == "--pool") { if (!next(poolName)) { Err("--pool 缺少值"); return 2; } }
             else if (a == "--store") { if (!next(onlyStore)) { Err("--store 缺少值"); return 2; } }
@@ -4489,6 +4917,7 @@ int CmdLayout(const std::vector<std::string>& args)
             else if (a == "--timeout") { std::string v; if (!next(v)) { Err("--timeout 缺少值"); return 2; } applyTimeout = static_cast<unsigned long>(std::strtoul(v.c_str(), nullptr, 0)); }
             else if (a == "--format") { if (!next(formatName)) { Err("--format 缺少值"); return 2; } }
             else if (a == "--no-apply") noApply = true;
+            else if (a == "--no-appx") noAppx = true;
             else if (a == "--no-space-override") noSpaceOverride = true;
             else if (a == "--keep-overlays") keepOverlays = true;
             else if (!a.empty() && a[0] == '-') { Err("未知参数：" + a); return 2; }
@@ -4496,6 +4925,14 @@ int CmdLayout(const std::vector<std::string>& args)
         }
         if (layoutPath.empty() || outDir.empty()) { Err("image build 需要 --layout <DeviceLayout.xml> --outdir <目录>"); return 2; }
         std::string error;
+        if (!noApply && !packagesDir.empty() && !actionList.empty())
+        {
+            std::vector<std::string> preflight;
+            std::string preflightError;
+            const std::string preflightRoot = packagesRoot.empty() ? packagesDir : packagesRoot;
+            if (!ValidateActionListFiles(actionList, preflightRoot, bspDrivers, preflight, preflightError)) { Err(preflightError); return 1; }
+            for (const std::string& line : preflight) OutLn(line);
+        }
         if (!EnsureDirectory(Utf8ToWide(outDir), error)) { Err("创建输出目录失败：" + error); return 1; }
         const std::string stagingDir = dirOverride.empty() ? (outDir + "\\tmp") : dirOverride;
         LayoutModel model;
@@ -4526,12 +4963,29 @@ int CmdLayout(const std::vector<std::string>& args)
         for (const PhysicalDiskPlan& plan : plans) { if (plan.holdsPool) { poolPlan = &plan; break; } }
         if (poolPlan == nullptr) { Err("布局里没有池载体磁盘"); return 1; }
         const std::string imageFile = poolPlan->fileName;
+        // 任何一步失败都要把残留挂载清掉：UpdateDLL 会在 staging 目录留下已挂载的
+        // {GUID}.vhdx 覆盖盘，池载体磁盘也还开着；不清理下一轮就会撞 GetStoreId 的
+        // ERROR_DUP_NAME（0x80070034），或者干脆把镜像锁到需要重启。
+        auto cleanupAfterFailure = [&]()
+        {
+            const int overlays = DetachStagingImages(stagingDir, false);
+            if (overlays > 0) OutLn("  已卸载残留覆盖盘：" + std::to_string(overlays) + " 个");
+            unsigned long cleanupCode = 0;
+            std::string cleanupError;
+            RunSelfWithTimeout({ "vhd", "detach", imageFile, "--force", "--kill" }, 120000ul, cleanupCode, cleanupError);
+        };
 
         OutLn("=== 2/4 建池 + 池内 GPT + 格式化 ===");
         child = { "pool", "prepare", "--vhd", imageFile, "--layout", layoutPath, "--format", "--dir", stagingDir };
         if (!poolName.empty()) { child.push_back("--pool"); child.push_back(poolName); }
         if (!RunSelfWithTimeout(child, 1800ul * 1000ul, code, error)) { Err("pool prepare 失败：" + error); return 1; }
         if (code != 0) { Err("pool prepare 退出码 " + std::to_string(code)); return 1; }
+
+        OutLn("=== 2.5/4 补 space 目录骨架（Data/OSData/MainOS 的空目录与 Windows\ImageUpdate）===");
+        child = { "pool", "seed", "--vhd", imageFile, "--layout", layoutPath, "--dir", stagingDir };
+        if (!poolName.empty()) { child.push_back("--pool"); child.push_back(poolName); }
+        if (!RunSelfWithTimeout(child, 1800ul * 1000ul, code, error)) { Err("pool seed 失败：" + error); return 1; }
+        if (code != 0) { Err("pool seed 退出码 " + std::to_string(code)); return 1; }
 
         if (!noApply && !packagesDir.empty())
         {
@@ -4543,10 +4997,22 @@ int CmdLayout(const std::vector<std::string>& args)
             if (!actionList.empty()) { child.push_back("--action-list"); child.push_back(actionList); }
             if (!oemInput.empty()) { child.push_back("--oem-input"); child.push_back(oemInput); }
             if (!fmDir.empty()) { child.push_back("--fm-dir"); child.push_back(fmDir); }
+            if (!bspDrivers.empty()) { child.push_back("--bsp-drivers"); child.push_back(bspDrivers); }
             if (!poolName.empty()) { child.push_back("--pool"); child.push_back(poolName); }
             if (noSpaceOverride) child.push_back("--no-space-override");
-            if (!RunSelfWithTimeout(child, (applyTimeout + 600ul) * 1000ul, code, error)) { Err("apply 失败：" + error); return 1; }
-            if (code != 0) { Err("apply 退出码 " + std::to_string(code)); return 1; }
+            if (!RunSelfWithTimeout(child, (applyTimeout + 600ul) * 1000ul, code, error)) { Err("apply 失败：" + error); cleanupAfterFailure(); return 1; }
+            if (code != 0) { Err("apply 退出码 " + std::to_string(code)); cleanupAfterFailure(); return 1; }
+            {
+                std::vector<std::string> resultReport;
+                std::string resultError;
+                if (!ValidateUpdateResult(outDir + "\\out\\UpdateOutput.xml", actionList, resultReport, resultError))
+                {
+                    Err("落包结果校验失败：" + resultError);
+                    cleanupAfterFailure();
+                    return 1;
+                }
+                for (const std::string& line : resultReport) OutLn("  " + line);
+            }
         }
         else
         {
@@ -4554,9 +5020,11 @@ int CmdLayout(const std::vector<std::string>& args)
         }
 
 
-        if (!noApply && !packagesDir.empty())
+        // 服务不会自动把 staging 里的 {GUID}.vhdx 覆盖盘并回 space：必须先把覆盖盘挪出 staging，
+        // 让池回落到镜像内的真实 space，再把覆盖盘的内容 robocopy 进去，最后 detach 落盘。
+        // 这套动作在 merge-overlays.ps1 里（落包与 AppX 两个阶段都要用）。
+        auto runMergeOverlays = [&](const std::string& dir, const char* label) -> bool
         {
-            OutLn("=== 3.5/4 合并 staging 覆盖盘（搬回镜像内 space）===");
             wchar_t selfPath[MAX_PATH * 4];
             const DWORD selfPathLen = GetModuleFileNameW(nullptr, selfPath, static_cast<DWORD>(sizeof(selfPath) / sizeof(selfPath[0])));
             std::wstring exeDir = (selfPathLen > 0) ? std::wstring(selfPath, selfPathLen) : std::wstring();
@@ -4566,14 +5034,53 @@ int CmdLayout(const std::vector<std::string>& args)
             std::wstring mergeCmd = L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"" + mergeScript + L"\"";
             mergeCmd += L" -Image \"" + Utf8ToWide(imageFile) + L"\"";
             mergeCmd += L" -Layout \"" + Utf8ToWide(layoutPath) + L"\"";
-            mergeCmd += L" -Dir \"" + Utf8ToWide(stagingDir) + L"\"";
+            mergeCmd += L" -Dir \"" + Utf8ToWide(dir) + L"\"";
             mergeCmd += L" -Tool \"" + exeDir + L"\\ocid_imagegen.exe\"";
-            if (!RunCommandWithTimeout(mergeCmd, (applyTimeout + 1800ul) * 1000ul, code, error)) { Err("合并覆盖盘失败：" + error); return 1; }
-            if (code != 0) { Err("合并覆盖盘退出码 " + std::to_string(code)); return 1; }
-            child = { "vhd", "set-part-type", imageFile, "--name", "OSPool", "--type", "{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}" };
+            if (!RunCommandWithTimeout(mergeCmd, (applyTimeout + 1800ul) * 1000ul, code, error)) { Err(std::string(label) + "失败：" + error); cleanupAfterFailure(); return false; }
+            if (code != 0) { Err(std::string(label) + "退出码 " + std::to_string(code)); cleanupAfterFailure(); return false; }
+            return true;
+        };
+
+        if (!noApply && !packagesDir.empty())
+        {
+            OutLn("=== 3.5/4 合并 staging 覆盖盘（搬回镜像内 space）===");
+            if (!runMergeOverlays(stagingDir, "合并覆盖盘")) return 1;
+            child = { "vhd", "set-part-type", imageFile, "--name", "OSPool", "--type", "{F75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}" };
             RunSelfWithTimeout(child, 120000ul, code, error);
             child = { "vhd", "detach", imageFile, "--force", "--kill" };
             RunSelfWithTimeout(child, 120000ul, code, error);
+        }
+
+        const std::string appxPackagesRoot = appxRoot.empty() ? packagesRoot : appxRoot;
+        const std::string appxFmRoot = appxFmDir.empty() ? fmDir : appxFmDir;
+        if (!noAppx && !appxFmRoot.empty() && !appxPackagesRoot.empty() && !oemInput.empty())
+        {
+            OutLn("=== 3.6/4 AppX 落包（解包 → WindowsApps → AppxAllUserStore）===");
+            child = { "appx", "install", "--vhd", imageFile, "--layout", layoutPath, "--oem-input", oemInput,
+                      "--fm-dir", appxFmRoot, "--packages-root", appxPackagesRoot, "--arch", arch,
+                      "--dir", outDir + "\\appx" };
+            if (!poolName.empty()) { child.push_back("--pool"); child.push_back(poolName); }
+            const unsigned long appxTimeout = 5400ul * 1000ul;
+            if (!RunSelfWithTimeout(child, appxTimeout, code, error)) { Err("appx install 失败：" + error); cleanupAfterFailure(); return 1; }
+            if (code != 0) { Err("appx install 退出码 " + std::to_string(code)); cleanupAfterFailure(); return 1; }
+            // AppX 内容不靠 robocopy 合并：`appx install` 结束前会逐 space DetachStorageSpace +
+            // CloseStoragePool(0)，服务在正常 detach 时把覆盖盘回写进池（与 3.5 的 MainOS 同机制）。
+            // 这里只丢掉 appx 目录里物化出来的覆盖盘，确认基座盘已释放。
+            OutLn("=== 3.7/4 收尾 AppX（依赖 detach 回写，丢弃物化覆盖盘）===");
+            child = { "vhd", "detach", imageFile, "--force", "--kill" };
+            RunSelfWithTimeout(child, 180000ul, code, error);
+            {
+                std::error_code ec;
+                std::filesystem::remove_all(std::filesystem::u8path(outDir + "\\appx"), ec);
+                if (ec) OutLn("  警告：删除 " + outDir + "\\appx 失败：" + ec.message());
+                else OutLn("  已丢弃 " + outDir + "\\appx（AppX 内容已在 appx install 的 detach 中回写池）");
+            }
+            child = { "vhd", "set-part-type", imageFile, "--name", "OSPool", "--type", "{F75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}" };
+            RunSelfWithTimeout(child, 120000ul, code, error);
+        }
+        else if (!noAppx && (!appxFmRoot.empty() || !appxPackagesRoot.empty()))
+        {
+            OutLn("=== 3.6/4 跳过 AppX（需要同时给 --appx-fm-dir（或 --fm-dir）、--appx-root（或 --packages-root）、--oem-input）===");
         }
 
         OutLn("=== 4/4 校验完整磁盘 ===");
@@ -4606,6 +5113,108 @@ int CmdLayout(const std::vector<std::string>& args)
         return detached;
     }
 
+    // 落包结果的结构化验收。UpdateDLL 的 progress 百分比永远到不了 100%（官方 ImageApp 跑完
+    // 也只有 Staging 59% / Commit 28%），所以不能用它判断成功。真正可判定的东西在
+    // UpdateOutput.xml：OverallResult / UpdateState，以及每个 InstallPackage 是否真的落地。
+    struct UpdateResultSummary
+    {
+        std::string overallResult;
+        std::string updateState;
+        std::size_t total = 0;
+        std::size_t canonical = 0;
+        std::size_t drivers = 0;
+        std::set<std::string> identities; // 小写
+    };
+
+    static std::string LocalOf(const std::string& name)
+    {
+        const std::size_t colon = name.find(':');
+        return colon == std::string::npos ? name : name.substr(colon + 1);
+    }
+
+    static bool ReadUpdateResult(const std::string& path, UpdateResultSummary& summary, std::string& error)
+    {
+        std::string parseError;
+        std::unique_ptr<XmlDoc> doc = XmlParseFile(Utf8ToWide(path), parseError);
+        if (!doc || doc->Root() == nullptr) { error = "解析 " + path + " 失败：" + parseError; return false; }
+        const XmlNode* root = doc->Root();
+        summary.overallResult = TextOf(root, "OverallResult");
+        summary.updateState = TextOf(root, "UpdateState");
+        const XmlNode* packages = Child(root, "Packages");
+        for (const XmlNode* package : Children(packages, "Package"))
+        {
+            ++summary.total;
+            if (EqualsNoCase(TextOf(package, "PackageType"), "Driver")) ++summary.drivers;
+            else ++summary.canonical;
+            std::string identity = TextOf(package, "PackageIdentity");
+            if (identity.empty()) identity = TextOf(package, "DriverPackageIdentity");
+            if (!identity.empty()) summary.identities.insert(LowerText(identity));
+        }
+        return true;
+    }
+
+    static bool CollectActionListKeyforms(const std::string& path, std::vector<std::string>& keyforms, std::string& error)
+    {
+        std::string parseError;
+        std::unique_ptr<XmlDoc> doc = XmlParseFile(Utf8ToWide(path), parseError);
+        if (!doc || doc->Root() == nullptr) { error = "解析 " + path + " 失败：" + parseError; return false; }
+        for (const std::unique_ptr<XmlNode>& node : doc->pool)
+        {
+            if (node == nullptr) continue;
+            if (!EqualsNoCase(LocalOf(node->name), "InstallPackage")) continue;
+            const std::string keyform = Attr(node.get(), "Keyform");
+            if (!keyform.empty()) keyforms.push_back(keyform);
+        }
+        return true;
+    }
+
+    static bool ValidateUpdateResult(const std::string& outputPath, const std::string& actionList,
+                                     std::vector<std::string>& report, std::string& error)
+    {
+        UpdateResultSummary summary;
+        if (!ReadUpdateResult(outputPath, summary, error)) return false;
+        report.push_back("UpdateOutput：总体结果 " + summary.overallResult + "，状态 " + summary.updateState +
+                         "，包 " + std::to_string(summary.total) + " 个（Canonical " + std::to_string(summary.canonical) +
+                         " / Driver " + std::to_string(summary.drivers) + "）");
+        if (summary.overallResult != "0")
+        {
+            error = "UpdateOutput 的 OverallResult = " + summary.overallResult + "（期望 0）";
+            return false;
+        }
+        if (!EqualsNoCase(summary.updateState, "Update Complete"))
+        {
+            error = "UpdateOutput 的 UpdateState = " + summary.updateState + "（期望 Update Complete）";
+            return false;
+        }
+        if (summary.total == 0)
+        {
+            error = "UpdateOutput 里没有任何 Package";
+            return false;
+        }
+        if (actionList.empty()) return true;
+        std::vector<std::string> keyforms;
+        std::string keyError;
+        if (!CollectActionListKeyforms(actionList, keyforms, keyError)) { error = keyError; return false; }
+        std::vector<std::string> missing;
+        for (const std::string& keyform : keyforms)
+        {
+            if (summary.identities.count(LowerText(keyform)) == 0) missing.push_back(keyform);
+        }
+        if (!missing.empty())
+        {
+            std::string detail;
+            for (std::size_t i = 0; i < missing.size() && i < 10; ++i)
+            {
+                if (i != 0) detail += "，";
+                detail += missing[i];
+            }
+            if (missing.size() > 10) detail += " 等";
+            error = "ActionList 有 " + std::to_string(missing.size()) + " 项没落到 UpdateOutput：" + detail;
+            return false;
+        }
+        report.push_back("ActionList " + std::to_string(keyforms.size()) + " 项全部落地");
+        return true;
+    }
     int CmdApply(const std::vector<std::string>& args)
     {
         std::string imagePath;
@@ -4616,6 +5225,7 @@ int CmdLayout(const std::vector<std::string>& args)
         std::string fmDir;
         std::string arch = "amd64";
         std::string actionList;
+        std::string bspDrivers;
         std::string outDir;
         std::string stagingDir;
         std::string driveLetterConfig;
@@ -4650,6 +5260,7 @@ int CmdLayout(const std::vector<std::string>& args)
             else if (a == "--fm-dir") { if (!next(fmDir)) { Err("--fm-dir 缺少值"); return 2; } }
             else if (a == "--arch") { if (!next(arch)) { Err("--arch 缺少值"); return 2; } }
             else if (a == "--action-list") { if (!next(actionList)) { Err("--action-list 缺少值"); return 2; } }
+            else if (a == "--bsp-drivers") { if (!next(bspDrivers)) { Err("--bsp-drivers 缺少值"); return 2; } }
             else if (a == "--outdir") { if (!next(outDir)) { Err("--outdir 缺少值"); return 2; } }
             else if (a == "--dir") { if (!next(stagingDir)) { Err("--dir 缺少值"); return 2; } }
             else if (a == "--drive-letter-config") { if (!next(driveLetterConfig)) { Err("--drive-letter-config 缺少值"); return 2; } }
@@ -4774,7 +5385,7 @@ int CmdLayout(const std::vector<std::string>& args)
                 const std::string cleanupImage = baseVhdForCleanup.empty() ? deviceFromChild : baseVhdForCleanup;
                 if (!cleanupImage.empty())
                 {
-                    runCleanup(std::vector<std::string>{"vhd", "set-part-type", cleanupImage, "--name", "OSPool", "--type", "{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}"}, "归一化池分区类型");
+                    runCleanup(std::vector<std::string>{"vhd", "set-part-type", cleanupImage, "--name", "OSPool", "--type", "{F75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}"}, "归一化池分区类型");
                     unsigned long mergeExit = 1;
                     std::string mergeError;
                     const bool merged = RunSelfWithTimeout(std::vector<std::string>{"pool", "check", "--vhd", cleanupImage, "--layout", layoutPath, "--dir", stagingDir}, 900000, mergeExit, mergeError);
@@ -4858,13 +5469,22 @@ int CmdLayout(const std::vector<std::string>& args)
             input.keepDuplicates = true;
             PlanResult plan;
             if (!BuildPlan(input, plan, error)) { Err("选包失败：" + error); return 1; }
+            std::vector<DriverInput> drivers;
+            if (!CollectDriverInputs(bspDrivers, arch, drivers, error))
+            {
+                Err("读 BSP 驱动目录失败：" + error);
+                return 1;
+            }
             updateInputPath = outDir + "\\UpdateInput.xml";
-            if (!WriteUpdateInputXml(plan, packagesDir, updateInputPath, error))
+            if (!WriteUpdateInputXml(plan, packagesDir, drivers, updateInputPath, error))
             {
                 Err("写 UpdateInput 失败：" + error);
                 return 1;
             }
-            OutLn("UpdateInput：" + std::to_string(plan.packages.size()) + " 个包 -> " + updateInputPath);
+            OutLn("UpdateInput：" + std::to_string(plan.packages.size()) + " 个包 + " +
+                  std::to_string(drivers.size()) + " 个驱动 -> " + updateInputPath);
+            for (const DriverInput& driver : drivers)
+                OutLn("  驱动：" + driver.keyform);
         }
 
         UpdateRequest request;
@@ -4883,6 +5503,9 @@ int CmdLayout(const std::vector<std::string>& args)
     request.oemInputFile = Utf8ToWide(oemInputPath);
         request.updateOutputFile = Utf8ToWide(outDir + "\\UpdateOutput.xml");
         request.updateHistoryFile = Utf8ToWide(outDir + "\\UpdateHistory.xml");
+        // overlap 清单：UpdateDLL 在 staging 时把同一个文件被多个包覆盖的条目写进 SetOverlapFileList 给的路径。
+        // 官方 ImageApp 的成品里有 Flash.overlap.txt，这里对齐成 <out>\overlap.txt。
+        request.overlapFile = Utf8ToWide(outDir + "\\overlap.txt");
         request.logFile = Utf8ToWide(outDir + "\\imagegen-update.log");
         request.stageOnly = stageOnly;
         request.noSpaceOverride = noSpaceOverride;
@@ -5003,6 +5626,16 @@ int CmdLayout(const std::vector<std::string>& args)
             Err("落包失败：" + error);
             return 1;
         }
+        {
+            std::vector<std::string> resultReport;
+            std::string resultError;
+            if (!ValidateUpdateResult(outDir + "\\UpdateOutput.xml", actionList, resultReport, resultError))
+            {
+                Err("落包结果校验失败：" + resultError);
+                return 1;
+            }
+            for (const std::string& line : resultReport) OutLn("  " + line);
+        }
         OutLn("落包完成：UpdateOutput -> " + outDir + "\\UpdateOutput.xml");
         // 服务每次打开池都会把池分区类型改回它自己的私有值，
         // 所以必须在整个链路的最后一步归一化（Windows 才能识别成存储池）。
@@ -5017,7 +5650,7 @@ int CmdLayout(const std::vector<std::string>& args)
             }
             if (!finalDevice.empty())
             {
-                const std::string canonicalPoolType = "{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}";
+                const std::string canonicalPoolType = "{F75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}";
                 std::string typeError;
                 if (!VhdSetPartitionType(finalDevice, WideToUtf8(widePool), canonicalPoolType, typeError))
                     OutLn("  池分区类型归一化失败：" + typeError);
@@ -5072,6 +5705,182 @@ int CmdLayout(const std::vector<std::string>& args)
         for (const std::string& line : report) OutLn("  " + line);
         OutLn("池已释放：" + file);
         return 0;
+    }
+
+    // pool seed：把 ImageApp 会留下的 space 目录骨架补齐（Data 是 ImageApp 的 staging 根，
+    // OSData 有 SystemData 日志目录，MainOS 有到 Data 的镜像骨架），并往 MainOS 的
+    // Windows\ImageUpdate 写 DeviceLayout.xml / OEMDevicePlatform.xml。
+    // 走 Win32 CreateDirectoryW/CopyFileW 直接对 \\?\Volume{…}\ 操作：.NET 与 Test-Path 不认这种前缀。
+    static bool CreateVolumeDirectory(const std::wstring& volume, const std::string& relative, std::string& error)
+    {
+        // CreateDirectoryW 不会顺手建中间目录（刚格式化的 space 是全空的，直接建
+        // USERS\System\AppData\... 只会得到 ERROR_PATH_NOT_FOUND），所以逐级创建。
+        const std::wstring rel = Utf8ToWide(relative);
+        std::wstring current = volume;
+        std::size_t start = 0;
+        while (start < rel.size())
+        {
+            const std::size_t sep = rel.find_first_of(L"\\/", start);
+            const std::wstring part = rel.substr(start, sep == std::wstring::npos ? std::wstring::npos : sep - start);
+            if (!part.empty())
+            {
+                current += part;
+                if (CreateDirectoryW(current.c_str(), nullptr) == 0)
+                {
+                    const DWORD last = GetLastError();
+                    if (last != ERROR_ALREADY_EXISTS)
+                    {
+                        error = "创建目录失败（" + WideToUtf8(current) + "）win32=" + std::to_string(last);
+                        return false;
+                    }
+                }
+                current += L"\\";
+            }
+            if (sep == std::wstring::npos) break;
+            start = sep + 1;
+        }
+        return true;
+    }
+
+    static bool CopyFileToVolume(const std::string& source, const std::wstring& volume, const std::string& relative,
+                                 std::string& error)
+    {
+        const std::wstring full = volume + Utf8ToWide(relative);
+        if (CopyFileW(Utf8ToWide(source).c_str(), full.c_str(), FALSE) != 0) return true;
+        error = "复制失败（" + source + " -> " + WideToUtf8(full) + "）win32=" + std::to_string(GetLastError());
+        return false;
+    }
+
+    int CmdPoolSeed(const std::vector<std::string>& args)
+    {
+        std::string file, layoutPath, directory = "ocid_seed", poolName, platformXml;
+        for (std::size_t i = 3; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            auto next = [&](std::string& out) -> bool { if (i + 1 >= args.size()) return false; out = args[++i]; return true; };
+            if (a == "--vhd") { if (!next(file)) { Err("--vhd 缺少值"); return 2; } }
+            else if (a == "--layout") { if (!next(layoutPath)) { Err("--layout 缺少值"); return 2; } }
+            else if (a == "--dir") { if (!next(directory)) { Err("--dir 缺少值"); return 2; } }
+            else if (a == "--pool") { if (!next(poolName)) { Err("--pool 缺少值"); return 2; } }
+            else if (a == "--oem-device-platform") { if (!next(platformXml)) { Err("--oem-device-platform 缺少值"); return 2; } }
+            else { Err("pool seed 未知选项：" + a); return 2; }
+        }
+        if (file.empty() || layoutPath.empty()) { Err("pool seed 需要 --vhd <虚拟磁盘> --layout <布局 XML>"); return 2; }
+        LayoutModel model;
+        std::string loadError;
+        if (!LoadLayout(layoutPath, model, loadError)) { Err("读取布局失败：" + loadError); return 1; }
+        std::string poolError;
+        const LayoutPool* poolGroup = SelectLayoutPool(model, poolName, poolError);
+        if (poolGroup == nullptr) { Err(poolError); return 1; }
+        std::vector<std::pair<std::wstring, std::wstring> > spaces;
+        for (const LayoutStore& store : poolGroup->stores)
+        {
+            if (store.partitions.empty()) continue;
+            spaces.push_back(std::make_pair(Utf8ToWide(store.storeType), Utf8ToWide(store.partitions.front().name)));
+        }
+        if (spaces.empty()) { Err("所选存储池内没有可挂载的 space"); return 1; }
+        std::vector<std::vector<unsigned char> > storeIds;
+        std::vector<std::pair<std::wstring, std::wstring> > volumes;
+        std::vector<std::string> report;
+        std::string mountError;
+        std::wstring baseDevice;
+        OutLn("[seed] mounting spaces ...");
+        if (!PoolMountSpaces(Utf8ToWide(file), Utf8ToWide(poolGroup->name), LayoutPoolVersion(poolGroup, 24),
+                             Utf8ToWide(directory), spaces, storeIds, volumes, report, mountError, &baseDevice))
+        {
+            Err("pool seed 挂载失败：" + mountError);
+            return 1;
+        }
+        for (const std::string& line : report) OutLn("  " + line);
+
+        // space -> 需要补齐的相对目录（照官方 QEMU-Stage 镜像的 space 内容）
+        std::vector<std::pair<std::string, std::vector<std::string> > > seed;
+        {
+            std::vector<std::string> dataDirs;
+            dataDirs.push_back("sandbox");
+            dataDirs.push_back("USERS\\System\\AppData\\Local\\UpdateStagingRoot\\SharedData\\DuShared");
+            seed.push_back(std::make_pair(std::string("Data"), dataDirs));
+            std::vector<std::string> osDataDirs;
+            osDataDirs.push_back("SystemData\\ETW");
+            osDataDirs.push_back("SystemData\\NonETWLogs");
+            seed.push_back(std::make_pair(std::string("OSData"), osDataDirs));
+            std::vector<std::string> mainDirs;
+            mainDirs.push_back("Data\\sandbox");
+            mainDirs.push_back("Data\\USERS\\System\\AppData\\Local\\UpdateStagingRoot\\SharedData\\DuShared");
+            seed.push_back(std::make_pair(std::string("MainOS"), mainDirs));
+        }
+
+        int failures = 0;
+        for (std::size_t i = 0; i < volumes.size() && i < spaces.size(); ++i)
+        {
+            const std::string spaceName = WideToUtf8(spaces[i].first);
+            const std::string partitionName = WideToUtf8(spaces[i].second);
+            const std::wstring volume = volumes[i].second;
+            std::string spaceKey;
+            for (std::size_t k = 0; k < seed.size(); ++k)
+            {
+                if (LowerText(spaceName).find(LowerText(seed[k].first)) != std::string::npos) { spaceKey = seed[k].first; break; }
+            }
+            int made = 0;
+            if (!spaceKey.empty())
+            {
+                for (std::size_t k = 0; k < seed.size(); ++k)
+                {
+                    if (seed[k].first != spaceKey) continue;
+                    for (const std::string& rel : seed[k].second)
+                    {
+                        std::string dirError;
+                        if (!CreateVolumeDirectory(volume, rel, dirError)) { Err("  " + spaceName + "：" + dirError); ++failures; }
+                        else ++made;
+                    }
+                }
+            }
+            if (EqualsNoCase(partitionName, "MainOS"))
+            {
+                std::string dirError;
+                if (!CreateVolumeDirectory(volume, "Windows\\ImageUpdate", dirError)) { Err(dirError); ++failures; }
+                std::string platform = platformXml;if (platform.empty()) { const std::wstring layoutFull = FullPath(Utf8ToWide(layoutPath)); const std::size_t slash = layoutFull.find_last_of(L"\\/"); platform = WideToUtf8(slash == std::wstring::npos ? layoutFull : layoutFull.substr(0, slash + 1)) + "OEMDevicePlatform.xml"; }
+                if (!CopyFileToVolume(layoutPath, volume, "Windows\\ImageUpdate\\DeviceLayout.xml", dirError))
+                {
+                    Err("  MainOS：" + dirError);
+                    ++failures;
+                }
+                std::error_code existsEc;
+                if (std::filesystem::exists(std::filesystem::u8path(platform), existsEc))
+                {
+                    if (!CopyFileToVolume(platform, volume, "Windows\\ImageUpdate\\OEMDevicePlatform.xml", dirError))
+                    {
+                        Err("  MainOS：" + dirError);
+                        ++failures;
+                    }
+                }
+                else
+                {
+                    OutLn("  提示：没有找到 OEMDevicePlatform.xml（" + platform + "），跳过");
+                }
+            }
+            OutLn("  " + spaceName + "（" + partitionName + "）：目录骨架 +" + std::to_string(made));
+        }
+
+        std::vector<std::string> detachReport;
+        std::string detachError;
+        std::vector<std::wstring> names;
+        for (const std::pair<std::wstring, std::wstring>& kv : spaces) names.push_back(kv.first);
+        const std::wstring detachTarget = baseDevice.empty() ? Utf8ToWide(file) : baseDevice;
+        if (!PoolDetachSpaces(detachTarget, Utf8ToWide(poolGroup->name), LayoutPoolVersion(poolGroup, 24),
+                              Utf8ToWide(directory), names, detachReport, detachError))
+        {
+            Err("卸载 space 失败：" + detachError);
+            return 1;
+        }
+        for (const std::string& line : detachReport) OutLn("  " + line);
+        {
+            std::vector<std::string> forceReport;
+            std::string forceError;
+            if (!VhdForceDetach(Utf8ToWide(file), true, forceReport, forceError)) OutLn("  警告：卸载基座盘失败：" + forceError);
+        }
+        OutLn(failures == 0 ? "目录骨架补齐完成" : ("目录骨架有 " + std::to_string(failures) + " 项失败"));
+        return failures == 0 ? 0 : 1;
     }
 
     // pool mount：挂载池内各 space 并把每个 space 的分区卷路径打印出来，供产物可访问性验证。
@@ -5338,6 +6147,7 @@ int CmdLayout(const std::vector<std::string>& args)
         if (sub == "detach") return CmdPoolDetach(args);
         if (sub == "finalize") return CmdPoolFinalize(args);
         if (sub == "mount") return CmdPoolMount(args);
+        if (sub == "seed") return CmdPoolSeed(args);
         if (sub == "check") return CmdPoolCheck(args);
         if (sub == "close") return CmdPoolClose(args);
         if (sub == "probe")
@@ -5552,371 +6362,128 @@ int CmdLayout(const std::vector<std::string>& args)
     }
 
 
-    // ---- FFU 只读解析（B1）：安全头 + 镜像头 + INI manifest ----
-    static std::uint32_t ReadU32At(const std::vector<unsigned char>& buf, std::size_t off)
+    // ---------------- FFU pack（容器层在 ocid_ffu.wcos.dll；这里只把设备布局翻译成 FfuPackRequest） ----------------
+    // 字节布局的坑（ChunkSize 单位是 KB、SecurityPadding 对齐、store 元数据连续在前、描述符 Phase1/2/3）
+    // 全部关在 Ffu.cpp 里；这个文件只负责“布局 → 清单字段”。
+    static unsigned long long PackParseNum(const std::string& text)
     {
-        if (off + 4 > buf.size()) return 0;
-        return static_cast<std::uint32_t>(buf[off]) | (static_cast<std::uint32_t>(buf[off + 1]) << 8) |
-               (static_cast<std::uint32_t>(buf[off + 2]) << 16) | (static_cast<std::uint32_t>(buf[off + 3]) << 24);
+        if (text.empty()) return 0;
+        char* end = nullptr;
+        const unsigned long long value = std::strtoull(text.c_str(), &end, 0);
+        return (end == text.c_str()) ? 0ull : value;
     }
 
-    static std::string TrimSpaceAscii(const std::string& s)
+    static int CmdFfuPack(const std::vector<std::string>& args)
     {
-        std::size_t b = 0;
-        std::size_t e = s.size();
-        while (b < e && (s[b] == ' ' || s[b] == '\t' || s[b] == '\r')) ++b;
-        while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\r')) --e;
-        return s.substr(b, e - b);
-    }
-
-// ---------------- FFU pack (v1: manifest + per-store block payload) ----------------
-static bool PackReadRange(const std::string& device, unsigned long long offset, unsigned int size,
-                          std::vector<unsigned char>& buffer, std::string& error)
-{
-    HANDLE handle = CreateFileW(Utf8ToWide(device).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                nullptr, OPEN_EXISTING, 0, nullptr);
-    if (handle == INVALID_HANDLE_VALUE)
-    {
-        error = "open device failed (win32=" + std::to_string(GetLastError()) + ").";
-        return false;
-    }
-    LARGE_INTEGER li;
-    li.QuadPart = static_cast<LONGLONG>(offset);
-    if (!SetFilePointerEx(handle, li, nullptr, FILE_BEGIN))
-    {
-        error = "SetFilePointerEx failed.";
-        CloseHandle(handle);
-        return false;
-    }
-    buffer.assign(size, 0);
-    DWORD read = 0;
-    const bool ok = ReadFile(handle, buffer.data(), size, &read, nullptr) != 0 && read == size;
-    if (!ok) error = "read device failed (win32=" + std::to_string(GetLastError()) + ").";
-    CloseHandle(handle);
-    return ok;
-}
-
-static bool PackBlockIsZero(const std::vector<unsigned char>& data)
-{
-    for (std::size_t i = 0; i < data.size(); ++i) if (data[i] != 0) return false;
-    return true;
-}
-
-static void PackU16(std::vector<unsigned char>& out, unsigned int v)
-{
-    out.push_back(static_cast<unsigned char>(v & 0xFF));
-    out.push_back(static_cast<unsigned char>((v >> 8) & 0xFF));
-}
-
-static void PackU32(std::vector<unsigned char>& out, std::uint32_t v)
-{
-    for (int i = 0; i < 4; ++i) out.push_back(static_cast<unsigned char>((v >> (8 * i)) & 0xFF));
-}
-
-static void PackU64(std::vector<unsigned char>& out, std::uint64_t v)
-{
-    for (int i = 0; i < 8; ++i) out.push_back(static_cast<unsigned char>((v >> (8 * i)) & 0xFF));
-}
-
-static bool PackCollectBlocks(const std::string& device, unsigned long long bytes, unsigned int bytesPerBlock,
-                              std::vector<unsigned long long>& blockIndices,
-                              std::string& error)
-{
-    const unsigned long long count = bytes / bytesPerBlock;
-    std::vector<unsigned char> buffer;
-    for (unsigned long long i = 0; i < count; ++i)
-    {
-        if (!PackReadRange(device, i * bytesPerBlock, bytesPerBlock, buffer, error)) return false;
-        if (PackBlockIsZero(buffer)) continue;
-        blockIndices.push_back(i);
-    }
-    return true;
-}
-
-static bool PackNum(const std::string& text, std::uint64_t& value)
-{
-    return ParseHexOrDec(text, value);
-}
-
-static int CmdFfuPack(const std::vector<std::string>& args)
-{
-    std::string image, layoutPath, outPath, arch = "arm64", osVersion = "10.0.20279.1002";
-    std::string description = "ocid_imagegen pack", poolName, dir;
-    unsigned int bytesPerBlock = 2u * 1024u * 1024u;
-    for (std::size_t i = 3; i < args.size(); ++i)
-    {
-        const std::string& a = args[i];
-        if (a == "--image" && i + 1 < args.size()) image = args[++i];
-        else if (a == "--layout" && i + 1 < args.size()) layoutPath = args[++i];
-        else if (a == "--out" && i + 1 < args.size()) outPath = args[++i];
-        else if (a == "--arch" && i + 1 < args.size()) arch = args[++i];
-        else if (a == "--os-version" && i + 1 < args.size()) osVersion = args[++i];
-        else if (a == "--description" && i + 1 < args.size()) description = args[++i];
-        else if (a == "--pool" && i + 1 < args.size()) poolName = args[++i];
-        else if (a == "--dir" && i + 1 < args.size()) dir = args[++i];
-        else if (a == "--bytes-per-block" && i + 1 < args.size()) bytesPerBlock = static_cast<unsigned int>(std::strtoul(args[++i].c_str(), nullptr, 0));
-        else { Err("ffu pack unknown option: " + a); return 2; }
-    }
-    if (image.empty() || layoutPath.empty() || outPath.empty())
-    {
-        Err("usage: ffu pack --image <vhd|device> --layout <xml> --out <ffu> [--arch arm64] [--pool OSPool] [--dir <tmp>]");
-        return 2;
-    }
-    if (dir.empty()) dir = "ocid_pack_tmp";
-
-    LayoutModel model;
-    std::string loadError;
-    if (!LoadLayout(layoutPath, model, loadError)) { Err("load layout failed: " + loadError); return 1; }
-    std::string poolError;
-    const LayoutPool* group = SelectLayoutPool(model, poolName, poolError);
-    if (group == nullptr) { Err(poolError); return 1; }
-    const std::wstring widePool = LayoutPoolName(group);
-    const unsigned int poolVersion = LayoutPoolVersion(group, 24);
-    const unsigned long long baseSector = model.hasSectorSize ? model.sectorSize : 512ull;
-
-    const bool fromFile = image.size() < 4 || image.compare(0, 4, "\\\\.\\") != 0;
-    std::string device = image;
-    std::string attachError;
-    if (fromFile)
-    {
-        std::string attached;
-        if (!VhdAttach(Utf8ToWide(image), false, attached, attachError)) { Err("attach failed: " + attachError); return 1; }
-        device = attached;
-    }
-
-    std::string gptError, diskId;
-    std::vector<VhdPartition> physicalParts;
-    std::uint32_t gptSector = 512;
-    if (!VhdReadGpt(device, diskId, physicalParts, gptSector, gptError))
-    {
-        Err("read physical gpt failed: " + gptError);
-        if (fromFile) { std::vector<std::string> rep; std::string err; VhdForceDetach(Utf8ToWide(image), false, rep, err); }
-        return 1;
-    }
-
-    std::vector<std::wstring> spaceNames;
-    for (const LayoutStore& s : group->stores) spaceNames.push_back(Utf8ToWide(s.storeType));
-    std::vector<std::wstring> spaceDevices;
-    std::vector<std::vector<unsigned char> > spaceIds;
-    std::vector<std::string> mountReport;
-    std::string mountError;
-    if (!spaceNames.empty() &&
-        !PoolAttachSpacesForRead(Utf8ToWide(device), widePool, poolVersion, Utf8ToWide(dir), spaceNames, spaceDevices,
-                                 spaceIds, mountReport, mountError))
-    {
-        Err("attach spaces failed: " + mountError);
-        if (fromFile) { std::vector<std::string> rep; std::string err; VhdForceDetach(Utf8ToWide(image), false, rep, err); }
-        return 1;
-    }
-    for (const std::string& line : mountReport) OutLn("  " + line);
-
-    std::vector<std::vector<unsigned long long> > storeBlockIndices;
-    for (std::size_t i = 0; i < spaceDevices.size(); ++i)
-    {
-        const LayoutStore& s = group->stores[i];
-        unsigned long long bytes = s.hasSizeBytes ? s.sizeInBytes : s.sizeInSectors * StoreSectorBytes(model, s);
-        if (bytes == 0) bytes = 42ull * 1024 * 1024 * 1024;
-        std::vector<unsigned long long> indices;
-        std::string scanError;
-        OutLn("  scanning space " + s.storeType + " (" + FormatBytes(bytes) + ") ...");
-        if (!PackCollectBlocks(WideToUtf8(spaceDevices[i]), bytes, bytesPerBlock, indices, scanError))
+        std::string image, layoutPath, outPath, arch = "arm64", osVersion = "10.0.20279.1002";
+        std::string description = "ocid_imagegen pack", poolName, dir;
+        unsigned int bytesPerBlock = 128u * 1024u;
+        for (std::size_t i = 3; i < args.size(); ++i)
         {
-            Err("scan space failed: " + scanError);
-            if (fromFile) { std::vector<std::string> rep; std::string err; VhdForceDetach(Utf8ToWide(image), false, rep, err); }
+            const std::string& a = args[i];
+            if (a == "--image" && i + 1 < args.size()) image = args[++i];
+            else if (a == "--layout" && i + 1 < args.size()) layoutPath = args[++i];
+            else if (a == "--out" && i + 1 < args.size()) outPath = args[++i];
+            else if (a == "--arch" && i + 1 < args.size()) arch = args[++i];
+            else if (a == "--os-version" && i + 1 < args.size()) osVersion = args[++i];
+            else if (a == "--description" && i + 1 < args.size()) description = args[++i];
+            else if (a == "--pool" && i + 1 < args.size()) poolName = args[++i];
+            else if (a == "--dir" && i + 1 < args.size()) dir = args[++i];
+            else if (a == "--bytes-per-block" && i + 1 < args.size())
+                bytesPerBlock = static_cast<unsigned int>(std::strtoul(args[++i].c_str(), nullptr, 0));
+            else { Err("ffu pack 未知选项：" + a); return 2; }
+        }
+        if (image.empty() || layoutPath.empty() || outPath.empty())
+        {
+            Err("用法：ffu pack --image <vhd|device> --layout <xml> --out <ffu> [--arch arm64] [--pool OSPool] [--os-version 10.0.x] [--bytes-per-block 131072]");
+            return 2;
+        }
+
+        LayoutModel model;
+        std::string loadError;
+        if (!LoadLayout(layoutPath, model, loadError)) { Err("读布局失败：" + loadError); return 1; }
+        std::string poolError;
+        const LayoutPool* group = SelectLayoutPool(model, poolName, poolError);
+        if (group == nullptr) { Err(poolError); return 1; }
+
+        FfuPackRequest request;
+        request.image = image;
+        request.outPath = Utf8ToWide(outPath);
+        request.arch = arch;
+        request.osVersion = osVersion;
+        request.description = description;
+        request.poolName = group->name;
+        request.stateSeparationLevel = static_cast<unsigned int>(model.stateSeparation);
+        request.bytesPerBlock = bytesPerBlock;
+
+        // 物理盘：StoreId / DevicePath / SectorSize 来自布局，分区尺寸由 Ffu.cpp 读真实 GPT 后填写，
+        // 这里只带“文件系统/簇大小/对齐”这类 GPT 里没有的提示。
+        const LayoutStore& physStore = model.stores.empty() ? LayoutStore() : model.stores[0];
+        request.physicalStore.storeId = physStore.id;
+        request.physicalStore.storeType = physStore.storeType.empty() ? std::string("Default") : physStore.storeType;
+        request.physicalStore.devicePath = physStore.devicePath;
+        request.physicalStore.sectorSize = physStore.hasSectorSize ? physStore.sectorSize : (model.hasSectorSize ? model.sectorSize : 512ull);
+        request.physicalStore.onlyAllocateDefinedGptEntries = physStore.onlyAllocateDefinedGptEntries;
+        request.physicalStore.isMainOSStore = false;
+        for (const LayoutPartition& p : physStore.partitions)
+        {
+            FfuPartitionSpec hint;
+            hint.name = p.name;
+            hint.fileSystem = p.fileSystem;
+            hint.clusterSize = PackParseNum(p.clusterSize);
+            hint.byteAlignment = PackParseNum(p.byteAlignment);
+            request.physicalStore.partitions.push_back(hint);
+        }
+
+        // 池内 space：字段全部来自布局（space 的“GPT”是 ImageStorageService 的 SDB 元数据，不在物理 GPT 里）
+        for (const LayoutStore& store : group->stores)
+        {
+            const unsigned long long sector = StoreSectorBytes(model, store);
+            FfuStoreSpec space;
+            space.storeId = store.id;
+            space.storeType = store.storeType;
+            space.sectorSize = sector ? sector : 512ull;
+            space.isSpace = true;
+            space.isMainOSStore = LowerText(store.storeType).find("mainos") != std::string::npos;
+            space.onlyAllocateDefinedGptEntries = store.onlyAllocateDefinedGptEntries;
+            if (store.hasSizeBytes) space.sizeBytes = store.sizeInBytes;
+            else if (store.hasSize) space.minSectorCount = store.sizeInSectors;
+            for (const LayoutPartition& p : store.partitions)
+            {
+                FfuPartitionSpec spec;
+                spec.name = p.name;
+                spec.primary = p.name;
+                spec.type = p.type;
+                spec.id = p.id;
+                spec.fileSystem = p.fileSystem;
+                spec.useAllSpace = p.useAllSpace;
+                spec.clusterSize = PackParseNum(p.clusterSize);
+                spec.byteAlignment = PackParseNum(p.byteAlignment);
+                const unsigned long long bytes = p.hasTotalBytes ? p.totalBytes : 0ull;
+                spec.totalSectors = bytes != 0 ? (bytes / space.sectorSize) : (p.hasTotal ? p.totalSectors : 0ull);
+                if (spec.totalSectors != 0 && spec.useAllSpace) spec.useAllSpace = true;
+                space.partitions.push_back(spec);
+            }
+            request.spaces.push_back(space);
+        }
+
+        std::vector<std::string> report;
+        std::string error;
+        if (!FfuPack(request, report, error))
+        {
+            for (std::size_t i = 0; i < report.size(); ++i) OutLn("  " + report[i]);
+            Err("打包 FFU 失败：" + error);
             return 1;
         }
-        OutLn("    nonzero blocks: " + std::to_string(indices.size()));
-        storeBlockIndices.push_back(indices);
+        for (std::size_t i = 0; i < report.size(); ++i) OutLn("  " + report[i]);
+        OutLn("FFU written: " + outPath);
+        return 0;
     }
-
-    std::vector<unsigned long long> usedSectorsByPartition;
-    std::vector<std::vector<unsigned long long> > physIndices;
-    physIndices.resize(physicalParts.size());
-    for (std::size_t pi = 0; pi < physicalParts.size(); ++pi)
-    {
-        const VhdPartition& part = physicalParts[pi];
-        if (LowerText(part.name) == "ospool")
-        {
-            usedSectorsByPartition.push_back(0);
-            continue;
-        }
-        std::vector<unsigned long long>& indices = physIndices[pi];
-        std::string scanError;
-        OutLn("  scanning physical partition " + part.name + " (" + FormatBytes(part.sizeBytes) + ") ...");
-        if (!PackCollectBlocks(device, part.sizeBytes, bytesPerBlock, indices, scanError))
-        {
-            Err("scan partition failed: " + scanError);
-            if (fromFile) { std::vector<std::string> rep; std::string err; VhdForceDetach(Utf8ToWide(image), false, rep, err); }
-            return 1;
-        }
-        OutLn("    nonzero blocks: " + std::to_string(indices.size()));
-        usedSectorsByPartition.push_back(static_cast<unsigned long long>(indices.size()) * (bytesPerBlock / 512ull));
-    }
-
-    std::string manifest;
-    manifest += "[FullFlash]\r\nAntiTheftVersion     = 1.1\r\nArchitecture         = " + UpperText(arch) +
-                "\r\nDescription          = " + description + "\r\n\r\nDevicePlatformId0    = *\r\nOSVersion            = " +
-                osVersion + "\r\nReleaseType          = Test\r\nStateSeparationLevel = " +
-                std::to_string(model.stateSeparation) + "\r\nUEFI                 = True\r\nVersion              = 2.0\r\n\r\n";
-    manifest += "[StoragePool]\r\nName = " + group->name + "\r\n\r\n";
-    for (std::size_t i = 0; i < group->stores.size(); ++i)
-    {
-        const LayoutStore& s = group->stores[i];
-        const unsigned long long storeSector = StoreSectorBytes(model, s);
-        manifest += "[StoragePoolStore]\r\n";
-        manifest += "IsMainOSStore                 = " + std::string(LowerText(s.storeType).find("mainos") != std::string::npos ? "True" : "False") + "\r\n";
-        manifest += "IsSpace                       = True\r\n";
-        manifest += "MinSectorCount                = " + std::to_string(s.hasSizeBytes ? s.sizeInBytes / (storeSector ? storeSector : 512) : s.sizeInSectors) + "\r\n";
-        manifest += "OnlyAllocateDefinedGptEntries = " + std::string(s.onlyAllocateDefinedGptEntries ? "True" : "False") + "\r\n";
-        manifest += "SectorSize                    = " + std::to_string(storeSector) + "\r\n";
-        manifest += "StoreId                       = " + s.id + "\r\n";
-        manifest += "StoreType                     = " + s.storeType + "\r\n\r\n";
-        for (const LayoutPartition& p : s.partitions)
-        {
-            std::uint64_t tmpValue = 0;
-            manifest += "[StoragePoolPartition]\r\n";
-            if (!p.byteAlignment.empty() && PackNum(p.byteAlignment, tmpValue)) manifest += "ByteAlignment      = " + std::to_string(tmpValue) + "\r\n";
-            if (!p.clusterSize.empty() && PackNum(p.clusterSize, tmpValue)) manifest += "ClusterSize        = " + std::to_string(tmpValue) + "\r\n";
-            manifest += "FileSystem         = " + (p.fileSystem.empty() ? std::string("NTFS") : p.fileSystem) + "\r\n";
-            manifest += "Name               = " + p.name + "\r\n";
-            manifest += "Primary            = " + p.name + "\r\n";
-            manifest += "Type               = " + p.type + "\r\n";
-            manifest += "UseAllSpace        = " + std::string(p.useAllSpace ? "True" : "False") + "\r\n\r\n";
-        }
-    }
-    const LayoutStore physStore = model.stores.empty() ? LayoutStore() : model.stores[0];
-    const unsigned long long physSector = physStore.hasSectorSize ? physStore.sectorSize : baseSector;
-    manifest += "[Store]\r\n";
-    if (!physStore.devicePath.empty()) manifest += "DevicePath                    = " + physStore.devicePath + "\r\n";
-    manifest += "IsMainOSStore                 = False\r\n";
-    manifest += "MinSectorCount                = " + std::to_string(physStore.hasSizeBytes ? physStore.sizeInBytes / (physSector ? physSector : 512) : physStore.sizeInSectors) + "\r\n";
-    manifest += "OnlyAllocateDefinedGptEntries = " + std::string(physStore.onlyAllocateDefinedGptEntries ? "True" : "False") + "\r\n";
-    manifest += "SectorSize                    = " + std::to_string(physSector) + "\r\n";
-    manifest += "StoreId                       = " + (physStore.id.empty() ? diskId : physStore.id) + "\r\n";
-    manifest += "StoreType                     = " + (physStore.storeType.empty() ? std::string("Default") : physStore.storeType) + "\r\n\r\n";
-    std::size_t scanned = 0;
-    for (const VhdPartition& part : physicalParts)
-    {
-        const LayoutPartition* layoutPart = nullptr;
-        for (const LayoutPartition& cand : physStore.partitions)
-            if (EqualsNoCase(cand.name, part.name)) { layoutPart = &cand; break; }
-        const std::string partType = (layoutPart != nullptr && !layoutPart->type.empty()) ? layoutPart->type : part.type;
-        manifest += "[Partition]\r\n";
-        if (layoutPart != nullptr && !layoutPart->fileSystem.empty()) manifest += "FileSystem   = " + layoutPart->fileSystem + "\r\n";
-        if (!part.id.empty()) manifest += "Id           = " + part.id + "\r\n";
-        manifest += "Name         = " + part.name + "\r\n";
-        manifest += "Primary      = " + part.name + "\r\n";
-        manifest += "TotalSectors = " + std::to_string(LowerText(part.name) == "ospool" ? 32ull : part.sizeBytes / 512ull) + "\r\n";
-        manifest += "Type         = " + partType + "\r\n";
-        manifest += "UsedSectors  = " + std::to_string(scanned < usedSectorsByPartition.size() ? usedSectorsByPartition[scanned] : 0) + "\r\n\r\n";
-        ++scanned;
-    }
-    OutLn("  manifest bytes: " + std::to_string(manifest.size()));
-
-    std::ofstream out(Utf8ToWide(outPath).c_str(), std::ios::binary | std::ios::trunc);
-    if (!out) { Err("create ffu failed: " + outPath); return 1; }
-
-    const unsigned int chunkBytes = 128u * 1024u;
-    std::vector<unsigned char> header;
-    PackU32(header, 32);
-    const char sig1[] = "SignedImage ";
-    header.insert(header.end(), sig1, sig1 + 12);
-    PackU32(header, chunkBytes);
-    PackU32(header, 0x800C);
-    PackU32(header, 0);
-    PackU32(header, 0);
-    while (header.size() % chunkBytes != 0) header.push_back(0);
-    PackU32(header, 24);
-    const char sig2[] = "ImageFlash  ";
-    header.insert(header.end(), sig2, sig2 + 12);
-    PackU32(header, static_cast<std::uint32_t>(manifest.size()));
-    PackU32(header, 128);
-    header.insert(header.end(), manifest.begin(), manifest.end());
-    while (header.size() % chunkBytes != 0) header.push_back(0);
-    out.write(reinterpret_cast<const char*>(header.data()), static_cast<std::streamsize>(header.size()));
-
-    for (std::size_t s = 0; s < spaceDevices.size(); ++s)
-    {
-        std::vector<unsigned char> meta;
-        PackU32(meta, 0);
-        PackU16(meta, 2);
-        PackU16(meta, 0);
-        PackU16(meta, 2);
-        PackU16(meta, 0);
-        for (int i = 0; i < 192; ++i) meta.push_back(0);
-        meta[12] = '*';
-        PackU32(meta, bytesPerBlock);
-        PackU32(meta, static_cast<std::uint32_t>(storeBlockIndices[s].size()));
-        PackU32(meta, static_cast<std::uint32_t>(storeBlockIndices[s].size() * 16));
-        PackU32(meta, 0);
-        PackU32(meta, 0);
-        PackU32(meta, 0);
-        PackU32(meta, 0);
-        PackU32(meta, 0);
-        PackU32(meta, 0);
-        PackU32(meta, 0);
-        PackU32(meta, 0);
-        PackU16(meta, static_cast<unsigned int>(spaceDevices.size()));
-        PackU16(meta, static_cast<unsigned int>(s + 1));
-        PackU64(meta, static_cast<std::uint64_t>(storeBlockIndices[s].size()) * bytesPerBlock);
-        PackU16(meta, 0);
-        for (std::size_t k = 0; k < storeBlockIndices[s].size(); ++k)
-        {
-            PackU32(meta, 1);
-            PackU32(meta, 1);
-            PackU32(meta, 0);
-            PackU32(meta, static_cast<std::uint32_t>(storeBlockIndices[s][k]));
-        }
-        while (meta.size() % bytesPerBlock != 0) meta.push_back(0);
-        out.write(reinterpret_cast<const char*>(meta.data()), static_cast<std::streamsize>(meta.size()));
-    }
-    for (std::size_t s = 0; s < spaceDevices.size(); ++s)
-    {
-        std::vector<unsigned char> block;
-        for (std::size_t k = 0; k < storeBlockIndices[s].size(); ++k)
-        {
-            std::string readError;
-            if (!PackReadRange(WideToUtf8(spaceDevices[s]), storeBlockIndices[s][k] * bytesPerBlock, bytesPerBlock, block, readError))
-            {
-                Err("read space block failed: " + readError);
-                return 1;
-            }
-            out.write(reinterpret_cast<const char*>(block.data()), static_cast<std::streamsize>(block.size()));
-        }
-    }
-    for (std::size_t p = 0; p < physicalParts.size(); ++p)
-    {
-        std::vector<unsigned char> block;
-        for (std::size_t k = 0; k < physIndices[p].size(); ++k)
-        {
-            const unsigned long long off = physicalParts[p].offsetBytes + physIndices[p][k] * bytesPerBlock;
-            std::string readError;
-            if (!PackReadRange(device, off, bytesPerBlock, block, readError))
-            {
-                Err("read physical block failed: " + readError);
-                return 1;
-            }
-            out.write(reinterpret_cast<const char*>(block.data()), static_cast<std::streamsize>(block.size()));
-        }
-    }
-    out.close();
-    OutLn("FFU written: " + outPath);
-
-    {
-        std::vector<std::string> detachReport;
-        std::string detachError;
-        PoolDetachSpaces(Utf8ToWide(device), widePool, poolVersion, Utf8ToWide(dir), spaceNames, detachReport, detachError);
-        for (const std::string& line : detachReport) OutLn("  " + line);
-    }
-    if (fromFile) { std::vector<std::string> rep; std::string err; VhdForceDetach(Utf8ToWide(image), false, rep, err); }
-    return 0;
-}
-
     static int CmdFfu(const std::vector<std::string>& args)
     {
         if (args.size() < 4)
         {
-            Err("用法：ffu info <file> | ffu manifest <file> --out <txt>");
+            Err("用法：ffu info <file> | ffu verify <file> | ffu manifest <file> --out <txt> | ffu pack --image <vhd> --layout <xml> --out <ffu>");
             return 2;
         }
         const std::string sub = args[2];
@@ -5933,63 +6500,33 @@ static int CmdFfuPack(const std::vector<std::string>& args)
         }
         if (file.empty()) { Err("ffu 缺少镜像文件"); return 2; }
 
-        std::ifstream in(Utf8ToWide(file).c_str(), std::ios::binary);
-        if (!in) { Err("ffu 打开失败：" + file); return 1; }
-        in.seekg(0, std::ios::end);
-        const std::uint64_t total = static_cast<std::uint64_t>(in.tellg());
-        in.seekg(0, std::ios::beg);
-        std::vector<unsigned char> head(4u * 1024u * 1024u, 0);
-        in.read(reinterpret_cast<char*>(head.data()), static_cast<std::streamsize>(head.size()));
-        const std::size_t got = static_cast<std::size_t>(in.gcount());
-        head.resize(got);
-
-        if (got < 0x20 || std::memcmp(head.data() + 4, "SignedImage ", 12) != 0)
+        if (sub == "verify")
         {
-            Err("不是 FFU（缺少 SignedImage 签名）：" + file);
-            return 1;
-        }
-        const std::uint32_t secSize = ReadU32At(head, 0);
-        const std::uint32_t chunkKiB = ReadU32At(head, 0x10);
-        const std::uint32_t hashAlg = ReadU32At(head, 0x14);
-        const std::uint32_t catalogSize = ReadU32At(head, 0x18);
-        const std::uint32_t hashTableSize = ReadU32At(head, 0x1C);
-
-        std::size_t imgBase = 0;
-        {
-            const char sig[] = "ImageFlash  ";
-            for (std::size_t i = 4; i + 12 <= head.size(); ++i)
+            std::vector<std::string> report;
+            std::string error;
+            const bool ok = FfuVerify(Utf8ToWide(file), report, error);
+            OutLn("校验 FFU：" + file);
+            for (std::size_t i = 0; i < report.size(); ++i) OutLn("  " + report[i]);
+            if (!ok)
             {
-                if (std::memcmp(head.data() + i, sig, 12) == 0) { imgBase = i - 4; break; }
+                Err(error.empty() ? std::string("哈希校验失败") : error);
+                return 1;
             }
+            return 0;
         }
-        if (imgBase == 0)
-        {
-            Err("FFU 里找不到 ImageFlash 镜像头");
-            return 1;
-        }
-        const std::uint32_t imgSize = ReadU32At(head, imgBase);
-        const std::uint32_t manifestLen = ReadU32At(head, imgBase + 0x10);
-        const std::uint32_t imgChunkKiB = ReadU32At(head, imgBase + 0x14);
-        const std::size_t manifestOff = imgBase + 0x18;
-        if (manifestOff + manifestLen > head.size())
-        {
-            Err("FFU manifest 超出读取窗口（ManifestLength 过大）");
-            return 1;
-        }
-        const std::string manifest(reinterpret_cast<const char*>(head.data() + manifestOff), manifestLen);
-
-        std::uint64_t payloadOff = manifestOff + manifestLen;
-        const std::uint64_t unit = static_cast<std::uint64_t>(imgChunkKiB ? imgChunkKiB : chunkKiB) * 1024ull;
-        if (unit > 0) { payloadOff = (payloadOff + unit - 1) / unit * unit; }
 
         if (sub == "manifest")
         {
             if (outPath.empty()) { Err("ffu manifest 需要 --out <txt>"); return 2; }
-            std::ofstream mout(Utf8ToWide(outPath).c_str(), std::ios::binary | std::ios::trunc);
-            if (!mout) { Err("写 manifest 失败：" + outPath); return 1; }
-            mout.write(manifest.data(), static_cast<std::streamsize>(manifest.size()));
-            mout.close();
-            OutLn("manifest 已写出：" + outPath + "（" + std::to_string(manifestLen) + " 字节）");
+            std::string manifest;
+            std::string error;
+            if (!FfuReadManifest(Utf8ToWide(file), manifest, error)) { Err(error); return 1; }
+            if (!WriteFileBytes(Utf8ToWide(outPath), manifest.data(), manifest.size(), error))
+            {
+                Err("写 manifest 失败：" + error);
+                return 1;
+            }
+            OutLn("manifest 已写出：" + outPath + "（" + std::to_string(manifest.size()) + " 字节）");
             return 0;
         }
         if (sub != "info")
@@ -5998,44 +6535,297 @@ static int CmdFfuPack(const std::vector<std::string>& args)
             return 2;
         }
 
+        FfuImageInfo info;
+        std::string error;
+        if (!FfuReadInfo(Utf8ToWide(file), info, error)) { Err(error); return 1; }
+
         char line[512];
-        OutLn("FFU：" + file + "（" + std::to_string(total) + " 字节）");
+        OutLn("FFU：" + file + "（" + std::to_string(info.fileBytes) + " 字节）");
         std::snprintf(line, sizeof(line), "  安全头：ByteCount=%u ChunkSize=%u KiB HashAlgorithm=0x%X CatalogSize=%u HashTableSize=%u",
-                      secSize, chunkKiB, hashAlg, catalogSize, hashTableSize);
+                      info.securityHeaderBytes, info.securityChunkKb, info.hashAlgorithmId, info.catalogBytes, info.hashTableBytes);
         OutLn(line);
         std::snprintf(line, sizeof(line), "  镜像头：ByteCount=%u ManifestLength=%u ChunkSize=%u KiB",
-                      imgSize, manifestLen, imgChunkKiB);
+                      info.imageHeaderBytes, info.manifestBytes, info.imageChunkKb);
         OutLn(line);
         std::snprintf(line, sizeof(line), "  manifest 偏移=0x%llX，payload 偏移=0x%llX，payload 大小=%llu",
-                      static_cast<unsigned long long>(manifestOff), static_cast<unsigned long long>(payloadOff),
-                      static_cast<unsigned long long>(total > payloadOff ? total - payloadOff : 0));
+                      static_cast<unsigned long long>(info.manifestOffset),
+                      static_cast<unsigned long long>(info.payloadOffset),
+                      static_cast<unsigned long long>(info.fileBytes > info.payloadOffset ? info.fileBytes - info.payloadOffset : 0));
         OutLn(line);
-
-        // 逐段统计（INI：[Section] + key=value）
-        std::size_t pos = 0;
-        std::string section;
-        std::size_t keys = 0;
-        int sections = 0;
-        while (pos <= manifest.size())
+        for (std::size_t i = 0; i < info.sections.size(); ++i)
+            OutLn("    段 " + info.sections[i].first + "：键 " + std::to_string(info.sections[i].second) + " 个");
+        OutLn("  manifest 段数：" + std::to_string(info.sections.size()));
+        return 0;
+    }
+    // AppX 落地：collect 只算清单（不碰镜像），install 直接 stage+commit 进 PreInstalled 分区。
+    // 真正的解包/复制/写 AppxAllUserStore.dat 都在 32 位 OcidAppX.exe 里（ADK 的 appximaging.dll
+    // 是 i386 托管程序集，x64 进程加载不了），本命令只负责"挂上 PreInstalled 卷 + 传清单"。
+    static int CmdAppx(const std::vector<std::string>& args)
+    {
+        if (args.size() < 3)
         {
-            const std::size_t nlpos = manifest.find('\n', pos);
-            std::string raw = manifest.substr(pos, nlpos == std::string::npos ? std::string::npos : nlpos - pos);
-            if (!raw.empty() && raw.back() == '\r') raw.pop_back();
-            pos = (nlpos == std::string::npos) ? manifest.size() + 1 : nlpos + 1;
-            const std::string trimmed = TrimSpaceAscii(raw);
-            if (trimmed.empty() || trimmed[0] == ';') continue;
-            if (trimmed.front() == '[' && trimmed.back() == ']')
-            {
-                if (!section.empty()) { OutLn("    段 " + section + "：键 " + std::to_string(keys) + " 个"); }
-                section = trimmed.substr(1, trimmed.size() - 2);
-                keys = 0;
-                ++sections;
-                continue;
-            }
-            if (!section.empty() && trimmed.find('=') != std::string::npos) ++keys;
+            Err("用法：appx collect|install --oem-input <OEMInput.xml> [--fm-dir <目录>] [--packages-root <目录>]");
+            Err("                       [--arch arm64] [--helper <OcidAppX.exe>] [--log <文件>]");
+            Err("      appx install 另需：--vhd <镜像> --layout <DeviceLayout.xml> [--dir <临时目录>] [--pool <池名>]");
+            return 2;
         }
-        if (!section.empty()) { OutLn("    段 " + section + "：键 " + std::to_string(keys) + " 个"); }
-        OutLn("  manifest 段数：" + std::to_string(sections));
+        const std::string sub = args[2];
+        if (sub != "collect" && sub != "install")
+        {
+            Err("appx 未知子命令：" + sub);
+            return 2;
+        }
+        std::string oemInput, fmDir, packagesRoot, arch = "arm64", helper, logPath;
+        std::string layoutPath, imageFile, directory = "ocid_appx", poolName;
+        std::size_t limit = 0;
+        for (std::size_t i = 3; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            auto next = [&](std::string& out) -> bool { if (i + 1 >= args.size()) return false; out = args[++i]; return true; };
+            if (a == "--oem-input") { if (!next(oemInput)) { Err("--oem-input 缺少值"); return 2; } }
+            else if (a == "--fm-dir") { if (!next(fmDir)) { Err("--fm-dir 缺少值"); return 2; } }
+            else if (a == "--packages-root") { if (!next(packagesRoot)) { Err("--packages-root 缺少值"); return 2; } }
+            else if (a == "--arch") { if (!next(arch)) { Err("--arch 缺少值"); return 2; } }
+            else if (a == "--helper") { if (!next(helper)) { Err("--helper 缺少值"); return 2; } }
+            else if (a == "--log") { if (!next(logPath)) { Err("--log 缺少值"); return 2; } }
+            else if (a == "--vhd") { if (!next(imageFile)) { Err("--vhd 缺少值"); return 2; } }
+            else if (a == "--layout") { if (!next(layoutPath)) { Err("--layout 缺少值"); return 2; } }
+            else if (a == "--dir") { if (!next(directory)) { Err("--dir 缺少值"); return 2; } }
+            else if (a == "--pool") { if (!next(poolName)) { Err("--pool 缺少值"); return 2; } }
+            else if (a == "--limit")
+            {
+                std::string value;
+                if (!next(value)) { Err("--limit 缺少值"); return 2; }
+                limit = static_cast<std::size_t>(std::strtoul(value.c_str(), nullptr, 10));
+            }
+            else { Err("appx 未知参数：" + a); return 2; }
+        }
+        if (oemInput.empty()) { Err("appx 需要 --oem-input <OEMInput.xml>"); return 2; }
+        if (helper.empty())
+        {
+            helper = WideToUtf8(ExeDirectory()) + "\\appx\\OcidAppX.exe";
+        }
+        if (logPath.empty() && !directory.empty())
+        {
+            logPath = directory + "\\appx-helper.log";
+        }
+
+        AppxRequest request;
+        request.oemInputPath = oemInput;
+        request.fmDir = fmDir;
+        request.packagesRoot = packagesRoot;
+        request.arch = arch;
+        request.helperPath = helper;
+        request.logPath = logPath;
+        {
+            OemInput oem;
+            std::string oemError;
+            if (LoadOemInput(oemInput, oem, oemError))
+            {
+                request.languages = oem.languages;
+            }
+        }
+
+        std::vector<std::string> report;
+        std::string error;
+        AppxPlan plan;
+        if (!AppxCollect(request, plan, report, error)) { Err(error); return 1; }        if (sub == "collect")
+        {
+            for (const std::string& line : report) OutLn(line);
+            for (std::size_t i = 0; i < plan.packages.size(); ++i)
+            {
+                const AppxPackageSpec& spec = plan.packages[i];
+                OutLn("  [" + std::to_string(i + 1) + "] " + spec.id + "  (" + spec.name + ")" +
+                      (spec.licensePath.empty() ? "  [framework]" : ""));
+            }
+            return 0;
+        }
+
+        // ---- install ----
+        if (imageFile.empty() || layoutPath.empty())
+        {
+            Err("appx install 需要 --vhd <镜像> 与 --layout <DeviceLayout.xml>");
+            return 2;
+        }
+        if (limit > 0)
+        {
+            std::vector<AppxPackageSpec> trimmed;
+            std::size_t taken = 0;
+            for (const AppxPackageSpec& spec : plan.packages)
+            {
+                if (spec.licensePath.empty()) { trimmed.push_back(spec); continue; }
+                if (taken < limit) { trimmed.push_back(spec); ++taken; }
+            }
+            plan.packages.swap(trimmed);
+            OutLn("[appx] --limit 生效：只取前 " + std::to_string(taken) + " 个 app（framework 全保留）");
+        }
+        for (const std::string& line : report) OutLn("  " + line);
+        LayoutModel model;
+        std::string loadError;
+        if (!LoadLayout(layoutPath, model, loadError)) { Err("读取布局失败：" + loadError); return 1; }
+        std::string poolError;
+        const LayoutPool* poolGroup = SelectLayoutPool(model, poolName, poolError);
+        if (poolGroup == nullptr) { Err(poolError); return 1; }
+        const LayoutStore* preInstalled = nullptr;
+        for (const LayoutStore& store : poolGroup->stores)
+        {
+            if (store.partitions.empty()) continue;
+            if (LowerText(store.storeType).find("preinstalled") != std::string::npos)
+            {
+                preInstalled = &store;
+                break;
+            }
+        }
+        if (preInstalled == nullptr)
+        {
+            Err("布局里没有 PreInstalled space（AppX 必须落在 PreInstalled 分区）");
+            return 1;
+        }
+        std::vector<std::pair<std::wstring, std::wstring> > spaces;
+        spaces.push_back(std::make_pair(Utf8ToWide(preInstalled->storeType), Utf8ToWide(preInstalled->partitions.front().name)));
+        // 用户要求：所有临时文件都留在工作目录（--dir），不要往 C 盘 %TEMP% 扔东西。
+        // helper（.NET）与它拉起的 MakeAppx 都继承这里的 TMP/TEMP。
+        {
+            const std::wstring tmpRoot = Utf8ToWide(directory) + L"\\tmp";
+            std::string tmpError;
+            if (EnsureDirectory(tmpRoot, tmpError))
+            {
+                SetEnvironmentVariableW(L"TMP", tmpRoot.c_str());
+                SetEnvironmentVariableW(L"TEMP", tmpRoot.c_str());
+                SetEnvironmentVariableW(L"TMPDIR", tmpRoot.c_str());
+            }
+            else
+            {
+                OutLn("[appx] 警告：创建临时目录失败：" + tmpError);
+            }
+        }
+        std::vector<std::vector<unsigned char> > storeIds;
+        std::vector<std::pair<std::wstring, std::wstring> > volumes;
+        std::vector<std::string> mountReport;
+        std::string mountError;
+        std::wstring baseDevice;
+        OutLn("[appx] 挂载 PreInstalled space ...");
+        const bool mounted = PoolMountSpaces(Utf8ToWide(imageFile), Utf8ToWide(poolGroup->name), LayoutPoolVersion(poolGroup, 24),
+                                             Utf8ToWide(directory), spaces, storeIds, volumes, mountReport, mountError,
+                                             &baseDevice);
+        for (const std::string& line : mountReport) OutLn("  " + line);
+        if (!mounted || volumes.empty())
+        {
+            Err("appx 挂载 PreInstalled 失败：" + mountError);
+            return 1;
+        }
+        std::wstring preInstalledPath = volumes.front().second;
+        if (!preInstalledPath.empty() && preInstalledPath.back() == L'\\')
+        {
+            preInstalledPath.resize(preInstalledPath.size() - 1);
+        }
+        // helper 是 .NET Framework：File/StreamReader 不接受 \\?\Volume{…} 前缀（"路径中具有非法字符"），
+        // 所以把卷挂成一个普通目录（E:\...\mnt\preinstalled\），交给 helper 的就是常规路径。
+        std::wstring mountDir = Utf8ToWide(directory) + L"\\mnt\\preinstalled";
+        std::string mountDirError;
+        bool mappedVolume = false;
+        if (EnsureDirectory(mountDir, mountDirError))
+        {
+            if (SetVolumeMountPointW((mountDir + L"\\").c_str(), (preInstalledPath + L"\\").c_str()) != 0)
+            {
+                mappedVolume = true;
+            }
+            else
+            {
+                OutLn("[appx] 警告：SetVolumeMountPoint 失败（win32=" + std::to_string(GetLastError()) +
+                      "），仍用卷路径交给 helper");
+            }
+        }
+        if (mappedVolume) preInstalledPath = mountDir;
+        request.preInstalledPath = WideToUtf8(preInstalledPath);
+        request.stagingDir = request.preInstalledPath + "\\Temp";
+        {
+            // 上一轮失败可能留下 <PreInstalled>\Temp 里的 staging（AppXImaging 只往里加不清理），
+            // 残留包会让 commit 扫到清单外的包并 Bailing out，所以每轮开工前先清空。
+            std::error_code ec;
+            std::filesystem::remove_all(std::filesystem::u8path(request.stagingDir), ec);
+            if (ec) OutLn("[appx] 清理旧暂存目录失败：" + ec.message());
+        }
+        std::string dirError;
+        if (!EnsureDirectory(preInstalledPath + L"\\Temp", dirError)) { Err("创建 AppX 暂存目录失败：" + dirError); return 1; }
+        OutLn("[appx] PreInstalled = " + request.preInstalledPath);
+
+        const bool installed = AppxInstall(request, plan, report, error);
+        if (!installed) Err(error);
+        for (const std::string& line : report) OutLn("  " + line);
+        {
+            // 无论成败都清掉 PreInstalled 上的 AppX 暂存目录（ImageApp 也不在镜像里留 Temp）。
+            std::error_code ec;
+            std::filesystem::remove_all(std::filesystem::u8path(request.stagingDir), ec);
+            if (ec) OutLn("[appx] 清理 " + request.stagingDir + " 失败：" + ec.message());
+            else OutLn("[appx] 已清理暂存目录 " + request.stagingDir);
+        }
+        // ADK 的 CommitAppXPackages 是 void，Bailing out 只打日志不抛异常 ⇒ 这里自己验产物。
+        bool committed = false;
+        if (installed)
+        {
+            const std::wstring windowsApps = preInstalledPath + L"\\WindowsApps";
+            WIN32_FIND_DATAW data;
+            HANDLE handle = FindFirstFileW((windowsApps + L"\\*").c_str(), &data);
+            std::size_t count = 0;
+            if (handle != INVALID_HANDLE_VALUE)
+            {
+                do
+                {
+                    if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) continue;
+                    if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) ++count;
+                } while (FindNextFileW(handle, &data) != 0);
+                FindClose(handle);
+            }
+            OutLn("[appx] 校验：" + WideToUtf8(windowsApps) + " 下 " + std::to_string(count) + " 个包目录");
+            committed = count > 0;
+            if (!committed) Err("AppX commit 没有产出任何 WindowsApps 包目录（可能是 Bailing out）");
+        }
+        if (mappedVolume)
+        {
+            if (DeleteVolumeMountPointW((mountDir + L"\\").c_str()) == 0)
+            {
+                OutLn("[appx] 警告：释放卷挂载点失败（win32=" + std::to_string(GetLastError()) + "）");
+            }
+            std::error_code ec2;
+            std::filesystem::remove_all(std::filesystem::u8path(WideToUtf8(mountDir)), ec2);
+        }
+        {
+            // 必须在本进程里把 space 正常卸载（逐 space DetachStorageSpace + CloseStoragePool(0)）：
+            // 进程硬退/被强杀时服务不会回写覆盖盘，下一进程再 Open 池就会卡死在内核里（历史坑）。
+            // detach 也顺带把基座盘卸掉，AppX 的落盘动作到此为止。
+            OutLn("[appx] 卸载 space 并释放池 ...");
+            std::vector<std::wstring> detachNames;
+            for (std::size_t i = 0; i < spaces.size(); ++i) { detachNames.push_back(spaces[i].first); }
+            std::vector<std::string> detachReport;
+            std::string detachError;
+            // 基座盘是本进程自己挂的：用文件路径再 OpenVirtualHardDisk 会失败（0x800700E0），
+            // 必须改用挂载时拿到的 \\.\PhysicalDriveN。
+            const std::wstring detachTarget = baseDevice.empty() ? Utf8ToWide(imageFile) : baseDevice;
+            if (!ocid::imaging::PoolDetachSpaces(detachTarget, Utf8ToWide(poolGroup->name),
+                                                 LayoutPoolVersion(poolGroup, 24), Utf8ToWide(directory),
+                                                 detachNames, detachReport, detachError))
+            {
+                Err("[appx] 卸载 space 失败：" + detachError);
+            }
+            else
+            {
+                for (const std::string& line : detachReport) OutLn("  " + line);
+                // 用设备路径 detach 时 PoolDetachSpaces 不会去卸基座 VHD 本身（文件仍被服务挂成盘），
+                // 下一轮 `pool mount --vhd` 会 OpenVirtualHardDisk failed，所以这里补一次强制卸载。
+                std::vector<std::string> forceReport;
+                std::string forceError;
+                if (!ocid::imaging::VhdForceDetach(Utf8ToWide(imageFile), true, forceReport, forceError))
+                {
+                    OutLn("[appx] 警告：卸载基座盘失败：" + forceError);
+                }
+                else
+                {
+                    for (const std::string& line : forceReport) OutLn("  " + line);
+                }
+            }
+        }
+        if (!installed || !committed) return 1;
         return 0;
     }
 
@@ -6055,6 +6845,36 @@ static int RunMain(int argc, wchar_t** wargv)
         return 2;
     }
     const std::string command = args[1];
+    {
+        // 阶段隔离：把本阶段（fe/rs5）的 ADK 根写进 OCID_ADK_ROOT，并拒绝跨阶段运行。
+        std::string stageError;
+        if (!ocid::imaging::StageApplyEnvironment(stageError))
+        {
+            Err(stageError);
+            return 2;
+        }
+    }
+    if (command == "stage")
+    {
+        const ocid::imaging::StageInfo& stage = ocid::imaging::StageCurrent();
+        OutLn(std::string("当前 exe 阶段：") + stage.name + "（" + stage.display + "）");
+        OutLn(std::string("  模块 DLL 后缀：ocid_*.") + stage.dllSuffix + ".wcos.dll");
+        OutLn(std::string("  ADK 根：") + stage.adkRoot + "（已写入本进程 OCID_ADK_ROOT）");
+        OutLn(std::string("  默认 OSVersion：") + stage.osVersion + "，默认架构：" + stage.arch);
+        OutLn(std::string("  池 API 家族：") + (stage.poolApi == ocid::imaging::StagePoolApiLegacyRS5
+                ? "RS5 legacy space API（CreateStorageSpace/GetStorageSpace/RemoveStorageSpace）"
+                : "WCOS storage spaces API（AttachStorageSpace/OpenStoragePool）"));
+        OutLn(std::string("  FFU manifest 版本：") + std::to_string(stage.ffuManifestVersion) +
+              "，AppX 落包：" + (stage.appxSupported ? "支持" : "不支持"));
+        std::vector<const ocid::imaging::StageInfo*> all;
+        ocid::imaging::StageAll(all);
+        OutLn("已知阶段：" + std::to_string(all.size()) + " 个");
+        for (const ocid::imaging::StageInfo* item : all)
+        {
+            OutLn(std::string("  ") + item->name + "：" + item->display + "（ADK " + item->adkRoot + "）");
+        }
+        return 0;
+    }
     if (command == "help" || command == "--help" || command == "-h" || command == "/?")
     {
         PrintUsage();
@@ -6087,11 +6907,13 @@ static int RunMain(int argc, wchar_t** wargv)
     }
     if (command == "vhd") return CmdVhd(args);
     if (command == "ffu") return CmdFfu(args);
+    if (command == "appx") return CmdAppx(args);
     if (command == "disk") return CmdDisk(args);
     if (command == "pool") return CmdPool(args);
     if (command == "wim") return CmdWim(args);
     if (command == "apply") return CmdApply(args);
-    if (command == "image") return CmdImageBuild(args);    if (command == "apply") return CmdApply(args);    if (command == "actionlist") return CmdActionList(args);
+    if (command == "image") return CmdImageBuild(args);
+    if (command == "actionlist") return CmdActionList(args);
     if (command == "doctor") return CmdDoctor(args);
     if (command == "layout")
     {

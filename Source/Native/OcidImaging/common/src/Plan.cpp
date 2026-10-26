@@ -682,6 +682,28 @@ bool BuildPlan(const PlanInput& input, PlanResult& result, std::string& err)
     std::set<std::string> seen;
     std::map<PackageSection, std::size_t> perSection;
 
+    // Language="*" 的包按「实际被选中的语言特性」展开，而不是 OEMInput <Languages> 的全集。
+    // 参照证据：OEMInput <Languages> 是 zh-CN(默认) + en-US，但 Features 只点了 Language.*.en-us，
+    // 于是 ActionList/PackageList/UpdateHistory 里 Microsoft-OneCoreUpdateOS-Product-Package
+    // 只有 arm64~~ 与 arm64~en-US~ 两份，没有 zh-CN 那份（194 cab → 193 包）。
+    std::vector<std::string> expandLanguages;
+    for (const std::string& feature : oem.features)
+    {
+        const std::string lower = Lower(Trim(feature));
+        if (lower.compare(0, 9, "language.") != 0) continue;
+        const std::size_t dot = lower.find_last_of('.');
+        if (dot == std::string::npos) continue;
+        const std::string lang = Trim(feature).substr(dot + 1);
+        if (lang.empty() || lang.find_first_of("-.0123456789") != std::string::npos) continue;
+        bool known = false;
+        for (const std::string& existing : expandLanguages)
+        {
+            if (Upper(existing) == Upper(lang)) { known = true; break; }
+        }
+        if (!known) expandLanguages.push_back(lang);
+    }
+    if (expandLanguages.empty()) expandLanguages = oem.languages;
+
     for (const std::string& fmPath : fmPaths)
     {
         FmFile fm;
@@ -706,7 +728,7 @@ bool BuildPlan(const PlanInput& input, PlanResult& result, std::string& err)
                     continue;
                 }
                 ++result.stats.selected;
-                for (PackageRef& ref : ExpandPackage(package, section.section, fm.id, fm.file, oem.languages, input.arch))
+                for (PackageRef& ref : ExpandPackage(package, section.section, fm.id, fm.file, expandLanguages, input.arch))
                 {
                     ++result.stats.expanded;
                     const std::string archToken = Lower(ArchOfCab(ref.cab));

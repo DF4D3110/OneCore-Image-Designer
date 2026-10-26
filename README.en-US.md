@@ -277,9 +277,14 @@ FeatureManifest), `ocid_cab.wcos.dll` (NONE/MSZIP decoders plus LZX/Quantum thro
 FDI), `ocid_vhd.wcos.dll` (create/attach/detach virtual disks, GPT/MBR writing and read-back, physical disks
 rejected by design), `ocid_pool.wcos.dll` (storage pools through `ImageStorageService.dll`: pool, spaces,
 per-space GPT and formatting, `pool finalize` with WOF/drive letters, and `apply` through UpdateDLL),
+`ocid_update.wcos.dll` (offline install through the managed `UpdateDLL.dll`), `ocid_ffu.wcos.dll` (FFU
+container: manifest, store metadata, three-phase payload and SHA256 hash table — `pack`/`info`/`verify`),
+`ocid_appx.wcos.dll` (AppX: package selection from the FMs, helper list, and the 32-bit `OcidAppX.exe` that
+hosts the ADK `appximaging.dll`),
 and the `ocid_imagegen.exe` console (`plan`, `packagelist`, `devicedb`, `actionlist`,
 `layout show|merge|plan|validate|check`, `disk plan|build|verify`, `pool plan|build|prepare|finalize|detach`,
-`vhd create|attach|detach|info`, `image build`, `cab list|entry|extract`, `schema validate|pick`).
+`vhd create|attach|detach|info`, `ffu pack|info|verify|manifest`, `appx collect|install`, `image build`,
+`cab list|entry|extract`, `schema validate|pick`).
 
 Selection matches the reference runs entry-for-entry and in the same order: 10.0.20274 (amd64) 181/181, and
 10.0.20279 (arm64) 194/194. Inputs are validated against XSDs extracted from the ADK assemblies and shipped

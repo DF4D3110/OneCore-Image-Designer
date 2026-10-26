@@ -266,7 +266,10 @@ ocid_wssm pcm build a.manifest out.pcm
 | `ocid_cab.wcos.dll` | CAB 读取：NONE/MSZIP 自研解码，LZX/Quantum 走系统 `cabinet.dll` 的 FDI |
 | `ocid_vhd.wcos.dll` | 虚拟磁盘：创建/挂载/卸载、GPT/MBR 写入与回读；物理盘一律拒绝（`BusType` 门禁） |
 | `ocid_pool.wcos.dll` | 存储池：调 `ImageStorageService.dll` 建池/建 space、space 内写 GPT 与格式化 |
-| `ocid_imagegen.exe` | 入口：`plan` / `packagelist` / `layout ...` / `disk plan|build` / `pool plan|build|prepare` / `vhd ...` / `cab ...` / `schema ...` / `version` / `help` |
+| `ocid_update.wcos.dll` | 落包：托管 `UpdateDLL.dll`（Initialize/PrepareUpdate/ExecuteUpdate） |
+| `ocid_ffu.wcos.dll` | FFU 容器：manifest + store 元数据 + 三阶段 payload + SHA256 哈希表，`pack`/`info`/`verify` |
+| `ocid_appx.wcos.dll` | AppX：从 FM 收包、写 helper 清单，驱动 32 位 `OcidAppX.exe`（托管 ADK `appximaging.dll`） |
+| `ocid_imagegen.exe` | 入口：`plan` / `packagelist` / `devicedb` / `actionlist` / `layout ...` / `disk plan|build|verify` / `pool ...` / `vhd ...` / `cab ...` / `schema ...` / `ffu ...` / `appx ...` / `image build` / `version` / `help` |
 
 ```powershell
 Source\Native\build-imaging.ps1              # -> Source\Native\Output\Imaging\ocid_imagegen.exe
@@ -286,6 +289,15 @@ ocid_imagegen image build --layout DeviceLayout.xml --outdir out [--packages <�
 ocid_imagegen vhd create|attach|detach|info <file.vhdx>
 ocid_imagegen cab extract a.cab --out dir
 ocid_imagegen schema validate OEMInput.xml --schema Schemas\adk\OEMInput.V2.OEMInputV2.xsd
+ocid_imagegen devicedb --oem-input OEMInput.xml --cabs <包集目录> --fm-dir ProcessedFiles --arch arm64 --build-info 10.0.20279.1002 --out DeviceDB.xml [--drivers <BSP 驱动目录>]
+ocid_imagegen actionlist --oem-input OEMInput.xml --fm-dir ProcessedFiles --packages <包集目录> --out ActionList.xml
+ocid_imagegen ffu pack --image disks\Default.vhd --layout DeviceLayout.xml --out Flash.ffu --arch arm64
+ocid_imagegen ffu info Flash.ffu          # 安全头/镜像头/manifest/payload 偏移与大小
+ocid_imagegen ffu verify Flash.ffu        # 按 128 KiB 一块复核 SHA256 哈希表
+ocid_imagegen appx collect --oem-input OEMInput.xml --fm-dir ProcessedFiles --packages-root <AppX 包根> --arch arm64
+ocid_imagegen appx install --vhd disks\Default.vhdx --layout DeviceLayout.xml --oem-input OEMInput.xml --fm-dir ProcessedFiles --packages-root <AppX 包根> --arch arm64
+ocid_imagegen image build --layout DeviceLayout.xml --outdir out [--packages <包目录> --action-list <xml> --oem-input <xml>] [--appx-root <目录> --appx-fm-dir <目录>] [--no-appx]
+                                                                            # 一条命令：组装硬盘 -> 建池格式化 -> 落包 -> 合并覆盖盘 -> AppX -> 校验
 ```
 
 选包结果与真机参照**逐条同序**：10.0.20274（amd64）181/181、10.0.20279（arm64）194/194。输入校验用 ADK
