@@ -228,7 +228,10 @@
                                 <TabPanel IsItemsHost="True" Margin="2,2,0,0" KeyboardNavigation.TabIndex="1"/>
                             </Border>
                             <Border Background="{TemplateBinding Background}">
-                                <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent"/>
+                                <ContentPresenter x:Name="PART_SelectedContentHost"
+                                                  ContentSource="SelectedContent"
+                                                  HorizontalAlignment="Stretch"
+                                                  VerticalAlignment="Stretch"/>
                             </Border>
                         </DockPanel>
                     </ControlTemplate>

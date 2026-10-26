@@ -77,7 +77,8 @@
             <views:UpdateAppView/>
         </DataTemplate>
         <DataTemplate DataType="{x:Type vm:CatalogDownloadViewModel}">
-            <views:CatalogDownloadView/>
+            <views:CatalogDownloadView VerticalAlignment="Top"
+                                       HorizontalAlignment="Stretch"/>
         </DataTemplate>
     </Window.Resources>
     <Window.DataContext>
