@@ -10,7 +10,7 @@ using System.Text.RegularExpressions;
 namespace OneCore_Image_Designer.Services;
 
 public sealed record MicrosoftCatalogSearchOptions(
-    string Search,
+    string Search = "",
     string Architecture = "All",
     string? OperatingSystem = null,
     string? Version = null,
@@ -18,7 +18,9 @@ public sealed record MicrosoftCatalogSearchOptions(
     DateTime? FromDate = null,
     DateTime? ToDate = null,
     bool IncludePreview = false,
-    string? ProductFamily = null);
+    string? ProductFamily = null,
+    string? KbNumber = null,
+    string? Language = null);
 
 public sealed record MicrosoftCatalogFile(
     string Name,
@@ -41,10 +43,15 @@ public sealed record MicrosoftCatalogUpdate(
     DateTime? LastUpdated,
     string Version,
     string Size,
-    IReadOnlyList<MicrosoftCatalogFile> Files)
+    IReadOnlyList<MicrosoftCatalogFile> Files,
+    string Source = "Microsoft Update Catalog",
+    string? KbNumber = null,
+    string? Platform = null)
 {
     public string DateDisplay => LastUpdated?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? "未知";
     public string FileSummary => Files.Count == 0 ? "未读取文件" : $"{Files.Count} 个文件";
+    public string KbDisplay => string.IsNullOrWhiteSpace(KbNumber) ? "—" : KbNumber;
+    public string PlatformDisplay => string.IsNullOrWhiteSpace(Platform) ? Products : Platform;
 }
 
 public sealed record CatalogDownloadItem(
@@ -70,11 +77,11 @@ public sealed class MicrosoftCatalogService
         IProgress<string>? log = null,
         CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(options.Search))
-            throw new ArgumentException("请输入 Microsoft Update Catalog 搜索关键词。", nameof(options));
-
         var query = BuildQuery(options);
-        log?.Report($"正在查询 Microsoft Update Catalog：{options.Search}");
+        if (query.Length == 0)
+            throw new ArgumentException("请输入关键词、KB、版本，或选择产品/系统/架构等查询条件。", nameof(options));
+
+        log?.Report($"正在查询 Microsoft Update Catalog：{query}");
         using var response = await Http.GetAsync(
             $"https://www.catalog.update.microsoft.com/Search.aspx?q={Uri.EscapeDataString(query)}",
             HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
@@ -95,15 +102,18 @@ public sealed class MicrosoftCatalogService
             if (string.IsNullOrWhiteSpace(guid)) continue;
             var title = Clean(row.Groups["title"].Value);
             if (title.Length == 0) continue;
+            var platform = Clean(row.Groups["products"].Value);
             list.Add(new MicrosoftCatalogUpdate(
                 guid,
                 title,
-                Clean(row.Groups["products"].Value),
+                platform,
                 Clean(row.Groups["classification"].Value),
                 ParseDate(Clean(row.Groups["date"].Value)),
                 Clean(row.Groups["version"].Value),
                 Clean(row.Groups["size"].Value),
-                Array.Empty<MicrosoftCatalogFile>()));
+                Array.Empty<MicrosoftCatalogFile>(),
+                KbNumber: ExtractKb(title),
+                Platform: platform));
         }
         return list
             .GroupBy(x => x.Guid, StringComparer.OrdinalIgnoreCase)
@@ -133,19 +143,22 @@ public sealed class MicrosoftCatalogService
         return update with { Files = files.DistinctBy(x => x.Url).ToList() };
     }
 
-    private static string BuildQuery(MicrosoftCatalogSearchOptions options)
+    public static string BuildQuery(MicrosoftCatalogSearchOptions options)
     {
-        var parts = new List<string> { options.Search.Trim() };
+        var parts = new List<string>();
+        AddPart(parts, options.Search);
+        AddPart(parts, options.KbNumber);
         if (!string.IsNullOrWhiteSpace(options.ProductFamily) &&
             !string.Equals(options.ProductFamily, "全部产品", StringComparison.OrdinalIgnoreCase))
-            parts.Add(options.ProductFamily.Trim());
+            AddPart(parts, options.ProductFamily);
         if (!string.IsNullOrWhiteSpace(options.OperatingSystem) &&
             !string.Equals(options.OperatingSystem, "全部系统", StringComparison.OrdinalIgnoreCase))
-            parts.Add(options.OperatingSystem.Trim());
-        if (!string.IsNullOrWhiteSpace(options.Version)) parts.Add(options.Version.Trim());
+            AddPart(parts, options.OperatingSystem);
+        AddPart(parts, options.Version);
         if (!string.Equals(options.Architecture, "All", StringComparison.OrdinalIgnoreCase))
-            parts.Add(options.Architecture.Trim());
-        if (!string.IsNullOrWhiteSpace(options.UpdateType)) parts.Add(options.UpdateType.Trim());
+            AddPart(parts, options.Architecture);
+        AddPart(parts, options.UpdateType);
+        AddPart(parts, options.Language);
         return string.Join(' ', parts);
     }
 
@@ -154,10 +167,36 @@ public sealed class MicrosoftCatalogService
         if (!options.IncludePreview && update.Title.Contains("Preview", StringComparison.OrdinalIgnoreCase)) return false;
         if (options.FromDate is { } from && update.LastUpdated is { } date && date < from.Date) return false;
         if (options.ToDate is { } to && update.LastUpdated is { } date2 && date2 > to.Date.AddDays(1).AddTicks(-1)) return false;
-        return string.IsNullOrWhiteSpace(options.UpdateType) ||
-               update.Classification.Contains(options.UpdateType, StringComparison.OrdinalIgnoreCase) ||
-               update.Title.Contains(options.UpdateType, StringComparison.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(options.UpdateType) &&
+            !update.Classification.Contains(options.UpdateType, StringComparison.OrdinalIgnoreCase) &&
+            !update.Title.Contains(options.UpdateType, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (!string.IsNullOrWhiteSpace(options.KbNumber) &&
+            !string.Equals(NormalizeKb(options.KbNumber), NormalizeKb(update.KbNumber), StringComparison.OrdinalIgnoreCase) &&
+            !update.Title.Contains(options.KbNumber.Trim(), StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (!string.IsNullOrWhiteSpace(options.Version) &&
+            !update.Version.Contains(options.Version.Trim(), StringComparison.OrdinalIgnoreCase) &&
+            !update.Title.Contains(options.Version.Trim(), StringComparison.OrdinalIgnoreCase))
+            return false;
+        return string.IsNullOrWhiteSpace(options.Language) ||
+               update.Title.Contains(options.Language, StringComparison.OrdinalIgnoreCase) ||
+               update.Products.Contains(options.Language, StringComparison.OrdinalIgnoreCase);
     }
+
+    private static void AddPart(List<string> parts, string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value)) parts.Add(value.Trim());
+    }
+
+    private static string? ExtractKb(string title)
+    {
+        var match = Regex.Match(title, @"\bKB\d{4,8}\b", RegexOptions.IgnoreCase);
+        return match.Success ? match.Value.ToUpperInvariant() : null;
+    }
+
+    private static string NormalizeKb(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim().ToUpperInvariant().Replace("KB", string.Empty, StringComparison.Ordinal);
 
     private static HttpClient CreateClient()
     {

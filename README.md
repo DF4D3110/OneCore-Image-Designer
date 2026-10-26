@@ -36,6 +36,10 @@ C++（见[自带服务栈](#自带服务栈进行中)）。
 UUP 的查询与下载只会在用户主动发起时进行；启动时不查询、不下载任何东西。
 Microsoft 更新目录下载器同样只在用户主动查询/下载时联网；若发布包包含经过许可审查的
 `Tools\aria2c\aria2c.exe`，会优先使用 aria2 的分段/断点下载，否则自动回退内置 HttpClient 下载。
+查询条件中的关键词、KB 和版本均为可选项；也可以只选择产品/平台、系统版本或架构。
+目录筛选覆盖 Windows 历史版本、Windows Phone/Mobile、Windows CE/Embedded、IoT、HoloLens，
+以及 Office、SQL Server、Exchange、Visual Studio、.NET、Edge、Defender 和驱动等 Microsoft 产品。
+不填写版本或 KB 时不会默认限制到当前 Windows 版本，而是返回在线目录可提供的全部匹配版本。
 
 ## 构建与运行
 
@@ -92,7 +96,7 @@ dotnet run --project ".\Tests\OneCore.Image.Designer.OfflineTests.csproj" --conf
 | CBS | `Views/Cbs/` | 对已挂载镜像做 CBS 服务。 |
 | FFU 浏览 | `Views/FFUBrowser/` | 浏览 FFU 分区，带十六进制查看器。 |
 | updateapp | `Views/UpdateAppView.xaml` | 派发各版本专属的 `updateapp.exe` 命令：按该版本的官方用法文本逐版本渲染，每个命令带参数模板、分类与风险等级。 |
-| Microsoft 更新目录 | `Views/CatalogDownloadView.xaml` | 原生查询 Microsoft Update Catalog，按系统/架构筛选更新，读取 MSU/CAB 文件明细并下载到本地；aria2 可用时优先分段/断点下载，失败自动回退内置下载器。 |
+| Microsoft 更新目录 | `Views/CatalogDownloadView.xaml` | 原生在线查询 Microsoft Update Catalog，关键词/KB/版本可选，覆盖旧 Windows、Phone/Mobile、CE/Embedded、IoT、HoloLens、Office、SQL、开发工具和驱动；读取 MSU/CAB 文件明细并下载到本地；aria2 可用时优先分段/断点下载，失败自动回退内置下载器。 |
 | UUP | `Views/UupView.xaml` | 按 SKU/架构查询微软 UUP（AMD64、ARM64、x86、ARM）；高级选项允许填写设备版本、通道和分支，不填分支时自动扫描一组已知 Retail/Insider 分支组合。目标 NT Build 与标题关键词用于本地筛选，下载语言从更新元数据读取并可选择，支持快照和源码构建的 ISO 转换器。查询、下载和转换均在后台进程执行，日志显示在单独窗口。 |
 | SxS | `Views/SxsView.xaml` | 对选定镜像与输出目录做**不执行**的预检/预览：不跑脚本，不产生输出。 |
 | addonkit | `Views/AddonKitView.xaml` | 微软 `iot-adk-addonkit` 前端：模块/ADK 状态、示例工作区发现、预检门禁，以及提权的一键构建命令并实时回传日志。 |

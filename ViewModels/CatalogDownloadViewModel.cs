@@ -19,12 +19,30 @@ public partial class CatalogDownloadViewModel : ObservableObject
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SearchCatalogCommand))]
     private string _search = string.Empty;
-    [ObservableProperty] private string _architecture = "All";
-    [ObservableProperty] private string _operatingSystem = "全部系统";
-    [ObservableProperty] private string _productFamily = "全部产品";
-    [ObservableProperty] private string _version = string.Empty;
-    [ObservableProperty] private string _updateType = string.Empty;
-    [ObservableProperty] private bool _includePreview;
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SearchCatalogCommand))]
+    private string _kbNumber = string.Empty;
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SearchCatalogCommand))]
+    private string _architecture = "All";
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SearchCatalogCommand))]
+    private string _operatingSystem = "全部系统";
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SearchCatalogCommand))]
+    private string _productFamily = "全部产品";
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SearchCatalogCommand))]
+    private string _version = string.Empty;
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SearchCatalogCommand))]
+    private string _language = "全部语言";
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SearchCatalogCommand))]
+    private string _updateType = string.Empty;
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SearchCatalogCommand))]
+    private bool _includePreview;
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SearchCatalogCommand))]
     [NotifyCanExecuteChangedFor(nameof(CancelCommand))]
@@ -43,16 +61,25 @@ public partial class CatalogDownloadViewModel : ObservableObject
     public ObservableCollection<MicrosoftCatalogFile> Files { get; } = new();
     public string[] ArchitectureChoices { get; } = ["All", "x86", "x64", "AMD64", "IA64", "ARM", "ARM64"];
     public string[] ProductFamilyChoices { get; } =
-        ["全部产品", "Windows", "Office", "SQL Server", "Visual Studio", ".NET", "Microsoft Edge", "Drivers"];
+        ["全部产品", "Windows", "Windows Phone / Mobile", "Windows CE / Embedded",
+         "Windows IoT", "HoloLens", "OneCore / UUP", "Office", "SQL Server",
+         "Exchange", "Visual Studio", ".NET", "Microsoft Edge", "Defender",
+         "Drivers", "Other Microsoft Software"];
     public string[] OperatingSystemChoices { get; } =
         ["全部系统", "Windows 2000", "Windows XP", "Windows Server 2003", "Windows Vista",
          "Windows 7", "Windows 8", "Windows 8.1", "Windows 10", "Windows 11",
          "Windows Server 2008", "Windows Server 2012", "Windows Server 2016",
-         "Windows Server 2019", "Windows Server 2022", "Windows Server 2025"];
+         "Windows Server 2019", "Windows Server 2022", "Windows Server 2025",
+         "Windows Phone 7", "Windows Phone 8", "Windows Phone 8.1", "Windows 10 Mobile",
+         "Windows CE", "Windows Embedded", "Windows 10 IoT Core", "Windows 10 IoT Enterprise",
+         "Windows 11 IoT Enterprise", "HoloLens", "HoloLens 2"];
     public string[] UpdateTypeChoices { get; } =
         ["", "Security Updates", "Updates", "Critical Updates", "Feature Packs",
          "Service Packs", "Tools", "Update Rollups", "Cumulative Updates",
          "Security Quality Updates", "Driver Updates"];
+    public string[] LanguageChoices { get; } =
+        ["全部语言", "English", "Chinese (Simplified)", "Chinese (Traditional)", "Japanese",
+         "Korean", "German", "French", "Spanish", "Russian", "Arabic"];
     public string EngineName => _downloader.EngineName;
     public string ResultCountText => $"{Updates.Count} 条更新";
     public bool HasUpdates => Updates.Count > 0;
@@ -73,7 +100,8 @@ public partial class CatalogDownloadViewModel : ObservableObject
             Files.Clear();
             var result = await _catalog.SearchAsync(new MicrosoftCatalogSearchOptions(
                 Search.Trim(), Architecture, OperatingSystem, Version, UpdateType,
-                IncludePreview: IncludePreview, ProductFamily: ProductFamily),
+                IncludePreview: IncludePreview, ProductFamily: ProductFamily,
+                KbNumber: KbNumber, Language: Language == "全部语言" ? null : Language),
                 CreateLogProgress(), token);
             foreach (var update in result) Updates.Add(update);
             Status = $"查询完成：{Updates.Count} 条更新";
@@ -143,7 +171,17 @@ public partial class CatalogDownloadViewModel : ObservableObject
         }
     }
 
-    private bool CanSearch() => !IsBusy && !string.IsNullOrWhiteSpace(Search);
+    private bool CanSearch() => !IsBusy &&
+        !string.IsNullOrWhiteSpace(MicrosoftCatalogService.BuildQuery(new MicrosoftCatalogSearchOptions(
+            Search: Search,
+            Architecture: Architecture,
+            OperatingSystem: OperatingSystem,
+            Version: Version,
+            UpdateType: UpdateType,
+            IncludePreview: IncludePreview,
+            ProductFamily: ProductFamily,
+            KbNumber: KbNumber,
+            Language: Language == "全部语言" ? null : Language)));
     private bool CanCancel() => IsBusy;
     private bool CanDownload() => !IsBusy && Files.Count > 0;
     [RelayCommand]

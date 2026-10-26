@@ -31,13 +31,15 @@
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="2.2*"/>
+                    <ColumnDefinition Width="2*"/>
+                    <ColumnDefinition Width="1.15*"/>
                     <ColumnDefinition Width="1.25*"/>
                     <ColumnDefinition Width="1.25*"/>
-                    <ColumnDefinition Width="1.2*"/>
+                    <ColumnDefinition Width="1.15*"/>
+                    <ColumnDefinition Width="1.15*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <StackPanel Grid.ColumnSpan="5">
+                <StackPanel Grid.ColumnSpan="7">
                     <TextBlock Text="关键词（可输入 KB、版本、产品名称或完整 Catalog 标题）"
                                Foreground="{StaticResource ICDSubtle}"/>
                     <TextBox Text="{Binding Search, UpdateSourceTrigger=PropertyChanged}"
@@ -56,10 +58,19 @@
                     <ComboBox ItemsSource="{Binding ArchitectureChoices}" SelectedItem="{Binding Architecture}" Margin="0,3,0,0"/>
                 </StackPanel>
                 <StackPanel Grid.Row="1" Grid.Column="3" Margin="4,8,8,0">
-                    <TextBlock Text="版本 / Build / 类型" Foreground="{StaticResource ICDSubtle}"/>
+                    <TextBlock Text="版本 / Build" Foreground="{StaticResource ICDSubtle}"/>
                     <TextBox Text="{Binding Version, UpdateSourceTrigger=PropertyChanged}" Margin="0,3,0,0"/>
                 </StackPanel>
-                <StackPanel Grid.Row="1" Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Bottom" Margin="4,8,0,0">
+                <StackPanel Grid.Row="1" Grid.Column="4" Margin="4,8,8,0">
+                    <TextBlock Text="KB 编号" Foreground="{StaticResource ICDSubtle}"/>
+                    <TextBox Text="{Binding KbNumber, UpdateSourceTrigger=PropertyChanged}" Margin="0,3,0,0"
+                             ToolTip="可选，例如 KB5065426"/>
+                </StackPanel>
+                <StackPanel Grid.Row="1" Grid.Column="5" Margin="4,8,8,0">
+                    <TextBlock Text="语言" Foreground="{StaticResource ICDSubtle}"/>
+                    <ComboBox ItemsSource="{Binding LanguageChoices}" SelectedItem="{Binding Language}" Margin="0,3,0,0"/>
+                </StackPanel>
+                <StackPanel Grid.Row="1" Grid.Column="6" Orientation="Horizontal" VerticalAlignment="Bottom" Margin="4,8,0,0">
                     <CheckBox Content="Preview" IsChecked="{Binding IncludePreview}" VerticalAlignment="Center" Margin="0,0,10,0"/>
                     <Button Content="查询" Command="{Binding SearchCatalogCommand}"
                             Style="{StaticResource ICDToolbarPrimaryButton}" Margin="0,0,6,0"/>
@@ -85,8 +96,9 @@
                               SelectionMode="Single" EnableRowVirtualization="True"
                               HeadersVisibility="Column">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="标题" Binding="{Binding Title}" Width="2.5*"/>
-                            <DataGridTextColumn Header="产品" Binding="{Binding Products}" Width="1.4*"/>
+                            <DataGridTextColumn Header="标题" Binding="{Binding Title}" Width="2.2*"/>
+                            <DataGridTextColumn Header="KB" Binding="{Binding KbDisplay}" Width="0.7*"/>
+                            <DataGridTextColumn Header="产品 / 平台" Binding="{Binding PlatformDisplay}" Width="1.4*"/>
                             <DataGridTextColumn Header="分类" Binding="{Binding Classification}" Width="1.2*"/>
                             <DataGridTextColumn Header="日期" Binding="{Binding DateDisplay}" Width="*"/>
                             <DataGridTextColumn Header="文件" Binding="{Binding FileSummary}" Width="*"/>
